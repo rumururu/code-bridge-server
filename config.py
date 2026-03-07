@@ -5,6 +5,9 @@ from typing import Any
 
 import yaml
 
+# Server version
+VERSION = "1.0.0"
+
 
 class Config:
     """Server configuration from config.yaml."""
@@ -16,6 +19,7 @@ class Config:
 
         self._config = self._load_config(config_path)
         self._migration_done = False
+        self._runtime_port: int | None = None  # CLI override
 
     def _load_config(self, path: Path | str) -> dict[str, Any]:
         """Load configuration from YAML file."""
@@ -26,13 +30,72 @@ class Config:
         with open(path, "r") as f:
             return yaml.safe_load(f)
 
+    def _get_server_value(self, key: str, default: Any) -> Any:
+        """Get server section value with fallback."""
+        return self._config.get("server", {}).get(key, default)
+
+    @staticmethod
+    def _parse_int(value: Any, default: int, *, minimum: int | None = None) -> int:
+        """Parse integer config value with optional lower bound."""
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        if minimum is not None:
+            parsed = max(parsed, minimum)
+        return parsed
+
+    @staticmethod
+    def _parse_float(value: Any, default: float, *, minimum: float | None = None) -> float:
+        """Parse float config value with optional lower bound."""
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = default
+        if minimum is not None:
+            parsed = max(parsed, minimum)
+        return parsed
+
     @property
     def host(self) -> str:
-        return self._config.get("server", {}).get("host", "0.0.0.0")
+        return self._get_server_value("host", "0.0.0.0")
 
     @property
     def port(self) -> int:
-        return self._config.get("server", {}).get("port", 8080)
+        """Legacy port property. Returns dashboard_port for backward compatibility."""
+        return self.dashboard_port
+
+    @property
+    def dashboard_port(self) -> int:
+        """Dashboard port (localhost only, not exposed via tunnel).
+
+        Default: 8766
+        """
+        import os
+        env_port = os.environ.get("CODEBRIDGE_DASHBOARD_PORT")
+        if env_port:
+            return int(env_port)
+        if self._runtime_port is not None:
+            return self._runtime_port
+        return self._get_server_value("dashboard_port", 8766)
+
+    @property
+    def api_port(self) -> int:
+        """API port (exposed via tunnel for external access).
+
+        Default: dashboard_port + 1
+        """
+        import os
+        env_port = os.environ.get("CODEBRIDGE_API_PORT")
+        if env_port:
+            return int(env_port)
+        return self._get_server_value("api_port", self.dashboard_port + 1)
+
+    def set_runtime_port(self, port: int) -> None:
+        """Set runtime dashboard port override (from CLI --port argument)."""
+        import os
+        os.environ["CODEBRIDGE_DASHBOARD_PORT"] = str(port)
+        self._runtime_port = port
 
     @property
     def api_key(self) -> str:
@@ -43,57 +106,80 @@ class Config:
     @property
     def cors_origins(self) -> list[str]:
         """Get CORS allowed origins. Defaults to ["*"] for development."""
-        return self._config.get("server", {}).get("cors_origins", ["*"])
+        return self._get_server_value("cors_origins", ["*"])
 
     @property
     def debug(self) -> bool:
         """Get debug mode. Defaults to True."""
-        return self._config.get("server", {}).get("debug", True)
+        return self._get_server_value("debug", True)
 
     @property
     def log_level(self) -> str:
         """Get log level. Defaults to 'info'."""
-        return self._config.get("server", {}).get("log_level", "info")
+        return self._get_server_value("log_level", "info")
 
     @property
     def weekly_budget_usd(self) -> float:
         """Weekly budget in USD used for usage percentage display."""
-        raw_value = self._config.get("server", {}).get("weekly_budget_usd", 100.0)
-        try:
-            value = float(raw_value)
-        except (TypeError, ValueError):
-            value = 100.0
-        return max(value, 0.0)
+        raw_value = self._get_server_value("weekly_budget_usd", 100.0)
+        return self._parse_float(raw_value, 100.0, minimum=0.0)
 
     @property
     def usage_window_days(self) -> int:
         """Rolling usage window in days."""
-        raw_value = self._config.get("server", {}).get("usage_window_days", 7)
-        try:
-            value = int(raw_value)
-        except (TypeError, ValueError):
-            value = 7
-        return max(value, 1)
-
-    @property
-    def mdns_enabled(self) -> bool:
-        """Whether mDNS service discovery is enabled. Defaults to True."""
-        return self._config.get("server", {}).get("mdns_enabled", True)
+        raw_value = self._get_server_value("usage_window_days", 7)
+        return self._parse_int(raw_value, 7, minimum=1)
 
     @property
     def server_name(self) -> str:
         """Human-readable server name for discovery. Defaults to 'Code Bridge'."""
-        return self._config.get("server", {}).get("server_name", "Code Bridge")
+        return self._get_server_value("server_name", "Code Bridge")
+
+    @property
+    def heartbeat_interval_minutes(self) -> int:
+        """Heartbeat interval in minutes for Firebase presence updates.
+
+        Defaults to 15 minutes, minimum 5 minutes.
+        """
+        raw_value = self._get_server_value("heartbeat_interval_minutes", 15)
+        return self._parse_int(raw_value, 15, minimum=5)  # Minimum 5 minutes
 
     @property
     def remote_access_enabled(self) -> bool:
-        """Whether remote access via Cloudflare Tunnel is enabled. Defaults to False."""
-        return self._config.get("server", {}).get("remote_access_enabled", False)
+        """Whether remote access via Cloudflare Tunnel is enabled. Defaults to True."""
+        return self._get_server_value("remote_access_enabled", True)
 
     @property
     def firebase_enabled(self) -> bool:
         """Whether Firebase authentication is enabled. Defaults to False."""
-        return self._config.get("server", {}).get("firebase_enabled", False)
+        return self._get_server_value("firebase_enabled", False)
+
+    @property
+    def accessible_folders(self) -> list[str]:
+        """Get list of accessible folder paths from database.
+
+        These directories and their subdirectories are accessible via
+        filesystem API. This is SEPARATE from the projects list.
+
+        Falls back to home directory if not configured.
+        """
+        # Import here to avoid circular import
+        from database import get_accessible_folder_db
+
+        db = get_accessible_folder_db()
+        folders = db.get_all()
+
+        if not folders:
+            return [str(Path.home())]
+
+        # Filter to only existing paths
+        paths = []
+        for folder in folders:
+            resolved = Path(folder).resolve()
+            if resolved.exists():
+                paths.append(str(resolved))
+
+        return sorted(paths) if paths else [str(Path.home())]
 
     @property
     def config_projects(self) -> list[dict[str, Any]]:

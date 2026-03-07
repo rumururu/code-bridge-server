@@ -1,26 +1,28 @@
-"""ws-scrcpy process management for Android device mirroring."""
+"""Tango scrcpy process management for Android device mirroring."""
 
 import asyncio
-import json
 import os
 import socket
-import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
-# Default ws-scrcpy port
+# Default Tango server port
 DEFAULT_SCRCPY_PORT = 8000
+
+# Device cache settings
+_DEVICE_CACHE_TTL = 5.0  # Cache devices for 5 seconds
 
 
 class ScrcpyManager:
-    """Manages ws-scrcpy server process."""
+    """Manages Tango scrcpy server process."""
 
     def __init__(self, scrcpy_path: Optional[str] = None, port: int = DEFAULT_SCRCPY_PORT):
         """Initialize ScrcpyManager.
 
         Args:
-            scrcpy_path: Path to ws-scrcpy installation (default: server/scrcpy)
-            port: Port for ws-scrcpy server (default: 8000)
+            scrcpy_path: Path to scrcpy installation (default: server/scrcpy)
+            port: Port for Tango server (default: 8000)
         """
         if scrcpy_path:
             self.scrcpy_path = Path(scrcpy_path)
@@ -31,7 +33,10 @@ class ScrcpyManager:
         self.port = port
         self._process: Optional[asyncio.subprocess.Process] = None
         self._running = False
-        self._runtime_config_path: Optional[Path] = None
+        # Device cache for non-blocking dashboard
+        self._devices_cache: list[dict] = []
+        self._devices_cached_at: float = 0.0
+        self._devices_refresh_task: Optional[asyncio.Task] = None
 
     @property
     def is_running(self) -> bool:
@@ -57,43 +62,16 @@ class ScrcpyManager:
                 return candidate
         raise RuntimeError(f"No available port found in range {preferred}-{preferred + max_tries - 1}")
 
-    def _cleanup_runtime_config(self) -> None:
-        """Remove temporary ws-scrcpy runtime config, if present."""
-        if self._runtime_config_path and self._runtime_config_path.exists():
-            try:
-                self._runtime_config_path.unlink()
-            except Exception:
-                pass
-        self._runtime_config_path = None
-
-    def _create_runtime_config(self, port: int) -> Path:
-        """Create a temporary ws-scrcpy config file with a concrete server port."""
-        runtime_config = {
-            "runGoogTracker": True,
-            "runApplTracker": False,
-            "server": [{"secure": False, "port": port}],
-            "remoteHostList": [],
-        }
-        fd, temp_path = tempfile.mkstemp(
-            prefix="ws_scrcpy_runtime_",
-            suffix=".json",
-            dir=str(self.scrcpy_path),
-        )
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            json.dump(runtime_config, file)
-        self._runtime_config_path = Path(temp_path)
-        return self._runtime_config_path
-
     def _extract_start_error(self, raw_output: str) -> str:
-        """Extract a meaningful error message from ws-scrcpy startup output."""
+        """Extract a meaningful error message from Tango startup output."""
         lines = [line.strip() for line in raw_output.splitlines() if line.strip()]
         if not lines:
-            return "ws-scrcpy failed to start"
+            return "Tango server failed to start"
 
         # Node version footer is not actionable for users.
         filtered = [line for line in lines if not line.startswith("Node.js v")]
         if not filtered:
-            return "ws-scrcpy failed to start"
+            return "Tango server failed to start"
 
         for line in filtered:
             if line.startswith("Error:"):
@@ -106,19 +84,44 @@ class ScrcpyManager:
         return filtered[-1]
 
     def is_installed(self) -> bool:
-        """Check if ws-scrcpy is installed."""
-        # Check for built dist directory
+        """Check if Tango server is installed."""
+        # Check for tango-server.mjs in dist directory
         dist_path = self.scrcpy_path / "dist"
-        dist_index = dist_path / "index.js"
-        dist_node_modules = dist_path / "node_modules"
-        return dist_index.exists() and dist_node_modules.exists()
+        tango_server = dist_path / "tango-server.mjs"
+        tango_service = dist_path / "src" / "server" / "goog-device" / "tango" / "TangoScrcpyService.mjs"
+        return tango_server.exists() and tango_service.exists()
 
     async def get_devices(self) -> list[dict]:
         """Get list of connected Android devices via ADB.
 
+        Uses caching with background refresh for non-blocking dashboard.
+        Returns cached value immediately and refreshes in background if stale.
+
         Returns:
             List of device dictionaries with id, model, and state
         """
+        now = time.time()
+        cache_age = now - self._devices_cached_at
+
+        # Return cached value immediately if available
+        if self._devices_cache and cache_age < _DEVICE_CACHE_TTL:
+            return self._devices_cache
+
+        # If cache is stale, trigger background refresh
+        if cache_age >= _DEVICE_CACHE_TTL:
+            if self._devices_refresh_task is None or self._devices_refresh_task.done():
+                self._devices_refresh_task = asyncio.create_task(self._refresh_devices())
+
+        # If we have cached data, return it while refreshing in background
+        if self._devices_cache:
+            return self._devices_cache
+
+        # No cache - must wait for first fetch
+        await self._refresh_devices()
+        return self._devices_cache
+
+    async def _refresh_devices(self) -> None:
+        """Refresh device cache from ADB."""
         try:
             result = await asyncio.create_subprocess_exec(
                 "adb", "devices", "-l",
@@ -152,16 +155,21 @@ class ScrcpyManager:
                         "state": state,
                     })
 
-            return devices
+            self._devices_cache = devices
+            self._devices_cached_at = time.time()
 
         except FileNotFoundError:
-            return []
+            self._devices_cache = []
+            self._devices_cached_at = time.time()
         except Exception as e:
             print(f"Error getting devices: {e}")
-            return []
+            # Keep old cache on error, but mark as stale
+            if not self._devices_cache:
+                self._devices_cache = []
+                self._devices_cached_at = time.time()
 
     async def start(self) -> dict:
-        """Start ws-scrcpy server.
+        """Start Tango scrcpy server.
 
         Returns:
             Dictionary with success status and message/error
@@ -172,40 +180,38 @@ class ScrcpyManager:
         if not self.is_installed():
             return {
                 "success": False,
-                "error": "ws-scrcpy not installed. Run: cd server/scrcpy && npm run dist:dev && cd dist && npm install",
+                "error": "Tango server not installed. Run: cd server/scrcpy && npm run build",
             }
 
         try:
-            last_error = "ws-scrcpy failed to start"
+            last_error = "Tango server failed to start"
             base_port = self.port
 
             # Retry a few times on address conflicts.
             for attempt in range(5):
                 candidate = self._find_available_port(base_port + attempt)
                 self.port = candidate
-                self._cleanup_runtime_config()
-                runtime_config_path = self._create_runtime_config(self.port)
 
-                # Start ws-scrcpy from dist directory using node directly.
-                # ws-scrcpy reads port from WS_SCRCPY_CONFIG (not from PORT).
+                # Start Tango server from dist directory
+                # Tango reads port from command line argument
                 dist_path = self.scrcpy_path / "dist"
                 self._process = await asyncio.create_subprocess_exec(
                     "node",
-                    "index.js",
+                    "tango-server.mjs",
+                    str(self.port),
                     cwd=str(dist_path),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
-                    env={**os.environ, "WS_SCRCPY_CONFIG": str(runtime_config_path)},
+                    env=os.environ.copy(),
                 )
 
                 self._running = True
                 await asyncio.sleep(2)
 
                 if self._process.returncode is None:
-                    self._cleanup_runtime_config()
                     return {
                         "success": True,
-                        "message": "ws-scrcpy started",
+                        "message": "Tango server started",
                         "url": self.scrcpy_url,
                         "port": self.port,
                     }
@@ -224,17 +230,15 @@ class ScrcpyManager:
                 if "EADDRINUSE" not in text and "address already in use" not in text:
                     break
 
-            self._cleanup_runtime_config()
             self._process = None
             return {"success": False, "error": last_error}
 
         except Exception as e:
             self._running = False
-            self._cleanup_runtime_config()
             return {"success": False, "error": str(e)}
 
     async def stop(self) -> dict:
-        """Stop ws-scrcpy server.
+        """Stop Tango scrcpy server.
 
         Returns:
             Dictionary with success status
@@ -253,9 +257,8 @@ class ScrcpyManager:
         finally:
             self._running = False
             self._process = None
-            self._cleanup_runtime_config()
 
-        return {"success": True, "message": "ws-scrcpy stopped"}
+        return {"success": True, "message": "Tango server stopped"}
 
     def get_status(self) -> dict:
         """Get current status.

@@ -27,6 +27,7 @@ class ProjectUpdate(BaseModel):
     path: Optional[str] = None
     type: Optional[str] = None
     dev_server: Optional[DevServerConfig] = None
+    enabled: Optional[bool] = None
 
 
 class ProjectImport(BaseModel):
@@ -109,11 +110,16 @@ class LlmSelectionUpdate(BaseModel):
     model: str
 
 
-class LlmCustomModelUpdate(BaseModel):
-    """Request body for adding one custom model in settings."""
+class CodexSettingsUpdate(BaseModel):
+    """Request body for updating Codex-specific settings."""
 
-    company_id: str
-    model: str
+    sandbox_mode: str
+
+
+class IpLoginUpdate(BaseModel):
+    """Request body for updating IP login setting."""
+
+    allow_ip_login: bool
 
 
 class PairVerifyRequest(BaseModel):
@@ -122,3 +128,12 @@ class PairVerifyRequest(BaseModel):
     pair_token: str
     client_id: Optional[str] = None
     device_name: Optional[str] = None
+    firebase_id_token: Optional[str] = None
+    firebase_refresh_token: Optional[str] = None
+    auth_mode: str = "refresh_token"  # "id_token" (1hr) or "refresh_token" (permanent)
+
+
+class PairCodeVerifyRequest(BaseModel):
+    """Request body for verifying a 6-digit pairing code."""
+
+    code: str

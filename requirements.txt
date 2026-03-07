@@ -5,11 +5,12 @@ pyyaml==6.0.1
 httpx==0.26.0
 python-multipart==0.0.6
 
-# Local network discovery (mDNS/Bonjour)
-zeroconf>=0.131.0
-
 # QR code generation for pairing
 qrcode[pil]>=7.4
 
 # Firebase (optional, for remote access)
 # firebase-admin>=6.0.0  # Uncomment if using Firebase Admin SDK
+
+# JWT token verification
+PyJWT>=2.8.0
+cryptography>=41.0.0
