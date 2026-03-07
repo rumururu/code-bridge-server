@@ -13,9 +13,11 @@ from typing import Any, AsyncGenerator
 from websockets.exceptions import ConnectionClosed
 from websockets.server import WebSocketServer, WebSocketServerProtocol, serve
 
+from llm_session import LlmSession
+
 
 @dataclass
-class ClaudeSession:
+class ClaudeSession(LlmSession):
     """Manage one long-lived Claude CLI process with real-time control responses."""
 
     project_path: str
@@ -54,6 +56,11 @@ class ClaudeSession:
                 if os.path.exists(path):
                     self._claude_path = path
                     break
+
+    @property
+    def provider_id(self) -> str:
+        """Return the provider identifier."""
+        return "anthropic"
 
     @property
     def is_running(self) -> bool:
@@ -300,7 +307,11 @@ class ClaudeSession:
         message: str,
         permission_mode: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Start a new Claude turn."""
+        """Start a new Claude turn.
+
+        If the message contains [Uploaded Attachments] with image paths,
+        they will be converted to multimodal content blocks.
+        """
         if not message.strip():
             yield {"type": "error", "error": {"message": "Message content is empty"}}
             return
@@ -316,6 +327,9 @@ class ClaudeSession:
                 yield {"type": "error", "error": {"message": "Another Claude turn is already in progress"}}
                 return
 
+            # Build content - may be string or multimodal list
+            content = self._build_message_content(message)
+
             async with self._turn_lock:
                 self._turn_in_progress = True
                 self._pending_permission_request = None
@@ -324,7 +338,7 @@ class ClaudeSession:
                     {
                         "type": "user",
                         "session_id": self._session_id or "",
-                        "message": {"role": "user", "content": message},
+                        "message": {"role": "user", "content": content},
                         "parent_tool_use_id": None,
                         "uuid": str(uuid.uuid4()),
                     }
@@ -335,6 +349,15 @@ class ClaudeSession:
         except Exception as exc:
             self._turn_in_progress = False
             yield {"type": "error", "error": {"message": str(exc)}}
+
+    def _build_message_content(self, message: str) -> str | list[dict[str, Any]]:
+        """Parse attachments and build multimodal content if images are present."""
+        try:
+            from attachment_parser import build_multimodal_content
+            return build_multimodal_content(message, self.project_path)
+        except Exception:
+            # Fallback to plain text if parsing fails
+            return message
 
     async def _respond_to_pending_permission(
         self,
@@ -454,6 +477,28 @@ class ClaudeSession:
         self._turn_in_progress = False
         self._pending_permission_request = None
 
+    async def abort_current_turn(self) -> bool:
+        """Abort the current turn by sending SIGINT to the Claude process.
+
+        Returns True if abort signal was sent, False if no turn in progress.
+        """
+        if not self._turn_in_progress:
+            return False
+
+        process = self._process
+        if process is None or process.returncode is not None:
+            self._turn_in_progress = False
+            return False
+
+        try:
+            process.send_signal(signal.SIGINT)
+            self._turn_in_progress = False
+            self._pending_permission_request = None
+            return True
+        except ProcessLookupError:
+            self._turn_in_progress = False
+            return False
+
     async def set_model(self, model: str | None) -> None:
         """Set default model for subsequent turns.
 
@@ -471,21 +516,46 @@ class ClaudeSession:
 
 
 class SessionManager:
-    """Manage Claude sessions keyed by project name."""
+    """Manage LLM sessions keyed by project name.
+
+    Supports multiple providers (Claude, Codex, etc.) via LlmSessionFactory.
+    Sessions are cached per project and recreated if provider changes.
+    """
 
     def __init__(self) -> None:
-        self._sessions: dict[str, ClaudeSession] = {}
+        self._sessions: dict[str, LlmSession] = {}
 
     async def get_or_create_session(
         self,
         project_name: str,
         project_path: str,
+        provider_id: str = "anthropic",
         model: str | None = None,
-    ) -> ClaudeSession:
-        """Get existing session or create one."""
-        if project_name not in self._sessions:
-            self._sessions[project_name] = ClaudeSession(project_path=project_path, model=model)
-        session = self._sessions[project_name]
+    ) -> LlmSession:
+        """Get existing session or create one for the specified provider.
+
+        If the provider changes, the existing session is closed and a new one created.
+        """
+        from llm_session import LlmSessionFactory
+
+        existing = self._sessions.get(project_name)
+
+        # If provider changed, close old session
+        if existing is not None and existing.provider_id != provider_id:
+            await existing.close()
+            existing = None
+            self._sessions.pop(project_name, None)
+
+        if existing is None:
+            session = LlmSessionFactory.create_session(
+                provider_id=provider_id,
+                project_path=project_path,
+                model=model,
+            )
+            self._sessions[project_name] = session
+        else:
+            session = existing
+
         await session.set_model(model)
         return session
 

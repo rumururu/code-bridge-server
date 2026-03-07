@@ -20,6 +20,7 @@ def generate_qr_terminal(
     data: str,
     border: int = 2,
     use_unicode: bool = True,
+    invert: bool = True,
 ) -> str:
     """Generate QR code as terminal-printable string.
 
@@ -27,6 +28,7 @@ def generate_qr_terminal(
         data: The data to encode in the QR code
         border: Number of quiet zone modules around QR code
         use_unicode: Use Unicode block characters (smaller, cleaner)
+        invert: Invert colors (white-on-black, better for dark terminals)
 
     Returns:
         String representation of QR code for terminal display
@@ -47,16 +49,20 @@ def generate_qr_terminal(
     matrix = qr.get_matrix()
 
     if use_unicode:
-        return _render_unicode(matrix)
+        return _render_unicode(matrix, invert=invert)
     else:
-        return _render_ascii(matrix)
+        return _render_ascii(matrix, invert=invert)
 
 
-def _render_unicode(matrix: list[list[bool]]) -> str:
+def _render_unicode(matrix: list[list[bool]], invert: bool = True) -> str:
     """Render QR code using Unicode half-block characters.
 
     Uses the upper-half block character to fit 2 rows per line,
     making the QR code more compact and square-looking.
+
+    Args:
+        matrix: QR code matrix
+        invert: If True, render as white-on-black (better visibility)
     """
     lines = []
     height = len(matrix)
@@ -70,21 +76,26 @@ def _render_unicode(matrix: list[list[bool]]) -> str:
             top = matrix[row][col]
             bottom = matrix[row + 1][col] if row + 1 < height else False
 
+            # Invert if requested (makes QR more visible on dark terminals)
+            if invert:
+                top = not top
+                bottom = not bottom
+
             if top and bottom:
-                line += "\u2588"  # Full block (both black)
+                line += "\u2588"  # Full block (both filled)
             elif top and not bottom:
                 line += "\u2580"  # Upper half block
             elif not top and bottom:
                 line += "\u2584"  # Lower half block
             else:
-                line += " "  # Both white
+                line += " "  # Both empty
 
         lines.append(line)
 
     return "\n".join(lines)
 
 
-def _render_ascii(matrix: list[list[bool]]) -> str:
+def _render_ascii(matrix: list[list[bool]], invert: bool = True) -> str:
     """Render QR code using ASCII characters.
 
     Uses double characters for better aspect ratio.
@@ -93,10 +104,12 @@ def _render_ascii(matrix: list[list[bool]]) -> str:
     for row in matrix:
         line = ""
         for cell in row:
+            if invert:
+                cell = not cell
             if cell:
-                line += "##"  # Black module
+                line += "██"  # Filled module
             else:
-                line += "  "  # White module
+                line += "  "  # Empty module
         lines.append(line)
     return "\n".join(lines)
 

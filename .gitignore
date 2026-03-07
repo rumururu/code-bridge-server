@@ -1,32 +1,22 @@
 # Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
+*.pyc
+*.pyo
 venv/
-env/
 .venv/
-ENV/
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Project
+# Database
 *.db
-*.sqlite
-config.yaml
-.env
-
-# OS
-.DS_Store
-Thumbs.db
 
 # Logs
 *.log
 
-# Submodules
+# Secrets
+firebase_config.json
+device_info.json
+config.yaml
+.env
+
+# Runtime
+.initialized
 scrcpy/

@@ -18,10 +18,16 @@ def init_db():
             type TEXT DEFAULT 'flutter',
             dev_server_command TEXT,
             dev_server_port INTEGER,
+            enabled INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Migration: add enabled column if missing
+    try:
+        conn.execute("ALTER TABLE projects ADD COLUMN enabled INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     conn.execute("""
         CREATE TABLE IF NOT EXISTS usage_turns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,6 +47,12 @@ def init_db():
             key TEXT PRIMARY KEY,
             value TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS accessible_folders (
+            path TEXT PRIMARY KEY,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
@@ -117,6 +129,10 @@ class ProjectDB:
                 updates.append("dev_server_port = ?")
                 values.append(dev_server["port"])
 
+        if "enabled" in data:
+            updates.append("enabled = ?")
+            values.append(1 if data["enabled"] else 0)
+
         if not updates:
             conn.close()
             return self.get(name)
@@ -169,6 +185,7 @@ class ProjectDB:
             }
             if row["dev_server_port"]
             else None,
+            "enabled": bool(row["enabled"]) if row["enabled"] is not None else True,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -296,10 +313,80 @@ class SettingsDB:
         self.set(key, json.dumps(value))
 
 
+class AccessibleFolderDB:
+    """Database operations for accessible folders (security boundary).
+
+    These folders define what paths the server can access.
+    This is SEPARATE from the projects list.
+    """
+
+    def __init__(self):
+        init_db()
+
+    def get_all(self) -> list[str]:
+        """Get all accessible folder paths."""
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT path FROM accessible_folders ORDER BY path"
+        ).fetchall()
+        conn.close()
+        return [row[0] for row in rows]
+
+    def add(self, path: str) -> bool:
+        """Add an accessible folder path.
+
+        Returns True if added, False if already exists.
+        """
+        resolved_path = str(Path(path).expanduser().resolve())
+
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            conn.execute(
+                "INSERT INTO accessible_folders (path) VALUES (?)",
+                (resolved_path,),
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except sqlite3.IntegrityError:
+            conn.close()
+            return False
+
+    def remove(self, path: str) -> bool:
+        """Remove an accessible folder path.
+
+        Returns True if removed, False if not found.
+        """
+        resolved_path = str(Path(path).expanduser().resolve())
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.execute(
+            "DELETE FROM accessible_folders WHERE path = ?",
+            (resolved_path,),
+        )
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        conn.close()
+        return deleted
+
+    def exists(self, path: str) -> bool:
+        """Check if a path is in accessible folders."""
+        resolved_path = str(Path(path).expanduser().resolve())
+
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute(
+            "SELECT 1 FROM accessible_folders WHERE path = ?",
+            (resolved_path,),
+        ).fetchone()
+        conn.close()
+        return row is not None
+
+
 # Global database instance
 _project_db: ProjectDB | None = None
 _usage_db: UsageDB | None = None
 _settings_db: SettingsDB | None = None
+_accessible_folder_db: AccessibleFolderDB | None = None
 
 
 def get_project_db() -> ProjectDB:
@@ -324,3 +411,52 @@ def get_settings_db() -> SettingsDB:
     if _settings_db is None:
         _settings_db = SettingsDB()
     return _settings_db
+
+
+def get_accessible_folder_db() -> AccessibleFolderDB:
+    """Get global accessible folder database instance."""
+    global _accessible_folder_db
+    if _accessible_folder_db is None:
+        _accessible_folder_db = AccessibleFolderDB()
+    return _accessible_folder_db
+
+
+def migrate_accessible_folders_from_projects() -> int:
+    """One-time migration: seed accessible_folders from existing projects.
+
+    Extracts unique parent directories from all registered projects
+    and adds them to the accessible_folders table.
+
+    Returns:
+        Number of folders migrated.
+    """
+    project_db = get_project_db()
+    folder_db = get_accessible_folder_db()
+
+    # Skip if already has folders
+    existing_folders = folder_db.get_all()
+    if existing_folders:
+        return 0
+
+    projects = project_db.get_all()
+    if not projects:
+        return 0
+
+    # Extract unique parent folders
+    parent_folders: set[str] = set()
+    for proj in projects:
+        project_path = proj.get("path")
+        if project_path:
+            parent = str(Path(project_path).parent)
+            parent_folders.add(parent)
+
+    # Add to accessible_folders
+    count = 0
+    for folder in parent_folders:
+        if folder_db.add(folder):
+            count += 1
+
+    if count > 0:
+        print(f"Migrated {count} accessible folders from existing projects")
+
+    return count

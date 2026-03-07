@@ -1,8 +1,14 @@
 """File management for project file browsing."""
 
-import os
 from pathlib import Path
 from typing import Optional
+
+from file_manager_helpers import (
+    fuzzy_match,
+    is_excluded_path,
+    match_score,
+    validate_project_relative_path,
+)
 
 # Sensitive file patterns to exclude
 EXCLUDED_PATTERNS = {
@@ -87,32 +93,11 @@ class FileManager:
 
         Returns resolved path if valid, None otherwise.
         """
-        # Normalize and resolve path
-        try:
-            if path.startswith("/"):
-                path = path[1:]
-
-            full_path = (self.base_path / path).resolve()
-
-            # Security: Check path traversal
-            full_path.relative_to(self.base_path)
-
-            return full_path
-        except (ValueError, OSError):
-            return None
+        return validate_project_relative_path(self.base_path, path)
 
     def _is_excluded(self, path: Path) -> bool:
         """Check if path should be excluded."""
-        name = path.name
-
-        for pattern in EXCLUDED_PATTERNS:
-            if pattern.startswith("*"):
-                if name.endswith(pattern[1:]):
-                    return True
-            elif name == pattern:
-                return True
-
-        return False
+        return is_excluded_path(path, EXCLUDED_PATTERNS)
 
     def list_directory(self, path: str = "") -> dict:
         """List directory contents.
@@ -348,41 +333,11 @@ class FileManager:
 
     def _fuzzy_match(self, query: str, target: str) -> bool:
         """Check if query fuzzy-matches target."""
-        query_idx = 0
-        for char in target:
-            if query_idx < len(query) and char == query[query_idx]:
-                query_idx += 1
-        return query_idx == len(query)
+        return fuzzy_match(query, target)
 
     def _match_score(self, query: str, target: str) -> float:
         """Calculate match score (higher = better match)."""
-        # Exact match
-        if query == target:
-            return 1000.0
-
-        # Starts with query
-        if target.startswith(query):
-            return 500.0 + (len(query) / len(target)) * 100
-
-        # Contains query as substring
-        if query in target:
-            return 200.0 + (len(query) / len(target)) * 100
-
-        # Fuzzy match score based on consecutive matches
-        score = 0.0
-        query_idx = 0
-        consecutive = 0
-        for i, char in enumerate(target):
-            if query_idx < len(query) and char == query[query_idx]:
-                query_idx += 1
-                consecutive += 1
-                score += consecutive * 10  # Bonus for consecutive matches
-                if i == 0:
-                    score += 50  # Bonus for matching at start
-            else:
-                consecutive = 0
-
-        return score
+        return match_score(query, target)
 
     def search_content(self, query: str, limit: int = 100, case_sensitive: bool = False) -> dict:
         """Search file contents for query.

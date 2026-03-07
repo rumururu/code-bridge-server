@@ -2,14 +2,27 @@
 
 import httpx
 from fastapi import Request, Response
-from fastapi.responses import StreamingResponse
+
+STRIP_RESPONSE_HEADERS = {"transfer-encoding", "content-encoding", "content-length"}
 
 
 class PreviewProxy:
     """Reverse proxy for dev server previews."""
 
-    def __init__(self):
-        self._client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+    def __init__(self, client: httpx.AsyncClient | None = None):
+        self._client = client or httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+
+    def _build_target_url(self, request: Request, target_port: int, path: str) -> str:
+        target_url = f"http://localhost:{target_port}/{path}"
+        if request.query_params:
+            target_url = f"{target_url}?{request.query_params}"
+        return target_url
+
+    def _build_forward_headers(self, request: Request) -> dict[str, str]:
+        headers = dict(request.headers)
+        headers.pop("host", None)
+        headers.pop("Host", None)
+        return headers
 
     async def proxy_request(
         self,
@@ -18,40 +31,20 @@ class PreviewProxy:
         path: str = "",
     ) -> Response:
         """Proxy request to target dev server."""
-        # Build URL with query string if present
-        target_url = f"http://localhost:{target_port}/{path}"
-        if request.query_params:
-            target_url = f"{target_url}?{request.query_params}"
-
-        # Build headers (filter out host)
-        headers = dict(request.headers)
-        headers.pop("host", None)
-        headers.pop("Host", None)
+        target_url = self._build_target_url(request, target_port, path)
+        headers = self._build_forward_headers(request)
 
         try:
-            # Make request to target server
-            if request.method == "GET":
-                resp = await self._client.get(target_url, headers=headers)
-            elif request.method == "POST":
-                body = await request.body()
-                resp = await self._client.post(target_url, headers=headers, content=body)
-            elif request.method == "PUT":
-                body = await request.body()
-                resp = await self._client.put(target_url, headers=headers, content=body)
-            elif request.method == "DELETE":
-                resp = await self._client.delete(target_url, headers=headers)
-            else:
-                resp = await self._client.request(
-                    request.method,
-                    target_url,
-                    headers=headers,
-                    content=await request.body(),
-                )
+            body = await request.body()
+            resp = await self._client.request(
+                request.method,
+                target_url,
+                headers=headers,
+                content=body if body else None,
+            )
 
-            # Build response headers
             response_headers = dict(resp.headers)
-            # Remove headers that shouldn't be forwarded
-            for header in ["transfer-encoding", "content-encoding", "content-length"]:
+            for header in STRIP_RESPONSE_HEADERS:
                 response_headers.pop(header, None)
                 response_headers.pop(header.title(), None)
 
