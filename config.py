@@ -22,13 +22,34 @@ class Config:
         self._runtime_port: int | None = None  # CLI override
 
     def _load_config(self, path: Path | str) -> dict[str, Any]:
-        """Load configuration from YAML file."""
+        """Load configuration from YAML file, creating default if missing."""
         path = Path(path)
         if not path.exists():
-            raise FileNotFoundError(f"Config file not found: {path}")
+            self._create_default_config(path)
+            print(f"Created default config: {path}")
 
         with open(path, "r") as f:
             return yaml.safe_load(f)
+
+    def _create_default_config(self, path: Path) -> None:
+        """Create default config.yaml with sensible defaults."""
+        default_config = """\
+server:
+  host: "0.0.0.0"
+  port: 8766
+  server_name: "Code Bridge"
+  debug: true
+  log_level: "info"
+  cors_origins: ["*"]
+
+  # LLM usage tracking
+  weekly_budget_usd: 100.0
+  usage_window_days: 7
+
+  # Heartbeat interval for presence updates (minutes)
+  heartbeat_interval_minutes: 15
+"""
+        path.write_text(default_config)
 
     def _get_server_value(self, key: str, default: Any) -> Any:
         """Get server section value with fallback."""

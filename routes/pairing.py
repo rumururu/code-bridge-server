@@ -83,7 +83,7 @@ async def get_token_status(token: str, request: Request):
     result = get_pair_token_status_for_current_server(token)
 
     # Record attempt (non-existent tokens count as failed attempts)
-    if not result.success:
+    if not result.exists:
         _token_status_limiter.record_attempt(client_ip, success=False)
 
     return result.as_response_fields()
