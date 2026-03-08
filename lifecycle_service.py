@@ -152,8 +152,19 @@ async def start_remote_tunnel_for_current_server(
 
         async def on_tunnel_url_change(url: str):
             if firebase_auth and firebase_auth.is_authenticated:
-                await firebase_auth.update_tunnel_url(url)
-                print(f"Updated tunnel URL in Firebase: {url}")
+                # Ensure token is valid before updating Firebase
+                if hasattr(firebase_auth, 'ensure_valid_token'):
+                    if not await firebase_auth.ensure_valid_token():
+                        print("Warning: Token validation failed, cannot update tunnel URL in Firebase")
+                        return
+
+                pairing = pairing_service_factory()
+                local_url = f"http://{pairing.get_local_ip()}:{config.api_port}"
+                success = await firebase_auth.register_device(url, local_url)
+                if success:
+                    print(f"Updated tunnel URL in Firebase: {url}")
+                else:
+                    print(f"Warning: Failed to update tunnel URL in Firebase")
 
         tunnel_service = tunnel_service_factory(
             local_port=config.api_port,  # Tunnel exposes API server, not Dashboard
@@ -190,15 +201,28 @@ def start_heartbeat_for_current_server(
     print(f"Starting Firebase heartbeat (interval: {get_heartbeat_interval()} min)")
 
     async def heartbeat_loop():
+        consecutive_failures = 0
+        max_failures = 3
+
         while True:
             interval_seconds = get_heartbeat_interval() * 60
             await sleep_fn(interval_seconds)
-            if firebase_auth and firebase_auth.is_authenticated:
-                success = await firebase_auth.heartbeat()
-                if success:
-                    print("Heartbeat sent successfully")
-                else:
-                    print("Heartbeat failed")
+
+            if not (firebase_auth and firebase_auth.is_authenticated):
+                print("Heartbeat: Firebase auth no longer valid, stopping heartbeat")
+                break
+
+            success = await firebase_auth.heartbeat()
+            if success:
+                consecutive_failures = 0
+                print("Heartbeat sent successfully")
+            else:
+                consecutive_failures += 1
+                print(f"Heartbeat failed (attempt {consecutive_failures}/{max_failures})")
+
+                if consecutive_failures >= max_failures:
+                    print("Heartbeat: Too many consecutive failures, server may need re-pairing")
+                    # Don't break - keep trying in case network recovers
 
     return create_task(heartbeat_loop())
 

@@ -17,6 +17,7 @@ from .pairing import router as pairing_router
 from .projects import router as projects_router
 from .files import router as files_router
 from .devices import router as devices_router
+from .scrcpy_proxy import router as scrcpy_proxy_router
 
 
 def register_routers(app) -> None:
@@ -38,6 +39,7 @@ def register_routers(app) -> None:
     app.include_router(projects_router)
     app.include_router(files_router)
     app.include_router(devices_router)
+    app.include_router(scrcpy_proxy_router)
     app.include_router(filesystem_router)
     # Dashboard auth router for login/password management
     app.include_router(dashboard_auth_router)
@@ -81,6 +83,7 @@ def register_api_routers(app) -> None:
     app.include_router(projects_router)
     app.include_router(files_router)
     app.include_router(devices_router)
+    app.include_router(scrcpy_proxy_router)
     app.include_router(filesystem_router)
     # Preview router last (has root-level catch-all)
     app.include_router(preview_router)

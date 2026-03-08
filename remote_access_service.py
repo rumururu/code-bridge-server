@@ -80,8 +80,8 @@ class RemoteAccessLoginResult(ServiceFlowResult):
     """Typed result for remote-access login flow."""
 
     user_id: Optional[str] = None
-    device_id: Optional[str] = None
-    device_name: Optional[str] = None
+    server_id: Optional[str] = None
+    server_name: Optional[str] = None
     auth_mode: Optional[str] = None
 
     def as_response_fields(self) -> dict[str, Any]:
@@ -90,8 +90,8 @@ class RemoteAccessLoginResult(ServiceFlowResult):
         return {
             "success": True,
             "user_id": self.user_id,
-            "device_id": self.device_id,
-            "device_name": self.device_name,
+            "server_id": self.server_id,
+            "server_name": self.server_name,
             "auth_mode": self.auth_mode,
         }
 
@@ -191,7 +191,7 @@ class RemoteFirebaseStatus:
     enabled: bool
     authenticated: bool
     user_id: Optional[str]
-    device_id: Optional[str]
+    server_id: Optional[str]
 
     def as_response_fields(self) -> dict[str, Any]:
         return {
@@ -199,7 +199,7 @@ class RemoteFirebaseStatus:
             "enabled": self.enabled,
             "authenticated": self.authenticated,
             "user_id": self.user_id,
-            "device_id": self.device_id,
+            "server_id": self.server_id,
         }
 
 
@@ -371,10 +371,10 @@ async def login_for_remote_access(
 
     raw_user_id = status.get("user_id")
     user_id = raw_user_id if isinstance(raw_user_id, str) else None
-    raw_device_id = status.get("device_id")
-    device_id = raw_device_id if isinstance(raw_device_id, str) else None
-    raw_device_name = status.get("device_name")
-    device_name = raw_device_name if isinstance(raw_device_name, str) else None
+    raw_server_id = status.get("server_id")
+    server_id = raw_server_id if isinstance(raw_server_id, str) else None
+    raw_server_name = status.get("server_name")
+    server_name = raw_server_name if isinstance(raw_server_name, str) else None
     raw_auth_mode = status.get("auth_mode")
     auth_mode = raw_auth_mode if isinstance(raw_auth_mode, str) and raw_auth_mode else payload.auth_mode
 
@@ -382,8 +382,8 @@ async def login_for_remote_access(
         success=True,
         status_code=200,
         user_id=user_id,
-        device_id=device_id,
-        device_name=device_name,
+        server_id=server_id,
+        server_name=server_name,
         auth_mode=auth_mode,
     )
 
@@ -603,7 +603,7 @@ async def disconnect_remote_access_for_current_server() -> RemoteAccessActionRes
 def build_remote_network_status(config: Any) -> RemoteNetworkStatus:
     """Build typed network/remote-access status payload."""
     tunnel_running, tunnel_url, tunnel_installed = _extract_tunnel_status()
-    firebase_authenticated, firebase_user_id, firebase_device_id = _extract_firebase_status()
+    firebase_authenticated, firebase_user_id, firebase_server_id = _extract_firebase_status()
 
     return RemoteNetworkStatus(
         mdns=RemoteMdnsStatus(
@@ -624,7 +624,7 @@ def build_remote_network_status(config: Any) -> RemoteNetworkStatus:
             enabled=config.firebase_enabled,
             authenticated=firebase_authenticated,
             user_id=firebase_user_id,
-            device_id=firebase_device_id,
+            server_id=firebase_server_id,
         ),
     )
 
@@ -650,7 +650,7 @@ def _extract_tunnel_status() -> tuple[bool, Optional[str], Optional[bool]]:
 def _extract_firebase_status() -> tuple[bool, Optional[str], Optional[str]]:
     firebase_authenticated = False
     firebase_user_id: Optional[str] = None
-    firebase_device_id: Optional[str] = None
+    firebase_server_id: Optional[str] = None
 
     if FIREBASE_AVAILABLE:
         firebase_auth = get_firebase_auth()
@@ -659,10 +659,10 @@ def _extract_firebase_status() -> tuple[bool, Optional[str], Optional[str]]:
             firebase_authenticated = bool(auth_status.get("authenticated", False))
             raw_user_id = auth_status.get("user_id")
             firebase_user_id = raw_user_id if isinstance(raw_user_id, str) else None
-            raw_device_id = auth_status.get("device_id")
-            firebase_device_id = raw_device_id if isinstance(raw_device_id, str) else None
+            raw_server_id = auth_status.get("server_id")
+            firebase_server_id = raw_server_id if isinstance(raw_server_id, str) else None
 
-    return firebase_authenticated, firebase_user_id, firebase_device_id
+    return firebase_authenticated, firebase_user_id, firebase_server_id
 
 
 def build_remote_network_status_for_current_server() -> RemoteNetworkStatus:

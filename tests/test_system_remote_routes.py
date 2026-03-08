@@ -51,7 +51,7 @@ class SystemRemoteRoutesTest(unittest.TestCase):
                 enabled=True,
                 authenticated=True,
                 user_id="u",
-                device_id="d",
+                server_id="s",
             ),
         )
 
@@ -75,8 +75,8 @@ class SystemRemoteRoutesTest(unittest.TestCase):
                     success=True,
                     status_code=200,
                     user_id="u1",
-                    device_id="d1",
-                    device_name="dev",
+                    server_id="s1",
+                    server_name="dev",
                     auth_mode="refresh_token",
                 )
             ),
@@ -89,7 +89,7 @@ class SystemRemoteRoutesTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json().get("success"))
         self.assertEqual(response.json().get("user_id"), "u1")
-        self.assertEqual(response.json().get("device_id"), "d1")
+        self.assertEqual(response.json().get("server_id"), "s1")
         mock_login.assert_awaited_once()
 
     def test_remote_access_login_maps_service_error_status(self):

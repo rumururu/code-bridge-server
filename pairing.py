@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from config import get_config
+from firebase_auth import get_firebase_auth
 from optional_services import get_active_tunnel_url
 
 # Pairing token validity in seconds (5 minutes)
@@ -448,23 +449,12 @@ class PairingService:
         self.config_dir = config_dir
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
-        self._server_id: Optional[str] = None
         self._api_keys: dict[str, dict[str, Any]] = {}  # client_id -> key info
         self._pending_tokens: dict[str, dict[str, Any]] = {}  # token -> metadata
         self._pending_codes: dict[str, str] = {}  # 6-digit code -> pair_token
         self._rate_limiter = RateLimiter()  # Rate limiter for code verification
 
-        self._load_server_id()
         self._load_api_keys()
-
-    def _load_server_id(self) -> None:
-        """Load or generate persistent server ID."""
-        server_id_file = self.config_dir / "server_id"
-        if server_id_file.exists():
-            self._server_id = server_id_file.read_text().strip()
-        else:
-            self._server_id = str(uuid.uuid4())
-            server_id_file.write_text(self._server_id)
 
     def _load_api_keys(self) -> None:
         """Load registered API keys from disk."""
@@ -482,10 +472,13 @@ class PairingService:
 
     @property
     def server_id(self) -> str:
-        """Get persistent server identifier."""
-        if self._server_id is None:
-            self._load_server_id()
-        return self._server_id or str(uuid.uuid4())
+        """Get persistent server identifier.
+
+        Uses the Firebase server_id to ensure consistency between pairing
+        and Firebase registration.
+        """
+        # Use Firebase server_id for consistency with Firebase registration
+        return get_firebase_auth().server_id
 
     def get_local_ip(self) -> str:
         """Get local network IP address."""
@@ -1038,3 +1031,138 @@ def get_pairing_service() -> PairingService:
     if _pairing_service is None:
         _pairing_service = PairingService()
     return _pairing_service
+
+
+@dataclass(frozen=True)
+class SSOPairingResult(PairingOperationResult):
+    """Typed result for SSO-based pairing."""
+
+    api_key: Optional[str] = None
+    server_id: Optional[str] = None
+    client_id: Optional[str] = None
+
+    def as_response_fields(self) -> dict[str, Any]:
+        if not self.success:
+            return self.error_response("SSO pairing failed")
+
+        payload: dict[str, Any] = {"success": True}
+        if self.api_key:
+            payload["api_key"] = self.api_key
+        if self.server_id:
+            payload["server_id"] = self.server_id
+        if self.client_id:
+            payload["client_id"] = self.client_id
+        return payload
+
+
+async def verify_sso_pairing_for_current_server(
+    *,
+    firebase_id_token: str,
+    firebase_refresh_token: Optional[str] = None,
+    auth_mode: str = "refresh_token",
+    client_id: Optional[str] = None,
+    device_name: Optional[str] = None,
+    pairing_service: Optional[PairingService] = None,
+) -> SSOPairingResult:
+    """Verify Firebase SSO and issue API key if user owns this server.
+
+    This endpoint is called when app selects a remote server from Firebase.
+    Server verifies the ID token and checks if the requesting user matches
+    the server's registered owner before issuing an API key.
+
+    Args:
+        firebase_id_token: Firebase ID token from the app
+        firebase_refresh_token: Firebase refresh token (optional)
+        auth_mode: "id_token" (1hr) or "refresh_token" (permanent)
+        client_id: Optional client identifier
+        device_name: Optional device display name
+        pairing_service: Optional pairing service override
+
+    Returns:
+        SSOPairingResult with api_key if successful
+    """
+    from optional_services import get_firebase_auth
+
+    resolved_pairing_service = pairing_service or get_pairing_service()
+    firebase_auth = get_firebase_auth()
+
+    if firebase_auth is None:
+        return SSOPairingResult(
+            success=False,
+            status_code=503,
+            error="Firebase not configured on server",
+        )
+
+    # Verify the ID token from app
+    user_info = await firebase_auth.verify_id_token(firebase_id_token)
+    if not user_info:
+        return SSOPairingResult(
+            success=False,
+            status_code=401,
+            error="Invalid Firebase ID token",
+        )
+
+    requesting_user_id = user_info.get("user_id")
+    requesting_email = user_info.get("email")
+
+    if not requesting_user_id:
+        return SSOPairingResult(
+            success=False,
+            status_code=401,
+            error="Invalid user ID in token",
+        )
+
+    # Check if requesting user owns this server
+    # Server's owner is stored in device_info.json (user_id field)
+    server_owner_user_id = firebase_auth._current_user_id
+
+    if not server_owner_user_id:
+        return SSOPairingResult(
+            success=False,
+            status_code=403,
+            error="Server not registered to any user. Please pair via QR code first.",
+        )
+
+    if requesting_user_id != server_owner_user_id:
+        return SSOPairingResult(
+            success=False,
+            status_code=403,
+            error="You do not own this server",
+        )
+
+    # User owns this server - authenticate and issue API key
+    await firebase_auth.authenticate_with_token(
+        id_token=firebase_id_token,
+        refresh_token=firebase_refresh_token,
+        auth_mode=auth_mode,
+    )
+
+    # Generate API key for this client
+    resolved_client_id = client_id or str(uuid.uuid4())
+    api_key = resolved_pairing_service._generate_api_key()
+
+    # Store API key with Firebase user info
+    client_data: dict[str, Any] = {
+        "api_key": api_key,
+        "device_name": device_name or "Unknown Device",
+        "paired_at": _now_ts(),
+        "last_used": _now_ts(),
+        "firebase_user": {
+            "user_id": requesting_user_id,
+            "email": requesting_email,
+        },
+        "paired_via": "sso",  # Mark as SSO-paired
+    }
+
+    resolved_pairing_service._api_keys[resolved_client_id] = client_data
+    resolved_pairing_service._save_api_keys()
+
+    print(f"[SSO Pairing] Issued API key for user {requesting_email} (client: {resolved_client_id})")
+
+    return SSOPairingResult(
+        success=True,
+        status_code=200,
+        api_key=api_key,
+        server_id=resolved_pairing_service.server_id,
+        client_id=resolved_client_id,
+    )

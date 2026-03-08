@@ -12,7 +12,7 @@ import json
 import logging
 import platform
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 # Firebase configuration - public config only (no secrets)
 FIREBASE_CONFIG_PATH = Path(__file__).parent / "firebase_config.json"
-DEVICE_INFO_PATH = Path(__file__).parent / "device_info.json"
+SERVER_INFO_PATH = Path(__file__).parent / "server_info.json"
+LEGACY_DEVICE_INFO_PATH = Path(__file__).parent / "device_info.json"  # For migration
 
 # Google's public keys for JWT verification
 GOOGLE_CERTS_URL = "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com"
@@ -37,6 +38,9 @@ class FirebaseAuthService:
     user information for device registration and Firestore access.
     """
 
+    # Refresh token 10 minutes before expiration
+    TOKEN_REFRESH_THRESHOLD_SECONDS = 600
+
     def __init__(self):
         """Initialize Firebase auth service."""
         self._config: Optional[dict] = None
@@ -45,11 +49,12 @@ class FirebaseAuthService:
         self._current_id_token: Optional[str] = None
         self._refresh_token: Optional[str] = None
         self._auth_mode: str = "id_token"  # "id_token" or "refresh_token"
-        self._device_id: Optional[str] = None
+        self._server_id: Optional[str] = None
         self._public_keys: Optional[dict] = None
         self._keys_fetched_at: Optional[datetime] = None
         self._initialized = False
         self._keys_refresh_task: Optional[asyncio.Task] = None
+        self._token_expires_at: Optional[datetime] = None
 
     def _load_config(self) -> bool:
         """Load Firebase configuration from file.
@@ -68,25 +73,46 @@ class FirebaseAuthService:
             logger.error(f"Failed to load Firebase config: {e}")
             return False
 
-    def _load_device_info(self) -> None:
-        """Load device info from file."""
-        if DEVICE_INFO_PATH.exists():
+    def _load_server_info(self) -> None:
+        """Load server info from file with legacy migration support."""
+        # Try new format first
+        if SERVER_INFO_PATH.exists():
             try:
-                with open(DEVICE_INFO_PATH, "r") as f:
+                with open(SERVER_INFO_PATH, "r") as f:
                     data = json.load(f)
-                    self._device_id = data.get("device_id")
+                    self._server_id = data.get("server_id")
                     self._current_user_id = data.get("user_id")
                     self._current_email = data.get("email")
                     self._current_id_token = data.get("id_token")
                     self._refresh_token = data.get("refresh_token")
                     self._auth_mode = data.get("auth_mode", "id_token")
+                return
             except Exception as e:
-                logger.error(f"Failed to load device info: {e}")
+                logger.error(f"Failed to load server info: {e}")
 
-    def _save_device_info(self) -> None:
-        """Save device info to file."""
+        # Migrate from legacy device_info.json
+        if LEGACY_DEVICE_INFO_PATH.exists():
+            try:
+                with open(LEGACY_DEVICE_INFO_PATH, "r") as f:
+                    data = json.load(f)
+                    self._server_id = data.get("device_id")  # Legacy key
+                    self._current_user_id = data.get("user_id")
+                    self._current_email = data.get("email")
+                    self._current_id_token = data.get("id_token")
+                    self._refresh_token = data.get("refresh_token")
+                    self._auth_mode = data.get("auth_mode", "id_token")
+                # Save in new format
+                self._save_server_info()
+                # Remove legacy file
+                LEGACY_DEVICE_INFO_PATH.unlink()
+                logger.info("Migrated device_info.json to server_info.json")
+            except Exception as e:
+                logger.error(f"Failed to migrate legacy device info: {e}")
+
+    def _save_server_info(self) -> None:
+        """Save server info to file."""
         try:
-            data = {"device_id": self._device_id}
+            data = {"server_id": self._server_id}
             if self._current_user_id:
                 data["user_id"] = self._current_user_id
             if self._current_email:
@@ -97,20 +123,20 @@ class FirebaseAuthService:
                 data["refresh_token"] = self._refresh_token
             elif self._auth_mode == "id_token" and self._current_id_token:
                 data["id_token"] = self._current_id_token
-            with open(DEVICE_INFO_PATH, "w") as f:
+            with open(SERVER_INFO_PATH, "w") as f:
                 json.dump(data, f)
         except Exception as e:
-            logger.error(f"Failed to save device info: {e}")
+            logger.error(f"Failed to save server info: {e}")
 
-    def _get_device_id(self) -> str:
-        """Get or generate a unique device ID."""
-        if self._device_id:
-            return self._device_id
+    def _get_server_id(self) -> str:
+        """Get or generate a unique server ID."""
+        if self._server_id:
+            return self._server_id
 
-        # Generate a new device ID
-        self._device_id = str(uuid.uuid4())
-        self._save_device_info()
-        return self._device_id
+        # Generate a new server ID
+        self._server_id = str(uuid.uuid4())
+        self._save_server_info()
+        return self._server_id
 
     def _get_device_name(self) -> str:
         """Get a human-readable device name."""
@@ -134,8 +160,8 @@ class FirebaseAuthService:
             logger.info("Firebase not configured - remote access disabled")
             return False
 
-        self._load_device_info()
-        self._get_device_id()  # Ensure device ID exists
+        self._load_server_info()
+        self._get_server_id()  # Ensure server ID exists
 
         # Start background fetch of Google public keys (non-blocking)
         self._start_background_key_fetch()
@@ -146,6 +172,8 @@ class FirebaseAuthService:
                 # Try to verify saved ID token (will wait for keys if needed)
                 user_info = await self.verify_id_token(self._current_id_token)
                 if user_info:
+                    # Extract token expiration for proactive refresh
+                    self._extract_token_expiration(self._current_id_token)
                     logger.info(f"Restored authentication from saved ID token ({self._auth_mode} mode)")
                 elif self._auth_mode == "refresh_token" and self._refresh_token:
                     # ID token expired, try refresh
@@ -183,6 +211,23 @@ class FirebaseAuthService:
         self._current_id_token = None
         self._refresh_token = None
         self._auth_mode = "id_token"
+        self._token_expires_at = None
+
+    def _extract_token_expiration(self, id_token: str) -> None:
+        """Extract and store token expiration from ID token.
+
+        Args:
+            id_token: Firebase ID token to extract expiration from
+        """
+        try:
+            unverified = jwt.decode(id_token, options={"verify_signature": False})
+            exp = unverified.get("exp")
+            if exp:
+                self._token_expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
+                remaining = (self._token_expires_at - datetime.now(timezone.utc)).total_seconds()
+                logger.debug(f"Token expires at: {self._token_expires_at} ({remaining:.0f}s remaining)")
+        except Exception as e:
+            logger.debug(f"Could not extract token expiration: {e}")
 
     async def _fetch_public_keys(self) -> bool:
         """Fetch Google's public keys for JWT verification.
@@ -347,7 +392,20 @@ class FirebaseAuthService:
                     new_refresh_token = data.get("refresh_token")
                     if new_refresh_token:
                         self._refresh_token = new_refresh_token
-                    self._save_device_info()
+
+                    # Extract and store token expiration from expires_in field
+                    expires_in = data.get("expires_in")
+                    if expires_in:
+                        try:
+                            self._token_expires_at = datetime.now(timezone.utc) + \
+                                timedelta(seconds=int(expires_in))
+                            logger.debug(f"Token expires at: {self._token_expires_at}")
+                        except (ValueError, TypeError):
+                            # Default to 1 hour if expires_in is invalid
+                            self._token_expires_at = datetime.now(timezone.utc) + \
+                                timedelta(hours=1)
+
+                    self._save_server_info()
                     logger.info("ID token refreshed successfully")
                     return True
                 else:
@@ -357,6 +415,56 @@ class FirebaseAuthService:
         except Exception as e:
             logger.error(f"Token refresh error: {e}")
             return False
+
+    async def ensure_valid_token(self) -> bool:
+        """Ensure Firebase token is valid, refreshing if needed.
+
+        This method should be called before any Firebase API call to ensure
+        the token is valid and hasn't expired. For refresh_token mode, it
+        proactively refreshes the token if it's close to expiring.
+
+        Returns:
+            True if token is valid (or was successfully refreshed), False otherwise
+        """
+        if not self.is_authenticated:
+            logger.warning("Not authenticated - cannot ensure valid token")
+            return False
+
+        # For id_token mode, we can't refresh - just return current state
+        if self._auth_mode != "refresh_token" or not self._refresh_token:
+            return True
+
+        # Check if token is expiring soon
+        if self._token_expires_at:
+            remaining = (self._token_expires_at - datetime.now(timezone.utc)).total_seconds()
+            if remaining < self.TOKEN_REFRESH_THRESHOLD_SECONDS:
+                logger.info(f"Token expiring in {remaining:.0f}s, refreshing proactively...")
+                if await self.refresh_id_token():
+                    logger.info("Token refreshed successfully before expiration")
+                    return True
+                else:
+                    logger.error("Failed to refresh token before expiration")
+                    return False
+        else:
+            # No expiration info - try to extract from current token
+            if self._current_id_token:
+                try:
+                    # Decode without verification to get expiration
+                    unverified = jwt.decode(
+                        self._current_id_token,
+                        options={"verify_signature": False}
+                    )
+                    exp = unverified.get("exp")
+                    if exp:
+                        self._token_expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
+                        remaining = (self._token_expires_at - datetime.now(timezone.utc)).total_seconds()
+                        if remaining < self.TOKEN_REFRESH_THRESHOLD_SECONDS:
+                            logger.info(f"Token expiring in {remaining:.0f}s, refreshing...")
+                            return await self.refresh_id_token()
+                except Exception as e:
+                    logger.debug(f"Could not decode token for expiration check: {e}")
+
+        return True
 
     async def authenticate_with_token(
         self, id_token: str, refresh_token: Optional[str] = None, auth_mode: str = "refresh_token"
@@ -384,6 +492,16 @@ class FirebaseAuthService:
         self._current_id_token = id_token
         self._auth_mode = auth_mode
 
+        # Extract token expiration for proactive refresh
+        try:
+            unverified = jwt.decode(id_token, options={"verify_signature": False})
+            exp = unverified.get("exp")
+            if exp:
+                self._token_expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
+                logger.debug(f"Token expires at: {self._token_expires_at}")
+        except Exception as e:
+            logger.debug(f"Could not extract token expiration: {e}")
+
         if auth_mode == "refresh_token" and refresh_token:
             self._refresh_token = refresh_token
             logger.info(f"Authenticated user (refresh_token mode): {self._current_user_id}")
@@ -392,7 +510,7 @@ class FirebaseAuthService:
             logger.info(f"Authenticated user (id_token mode): {self._current_user_id}")
 
         # Save token to file for persistence across restarts
-        self._save_device_info()
+        self._save_server_info()
 
         return True
 
@@ -412,11 +530,16 @@ class FirebaseAuthService:
             logger.warning("Not authenticated - cannot register device")
             return False
 
+        # Ensure token is valid before making Firebase API call
+        if not await self.ensure_valid_token():
+            logger.error("Token validation failed - cannot register device")
+            return False
+
         project_id = self._config.get("projectId")
         if not project_id:
             return False
 
-        device_id = self._get_device_id()
+        server_id = self._get_server_id()
         now = datetime.now(timezone.utc).isoformat()
 
         device_data = {
@@ -436,7 +559,7 @@ class FirebaseAuthService:
                 url = (
                     f"https://firestore.googleapis.com/v1/"
                     f"projects/{project_id}/databases/(default)/documents/"
-                    f"users/{self._current_user_id}/devices/{device_id}"
+                    f"users/{self._current_user_id}/devices/{server_id}"
                 )
 
                 response = await client.patch(
@@ -447,7 +570,7 @@ class FirebaseAuthService:
                 )
 
                 if response.status_code in (200, 201):
-                    logger.info(f"Device registered: {device_id}")
+                    logger.info(f"Server registered: {server_id}")
                     return True
                 else:
                     logger.error(f"Device registration failed: {response.text}")
@@ -473,6 +596,7 @@ class FirebaseAuthService:
 
         Checks if the device document still exists before updating.
         If the document was deleted (e.g., by user from app), clears auth state.
+        Proactively refreshes token if it's close to expiring.
 
         Returns:
             True if update successful, False otherwise
@@ -480,18 +604,23 @@ class FirebaseAuthService:
         if not self._current_user_id or not self._current_id_token or not self._config:
             return False
 
+        # Ensure token is valid before making Firebase API call
+        if not await self.ensure_valid_token():
+            logger.error("Token validation failed during heartbeat")
+            return False
+
         project_id = self._config.get("projectId")
         if not project_id:
             return False
 
-        device_id = self._get_device_id()
+        server_id = self._get_server_id()
 
         try:
             async with httpx.AsyncClient() as client:
                 url = (
                     f"https://firestore.googleapis.com/v1/"
                     f"projects/{project_id}/databases/(default)/documents/"
-                    f"users/{self._current_user_id}/devices/{device_id}"
+                    f"users/{self._current_user_id}/devices/{server_id}"
                 )
                 headers = {"Authorization": f"Bearer {self._current_id_token}"}
 
@@ -502,7 +631,7 @@ class FirebaseAuthService:
                     # Document was deleted - device removed from Firebase by user
                     logger.warning("Device was removed from Firebase. Re-pairing required.")
                     self._clear_auth_state()
-                    self._save_device_info()
+                    self._save_server_info()
                     return False
 
                 if check_response.status_code == 403:
@@ -530,15 +659,24 @@ class FirebaseAuthService:
 
     def get_status(self) -> dict[str, Any]:
         """Get current authentication status."""
-        return {
+        status = {
             "initialized": self._initialized,
             "authenticated": self._current_user_id is not None,
             "user_id": self._current_user_id,
             "email": self._current_email,
-            "device_id": self._device_id,
-            "device_name": self._get_device_name() if self._device_id else None,
+            "server_id": self._server_id,
+            "server_name": self._get_device_name() if self._server_id else None,
             "auth_mode": self._auth_mode,
         }
+
+        # Add token expiration info if available
+        if self._token_expires_at:
+            remaining = (self._token_expires_at - datetime.now(timezone.utc)).total_seconds()
+            status["token_expires_at"] = self._token_expires_at.isoformat()
+            status["token_expires_in_seconds"] = max(0, int(remaining))
+            status["token_needs_refresh"] = remaining < self.TOKEN_REFRESH_THRESHOLD_SECONDS
+
+        return status
 
     async def sign_out(self) -> None:
         """Sign out and clear current session."""
@@ -554,29 +692,29 @@ class FirebaseAuthService:
         Returns:
             True if successful, False otherwise
         """
-        # Try to remove device from Firestore first
+        # Try to remove server from Firestore first
         if self._current_user_id and self._current_id_token and self._config:
             try:
                 project_id = self._config.get("projectId")
-                device_id = self._get_device_id()
-                if project_id and device_id:
+                server_id = self._get_server_id()
+                if project_id and server_id:
                     async with httpx.AsyncClient() as client:
                         url = (
                             f"https://firestore.googleapis.com/v1/"
                             f"projects/{project_id}/databases/(default)/documents/"
-                            f"users/{self._current_user_id}/devices/{device_id}"
+                            f"users/{self._current_user_id}/devices/{server_id}"
                         )
                         await client.delete(
                             url,
                             headers={"Authorization": f"Bearer {self._current_id_token}"},
                         )
-                        logger.info(f"Device removed from Firebase: {device_id}")
+                        logger.info(f"Server removed from Firebase: {server_id}")
             except Exception as e:
                 logger.warning(f"Failed to remove device from Firebase: {e}")
 
         # Clear all auth state
         self._clear_auth_state()
-        self._save_device_info()
+        self._save_server_info()
         logger.info("Authentication cleared")
         return True
 
@@ -584,6 +722,11 @@ class FirebaseAuthService:
     def is_authenticated(self) -> bool:
         """Check if currently authenticated."""
         return self._current_user_id is not None and self._current_id_token is not None
+
+    @property
+    def server_id(self) -> str:
+        """Get the server ID used for Firebase registration."""
+        return self._get_server_id()
 
 
 # Singleton instance

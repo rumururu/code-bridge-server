@@ -42,7 +42,7 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         fake_firebase_auth.get_status.return_value = {
             "authenticated": True,
             "user_id": "user-1",
-            "device_id": "device-1",
+            "server_id": "server-1",
         }
 
         with (
@@ -56,8 +56,8 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status.firebase.user_id, "user-1")
         self.assertFalse(status.tunnel.running)
         self.assertEqual(
-            status.as_response_fields()["firebase"]["device_id"],
-            "device-1",
+            status.as_response_fields()["firebase"]["server_id"],
+            "server-1",
         )
 
     def test_build_remote_network_status_for_current_server_uses_config(self):
@@ -84,7 +84,7 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
                 enabled=False,
                 authenticated=False,
                 user_id=None,
-                device_id=None,
+                server_id=None,
             ),
         )
 
@@ -223,8 +223,8 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         fake_firebase_auth.authenticate_with_token = AsyncMock(return_value=True)
         fake_firebase_auth.get_status.return_value = {
             "user_id": "user-1",
-            "device_id": "device-1",
-            "device_name": "Pixel",
+            "server_id": "server-1",
+            "server_name": "Pixel",
             "auth_mode": "refresh_token",
         }
 
@@ -244,7 +244,7 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.user_id, "user-1")
-        self.assertEqual(result.as_response_fields()["device_name"], "Pixel")
+        self.assertEqual(result.as_response_fields()["server_name"], "Pixel")
         mock_register.assert_not_awaited()
 
     async def test_login_for_remote_access_for_current_server_uses_config(self):

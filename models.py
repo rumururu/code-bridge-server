@@ -137,3 +137,17 @@ class PairCodeVerifyRequest(BaseModel):
     """Request body for verifying a 6-digit pairing code."""
 
     code: str
+
+
+class SSOPairRequest(BaseModel):
+    """Request body for SSO-based pairing (Firebase auth without QR).
+
+    Used when app connects to a remote server via Firebase SSO.
+    Server verifies the ID token and confirms ownership before issuing API key.
+    """
+
+    firebase_id_token: str
+    firebase_refresh_token: Optional[str] = None
+    auth_mode: str = "refresh_token"  # "id_token" (1hr) or "refresh_token" (permanent)
+    client_id: Optional[str] = None
+    device_name: Optional[str] = None

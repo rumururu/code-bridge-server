@@ -3,13 +3,14 @@
 from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import HTMLResponse, Response
 
-from models import PairCodeVerifyRequest, PairVerifyRequest
+from models import PairCodeVerifyRequest, PairVerifyRequest, SSOPairRequest
 from pairing import (
     build_current_pairing_qr_result,
     get_pair_token_status_for_current_server,
     get_pairing_status_for_current_server,
     revoke_paired_client_for_current_server,
     verify_pairing_code_for_current_server,
+    verify_sso_pairing_for_current_server,
     RateLimiter,
 )
 from pairing_page import make_qr_png_base64
@@ -32,7 +33,17 @@ async def get_pair_qr():
 
     Only accessible from local network for security.
     """
-    return as_route_response(build_current_pairing_qr_result())
+    from fastapi.responses import JSONResponse
+    result = build_current_pairing_qr_result()
+    response_data = result.as_response_fields() if hasattr(result, 'as_response_fields') else result.__dict__
+    return JSONResponse(
+        content=response_data,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @router.get("/api/pair/qr-image", dependencies=[Depends(require_local_access)])
@@ -47,7 +58,15 @@ async def get_pair_qr_image():
 
     qr_base64 = make_qr_png_base64(result.qr_url)
     qr_bytes = base64.b64decode(qr_base64)
-    return Response(content=qr_bytes, media_type="image/png")
+    return Response(
+        content=qr_bytes,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @router.get(
@@ -55,14 +74,25 @@ async def get_pair_qr_image():
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_access)],
 )
-async def get_pair_page():
+async def get_pair_page(embed: bool = False):
     """Show QR code pairing page in browser.
 
     This page is only accessible from local network.
     External access via Cloudflare Tunnel is blocked for security.
+
+    Args:
+        embed: If True, hides title and dashboard link (for iframe embed in dashboard modal)
     """
-    result = build_pairing_page_html_for_current_server()
-    return HTMLResponse(content=result.content, status_code=result.status_code)
+    result = build_pairing_page_html_for_current_server(embed=embed)
+    return HTMLResponse(
+        content=result.content,
+        status_code=result.status_code,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @router.get("/api/pair/token-status/{token}")
@@ -157,6 +187,37 @@ async def verify_pair_token(request: Request, body: PairVerifyRequest):
         firebase_id_token=body.firebase_id_token,
         firebase_refresh_token=body.firebase_refresh_token,
         auth_mode=body.auth_mode,
+    )
+
+    # Record attempt
+    _verify_limiter.record_attempt(client_ip, success=result.success)
+
+    return as_route_response(result)
+
+
+@router.post("/api/pair/sso", dependencies=[Depends(require_local_access)])
+async def verify_sso_pairing(request: Request, body: SSOPairRequest):
+    """Verify Firebase SSO and issue API key if user owns this server.
+
+    This endpoint is called when app selects a remote server from Firebase.
+    Only accessible from local network - first connection must be on same network.
+    Server verifies the ID token and checks ownership before issuing API key.
+    """
+    client_ip = _get_client_ip(request)
+    is_allowed, remaining = _verify_limiter.check_rate_limit(client_ip)
+
+    if not is_allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many verification attempts. Try again in {remaining} seconds."
+        )
+
+    result = await verify_sso_pairing_for_current_server(
+        firebase_id_token=body.firebase_id_token,
+        firebase_refresh_token=body.firebase_refresh_token,
+        auth_mode=body.auth_mode,
+        client_id=body.client_id,
+        device_name=body.device_name,
     )
 
     # Record attempt

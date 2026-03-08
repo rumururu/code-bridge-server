@@ -27,11 +27,22 @@ def render_pairing_page_html(
     pair_token: str,
     expires_in_seconds: int,
     pairing_code: str = "",
+    embed: bool = False,
 ) -> str:
-    """Render pairing page HTML."""
+    """Render pairing page HTML.
+
+    Args:
+        embed: If True, hides title and dashboard link (for iframe embed in dashboard modal)
+    """
     expires_minutes = max(1, expires_in_seconds // 60)
     # Format pairing code with dash for readability (e.g., "123-456")
     formatted_code = f"{pairing_code[:3]}-{pairing_code[3:]}" if len(pairing_code) == 6 else pairing_code
+
+    # Conditional styles for embed mode
+    title_display = "display: none;" if embed else ""
+    dashboard_btn_display = "display: none;" if embed else ""
+    container_padding = "padding: 20px 40px;" if embed else "padding: 40px;"
+
     return f"""
     <!DOCTYPE html>
     <html>
@@ -52,7 +63,7 @@ def render_pairing_page_html(
             .container {{
                 text-align: center;
                 background: white;
-                padding: 40px;
+                {container_padding}
                 border-radius: 16px;
                 box-shadow: 0 4px 24px rgba(0,0,0,0.1);
                 max-width: 400px;
@@ -171,7 +182,7 @@ def render_pairing_page_html(
     </head>
     <body>
         <div class="container">
-            <h1>Code Bridge</h1>
+            <h1 style="{title_display}">Code Bridge</h1>
             <div class="qr-section" id="qrSection">
                 <p class="subtitle">Pair with the mobile app</p>
 
@@ -191,7 +202,7 @@ def render_pairing_page_html(
 
                 <div class="buttons">
                     <button class="btn btn-refresh" onclick="location.reload()">Refresh</button>
-                    <a href="/dashboard" class="btn btn-dashboard">Go to Dashboard</a>
+                    <a href="/dashboard" class="btn btn-dashboard" style="{dashboard_btn_display}">Go to Dashboard</a>
                 </div>
             </div>
             <div class="success" id="successSection">

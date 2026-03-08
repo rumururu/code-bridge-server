@@ -9,7 +9,7 @@ from device_action_service import (
     stop_scrcpy_for_current_server,
 )
 from .result_response import as_flagged_response
-from .deps import verify_api_key
+from .deps import verify_api_key, verify_api_key_or_localhost
 
 router = APIRouter(tags=["devices"])
 
@@ -21,20 +21,20 @@ async def list_devices():
     return {"devices": devices}
 
 
-@router.get("/api/scrcpy/status", dependencies=[Depends(verify_api_key)])
+@router.get("/api/scrcpy/status", dependencies=[Depends(verify_api_key_or_localhost)])
 async def scrcpy_status():
     """Get ws-scrcpy server status."""
     return get_scrcpy_status_for_current_server()
 
 
-@router.post("/api/scrcpy/start", dependencies=[Depends(verify_api_key)])
+@router.post("/api/scrcpy/start", dependencies=[Depends(verify_api_key_or_localhost)])
 async def start_scrcpy():
     """Start ws-scrcpy server."""
     result = await start_scrcpy_for_current_server()
     return as_flagged_response(result, error_status_code=400)
 
 
-@router.post("/api/scrcpy/stop", dependencies=[Depends(verify_api_key)])
+@router.post("/api/scrcpy/stop", dependencies=[Depends(verify_api_key_or_localhost)])
 async def stop_scrcpy():
     """Stop ws-scrcpy server."""
     result = await stop_scrcpy_for_current_server()

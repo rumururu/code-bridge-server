@@ -20,12 +20,17 @@ class PairingPageRenderResult:
 
 def build_pairing_page_html_for_current_server(
     *,
+    embed: bool = False,
     context_result: PairingPageContextResult | None = None,
     context_builder: Callable[[], PairingPageContextResult] = build_current_pairing_page_context_result,
     qr_encoder: Callable[[str], str] = make_qr_png_base64,
     html_renderer: Callable[..., str] = render_pairing_page_html,
 ) -> PairingPageRenderResult:
-    """Build HTML content for /pair page from current pairing context."""
+    """Build HTML content for /pair page from current pairing context.
+
+    Args:
+        embed: If True, hides title and dashboard link (for iframe embed in dashboard modal)
+    """
     resolved_context = context_result or context_builder()
     render_context = resolved_context.to_render_context()
 
@@ -45,5 +50,6 @@ def build_pairing_page_html_for_current_server(
         pair_token=pair_token,
         expires_in_seconds=expires_in_seconds,
         pairing_code=pairing_code,
+        embed=embed,
     )
     return PairingPageRenderResult(success=True, status_code=200, content=html)

@@ -249,6 +249,60 @@ def render_dashboard_html() -> str:
             text-decoration: underline;
         }
 
+        /* Service Status Grid */
+        .service-status-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+
+        .service-item {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            padding: 12px;
+            background: var(--bg-primary);
+            border-radius: 8px;
+        }
+
+        .service-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .service-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--text-muted);
+        }
+
+        .service-indicator.online {
+            background: var(--success-color);
+            box-shadow: 0 0 6px var(--success-color);
+        }
+
+        .service-indicator.stopped {
+            background: var(--text-muted);
+        }
+
+        .service-indicator.error {
+            background: var(--danger-color);
+        }
+
+        .service-name {
+            font-weight: 500;
+            font-size: 0.875rem;
+        }
+
+        .service-port {
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-left: 18px;
+        }
+
         .list-item {
             display: flex;
             justify-content: space-between;
@@ -1338,6 +1392,46 @@ def render_dashboard_html() -> str:
                 </div>
             </div>
 
+            <!-- Server Status Card -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>⚡ Server Status</h2>
+                    <button class="btn btn-secondary btn-sm" onclick="refreshServerStatus()">Refresh</button>
+                </div>
+                <div class="card-content">
+                    <div class="service-status-grid">
+                        <div class="service-item">
+                            <div class="service-header">
+                                <span class="service-indicator" id="dashboardIndicator"></span>
+                                <span class="service-name">Dashboard</span>
+                            </div>
+                            <span class="service-port" id="dashboardPort">-</span>
+                        </div>
+                        <div class="service-item">
+                            <div class="service-header">
+                                <span class="service-indicator" id="apiIndicator"></span>
+                                <span class="service-name">API Server</span>
+                            </div>
+                            <span class="service-port" id="apiPort">-</span>
+                        </div>
+                        <div class="service-item">
+                            <div class="service-header">
+                                <span class="service-indicator" id="tunnelIndicator"></span>
+                                <span class="service-name">Cloudflare Tunnel</span>
+                            </div>
+                            <span class="service-port" id="tunnelStatus">-</span>
+                        </div>
+                        <div class="service-item">
+                            <div class="service-header">
+                                <span class="service-indicator" id="scrcpyIndicator"></span>
+                                <span class="service-name">ws-scrcpy</span>
+                            </div>
+                            <span class="service-port" id="scrcpyPort">-</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Security Card -->
             <div class="card">
                 <div class="card-header">
@@ -1449,50 +1543,15 @@ def render_dashboard_html() -> str:
         </div>
     </main>
 
-    <!-- Pairing Modal (QR + Code) -->
+    <!-- Pairing Modal - uses /pair page via iframe -->
     <div id="pairingModal" class="modal-overlay" onclick="closePairingModal(event)">
-        <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal pairing-modal" onclick="event.stopPropagation()">
             <div class="modal-header">
                 <h3>Pair New Device</h3>
                 <button class="modal-close" onclick="closePairingModal()">&times;</button>
             </div>
-            <div class="modal-body">
-                <div class="modal-tabs">
-                    <button class="modal-tab active" onclick="switchPairingTab('qr')">QR Code</button>
-                    <button class="modal-tab" onclick="switchPairingTab('code')">Enter Code</button>
-                </div>
-
-                <!-- QR Tab -->
-                <div id="pairingTabQr" class="tab-content active">
-                    <p>Scan this QR code with the Code Bridge app</p>
-                    <div id="qrTimer" class="timer">5:00</div>
-                    <div id="qrCode" class="qr-code">
-                        <div class="loading loading-lg"></div>
-                    </div>
-                    <div style="margin-top: 16px;">
-                        <button class="btn btn-secondary" onclick="refreshQr()">Refresh QR</button>
-                    </div>
-                </div>
-
-                <!-- Code Tab -->
-                <div id="pairingTabCode" class="tab-content">
-                    <p>Enter this code in the Code Bridge app</p>
-                    <div id="codeTimer" class="timer">5:00</div>
-                    <div id="pairingCodeDisplay" class="code-display-wrapper">
-                        <span class="code-digit-display">-</span>
-                        <span class="code-digit-display">-</span>
-                        <span class="code-digit-display">-</span>
-                        <span class="code-digit-display">-</span>
-                        <span class="code-digit-display">-</span>
-                        <span class="code-digit-display">-</span>
-                    </div>
-                    <div style="margin-top: 16px;">
-                        <button class="btn btn-secondary" onclick="refreshQr()">Refresh Code</button>
-                    </div>
-                    <p style="color: var(--text-secondary); margin-top: 12px; font-size: 0.875rem;">
-                        Open Code Bridge app → Settings → Connect to Server → Enter Code
-                    </p>
-                </div>
+            <div class="modal-body" style="padding: 0; height: 700px;">
+                <iframe id="pairingIframe" src="" style="width: 100%; height: 100%; border: none;"></iframe>
             </div>
         </div>
     </div>
@@ -2185,6 +2244,47 @@ def render_dashboard_html() -> str:
             // Available Devices
             const devices = dashboardData.devices?.items || [];
             renderDevices(devices);
+
+            // Update Server Status Card
+            updateServerStatusCard();
+        }
+
+        function updateServerStatusCard() {
+            // Extract port numbers from URLs
+            const apiLocalUrl = dashboardData.server?.local_url || '';
+            const apiPortMatch = apiLocalUrl.match(/:(\d+)/);
+            const apiPort = apiPortMatch ? apiPortMatch[1] : '-';
+
+            const dashboardUrl = window.location.origin;
+            const dashboardPortMatch = dashboardUrl.match(/:(\d+)/);
+            const dashboardPort = dashboardPortMatch ? dashboardPortMatch[1] : '80';
+
+            // Dashboard indicator (always online if we can see the page)
+            document.getElementById('dashboardIndicator').className = 'service-indicator online';
+            document.getElementById('dashboardPort').textContent = `localhost:${dashboardPort}`;
+
+            // API indicator (always online if dashboard loaded data)
+            document.getElementById('apiIndicator').className = 'service-indicator online';
+            document.getElementById('apiPort').textContent = `0.0.0.0:${apiPort}`;
+
+            // Tunnel indicator (stopped = gray, not red)
+            const tunnelRunning = dashboardData.tunnel?.running === true;
+            const tunnelUrl = dashboardData.tunnel?.url;
+            document.getElementById('tunnelIndicator').className = `service-indicator ${tunnelRunning ? 'online' : 'stopped'}`;
+            document.getElementById('tunnelStatus').textContent = tunnelRunning ? 'Active' : 'Stopped';
+
+            // Scrcpy indicator (stopped = gray, not red)
+            const scrcpyRunning = dashboardData.devices?.scrcpy_running === true;
+            const scrcpyUrl = dashboardData.devices?.scrcpy_url || '';
+            const scrcpyPortMatch = scrcpyUrl.match(/:(\d+)/);
+            const scrcpyPort = scrcpyPortMatch ? scrcpyPortMatch[1] : '-';
+            document.getElementById('scrcpyIndicator').className = `service-indicator ${scrcpyRunning ? 'online' : 'stopped'}`;
+            document.getElementById('scrcpyPort').textContent = scrcpyRunning ? `localhost:${scrcpyPort}` : 'Stopped';
+        }
+
+        async function refreshServerStatus() {
+            await fetchDashboard();
+            showToast('Server status updated', 'success');
         }
 
         function renderLlmList(companies) {
@@ -2221,6 +2321,8 @@ def render_dashboard_html() -> str:
             showToast(enabled ? 'LLM enabled' : 'LLM disabled', 'success');
         }
 
+        let hasShownInitialPairingModal = false;
+
         function renderClients(clients) {
             const container = document.getElementById('clientList');
             const banner = document.getElementById('pairingBanner');
@@ -2229,6 +2331,12 @@ def render_dashboard_html() -> str:
                 // Show banner at top
                 banner.classList.add('visible');
                 container.innerHTML = `<div class="empty-state">${t('no_paired_devices')}</div>`;
+
+                // Auto-open pairing modal on first load if no devices
+                if (!hasShownInitialPairingModal) {
+                    hasShownInitialPairingModal = true;
+                    setTimeout(() => showPairingModal(), 500);
+                }
                 return;
             }
 
@@ -2365,24 +2473,18 @@ def render_dashboard_html() -> str:
         }
 
         // Pairing Modal
-        async function showPairingModal() {
+        function showPairingModal() {
             document.getElementById('pairingModal').classList.add('show');
-            switchPairingTab('qr');
-            await loadQrCode();
+            // Load /pair page in iframe with embed mode and cache buster
+            const iframe = document.getElementById('pairingIframe');
+            iframe.src = '/pair?embed=true&t=' + Date.now();
         }
 
         function closePairingModal(event) {
             if (event && event.target !== event.currentTarget) return;
             document.getElementById('pairingModal').classList.remove('show');
-            if (qrTimerInterval) {
-                clearInterval(qrTimerInterval);
-                qrTimerInterval = null;
-            }
-            if (pairingPollInterval) {
-                clearInterval(pairingPollInterval);
-                pairingPollInterval = null;
-            }
-            currentPairingCode = null;
+            // Clear iframe to stop any polling
+            document.getElementById('pairingIframe').src = '';
         }
 
         function switchPairingTab(tab) {
@@ -2406,7 +2508,9 @@ def render_dashboard_html() -> str:
             const data = await fetchApi('/api/pair/qr');
             if (data && data.qr_url) {
                 qrExpiresAt = Date.now() + (data.expires_in_seconds || 300) * 1000;
-                qrContainer.innerHTML = `<img src="/api/pair/qr-image" alt="QR Code" />`;
+                // Add cache buster to prevent browser caching old QR image
+                const cacheBuster = Date.now();
+                qrContainer.innerHTML = `<img src="/api/pair/qr-image?t=${cacheBuster}" alt="QR Code" />`;
                 currentPairingCode = data.pairing_code;
                 updatePairingCodeDisplay();
                 startQrTimer();
