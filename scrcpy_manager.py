@@ -121,8 +121,9 @@ class ScrcpyManager:
         return self._devices_cache
 
     async def _refresh_devices(self) -> None:
-        """Refresh device cache from ADB."""
+        """Refresh device cache from ADB and installed AVDs."""
         try:
+            # Get running devices from adb
             result = await asyncio.create_subprocess_exec(
                 "adb", "devices", "-l",
                 stdout=asyncio.subprocess.PIPE,
@@ -131,6 +132,7 @@ class ScrcpyManager:
             stdout, _ = await result.communicate()
 
             devices = []
+            running_emulator_ids = set()  # Track running emulator IDs
             lines = stdout.decode().strip().split("\n")[1:]  # Skip header
 
             for line in lines:
@@ -149,11 +151,42 @@ class ScrcpyManager:
                             model = part.split(":")[1]
                             break
 
+                    # Check if this is an emulator
+                    is_emulator = device_id.startswith("emulator-")
+                    if is_emulator:
+                        running_emulator_ids.add(device_id)
+
                     devices.append({
                         "id": device_id,
                         "model": model,
                         "state": state,
+                        "online": state == "device",
+                        "is_emulator": is_emulator,
                     })
+
+            # Get installed AVDs (including offline ones)
+            avds = await self._get_installed_avds()
+
+            # Map running emulators to their AVD names
+            running_avd_names = await self._get_running_avd_names(running_emulator_ids)
+
+            # Add offline AVDs to the list
+            for avd_name in avds:
+                if avd_name not in running_avd_names.values():
+                    devices.append({
+                        "id": f"avd:{avd_name}",
+                        "model": avd_name,
+                        "state": "offline",
+                        "online": False,
+                        "is_emulator": True,
+                        "avd_name": avd_name,
+                    })
+                else:
+                    # Update running emulator with AVD name
+                    for device in devices:
+                        if device.get("id") in running_avd_names and running_avd_names[device["id"]] == avd_name:
+                            device["avd_name"] = avd_name
+                            device["model"] = avd_name  # Use AVD name as model
 
             self._devices_cache = devices
             self._devices_cached_at = time.time()
@@ -167,6 +200,52 @@ class ScrcpyManager:
             if not self._devices_cache:
                 self._devices_cache = []
                 self._devices_cached_at = time.time()
+
+    async def _get_installed_avds(self) -> list[str]:
+        """Get list of installed Android Virtual Devices."""
+        try:
+            result = await asyncio.create_subprocess_exec(
+                "emulator", "-list-avds",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await result.communicate()
+
+            avds = []
+            for line in stdout.decode().strip().split("\n"):
+                avd_name = line.strip()
+                if avd_name:
+                    avds.append(avd_name)
+            return avds
+        except FileNotFoundError:
+            # emulator command not found
+            return []
+        except Exception as e:
+            print(f"Error getting AVDs: {e}")
+            return []
+
+    async def _get_running_avd_names(self, emulator_ids: set[str]) -> dict[str, str]:
+        """Get AVD names for running emulators.
+
+        Returns:
+            Dict mapping emulator ID (e.g., 'emulator-5554') to AVD name
+        """
+        result = {}
+        for emulator_id in emulator_ids:
+            try:
+                # Get AVD name via adb
+                proc = await asyncio.create_subprocess_exec(
+                    "adb", "-s", emulator_id, "emu", "avd", "name",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+                avd_name = stdout.decode().strip().split("\n")[0].strip()
+                if avd_name and avd_name != "OK":
+                    result[emulator_id] = avd_name
+            except Exception:
+                pass
+        return result
 
     async def start(self) -> dict:
         """Start Tango scrcpy server.

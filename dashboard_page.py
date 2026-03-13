@@ -330,6 +330,19 @@ def render_dashboard_html() -> str:
             color: var(--text-muted);
         }
 
+        .device-offline {
+            opacity: 0.6;
+        }
+
+        .device-status-badge {
+            font-size: 0.7rem;
+            padding: 4px 8px;
+            border-radius: 4px;
+            background: var(--bg-secondary);
+            color: var(--text-muted);
+            border: 1px solid var(--border-color);
+        }
+
         .select-wrapper {
             position: relative;
         }
@@ -1507,10 +1520,10 @@ def render_dashboard_html() -> str:
                 </div>
             </div>
 
-            <!-- Available Devices Card -->
+            <!-- Test Devices Card -->
             <div class="card">
                 <div class="card-header">
-                    <h2>Available Devices</h2>
+                    <h2>Test Devices</h2>
                 </div>
                 <div class="card-content">
                     <div id="deviceList"></div>
@@ -2241,7 +2254,7 @@ def render_dashboard_html() -> str:
             // Accessible Folders (from dedicated API)
             renderFolders(accessibleFolders);
 
-            // Available Devices
+            // Test Devices
             const devices = dashboardData.devices?.items || [];
             renderDevices(devices);
 
@@ -2404,23 +2417,38 @@ def render_dashboard_html() -> str:
         function renderDevices(devices) {
             const container = document.getElementById('deviceList');
             if (devices.length === 0) {
-                container.innerHTML = '<div class="empty-state">No devices available</div>';
+                container.innerHTML = '<div class="empty-state">No test devices</div>';
                 return;
             }
-            container.innerHTML = devices.map(device => `
-                <div class="list-item">
+            container.innerHTML = devices.map(device => {
+                const isOnline = device.online !== false && device.state !== 'offline';
+                const statusDot = isOnline ? '🟢' : '⚫';
+                const statusText = isOnline ? '' : ' (offline)';
+                const isEmulator = device.is_emulator || device.id?.startsWith('emulator-') || device.id?.startsWith('avd:');
+                const deviceType = isEmulator ? '📱' : '📲';
+                const displayName = device.avd_name || device.name || device.model || 'Unknown';
+                const displayId = device.id?.startsWith('avd:') ? device.id.substring(4) : device.id;
+
+                return `
+                <div class="list-item ${!isOnline ? 'device-offline' : ''}">
                     <div class="list-item-info">
-                        <span class="list-item-name">${device.name || device.model || 'Unknown'}</span>
-                        <span class="list-item-meta">${device.id}</span>
+                        <span class="list-item-name">
+                            ${statusDot} ${deviceType} ${displayName}${statusText}
+                        </span>
+                        <span class="list-item-meta">${displayId}</span>
                     </div>
+                    ${isOnline ? `
                     <label class="checkbox-wrapper">
                         <input type="checkbox"
                                ${device.enabled !== false ? 'checked' : ''}
                                onchange="toggleDeviceAccess('${device.id}', this.checked)">
                         <span class="checkmark"></span>
                     </label>
+                    ` : `
+                    <span class="device-status-badge">Offline</span>
+                    `}
                 </div>
-            `).join('');
+            `}).join('');
         }
 
         async function toggleDeviceAccess(deviceId, enabled) {
