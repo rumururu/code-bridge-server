@@ -12,7 +12,6 @@ venv/
 *.log
 
 # Secrets
-firebase_config.json
 device_info.json
 config.yaml
 .env

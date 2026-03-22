@@ -1,0 +1,15 @@
+{
+  "apiKey": "AIzaSyANg6Uon2mSPSs9Ki1jqW35ZSzJFDYtNz4",
+  "projectId": "code-bridge-64bf3",
+  "authDomain": "code-bridge-64bf3.firebaseapp.com",
+  "storageBucket": "code-bridge-64bf3.firebasestorage.app",
+  "messagingSenderId": "617088494369",
+  "appId": "1:617088494369:web:f20336760ba4f22dd36c60",
+
+  "_comment": "NOTE: Client Secret is NOT needed for Option 2 (app-only auth)",
+  "_setup": [
+    "This file was auto-generated for the Code Bridge project",
+    "Server only needs apiKey and projectId for token verification",
+    "Full config is kept for reference"
+  ]
+}
