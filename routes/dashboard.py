@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -22,7 +23,7 @@ SERVER_DIR = Path(__file__).parent.parent
 
 
 @router.get("/", include_in_schema=False, dependencies=[Depends(require_local_access)])
-async def root_redirect():
+async def root_redirect() -> RedirectResponse:
     """Redirect root to dashboard."""
     return RedirectResponse(url="/dashboard", status_code=302)
 
@@ -33,7 +34,7 @@ async def root_redirect():
     include_in_schema=False,
     dependencies=[Depends(require_local_access)],
 )
-async def get_dashboard():
+async def get_dashboard() -> HTMLResponse:
     """Serve the dashboard HTML page.
 
     This page is only accessible from local network.
@@ -46,7 +47,7 @@ async def get_dashboard():
     "/api/system/overview",
     dependencies=[Depends(require_dashboard_auth)],
 )
-async def get_system_overview():
+async def get_system_overview() -> dict[str, Any]:
     """Get aggregated system overview for dashboard.
 
     Returns comprehensive server state including:
@@ -67,7 +68,7 @@ async def get_system_overview():
     "/api/system/check-update",
     dependencies=[Depends(require_dashboard_auth)],
 )
-async def check_update():
+async def check_update() -> dict[str, Any]:
     """Check for server updates by running git pull.
 
     Only accessible from local network for security.
@@ -129,7 +130,7 @@ async def check_update():
                 "error": True,
             }
 
-    except Exception as e:
+    except OSError as e:
         return {
             "updated": False,
             "message": f"Update check failed: {str(e)}",
@@ -141,7 +142,7 @@ async def check_update():
     "/api/system/server-log",
     dependencies=[Depends(require_dashboard_auth)],
 )
-async def get_server_log(lines: int = Query(default=200, ge=20, le=1000)):
+async def get_server_log(lines: int = Query(default=200, ge=20, le=1000)) -> dict[str, Any]:
     """Return bounded server log tail for dashboard display."""
     log_path = resolve_server_log_path()
     log_exists = log_path.exists()
@@ -154,7 +155,7 @@ async def get_server_log(lines: int = Query(default=200, ge=20, le=1000)):
                 log_path.stat().st_mtime,
                 tz=timezone.utc,
             ).isoformat()
-        except Exception:
+        except OSError:
             updated_at = None
 
     return {

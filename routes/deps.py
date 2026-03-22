@@ -1,6 +1,6 @@
 """Common dependencies for API routes."""
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import Cookie, Header, HTTPException, Query, Request
 
@@ -12,7 +12,7 @@ async def verify_api_key(
     request: Request,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     api_key: Optional[str] = Query(None, alias="api_key"),
-):
+) -> Optional[str]:
     """Verify API key from header or query parameter.
 
     When accessed via tunnel (external), API key is ALWAYS required.
@@ -58,7 +58,7 @@ def is_request_from_tunnel(request: Request) -> bool:
     return False
 
 
-async def require_local_access(request: Request):
+async def require_local_access(request: Request) -> None:
     """Dependency that blocks external (tunnel) access.
 
     Use this for sensitive pages like /dashboard and /pair that should
@@ -71,6 +71,27 @@ async def require_local_access(request: Request):
             status_code=403,
             detail="This page is only accessible from local network. "
             "External access via tunnel is not allowed.",
+        )
+
+
+async def require_localhost_only(request: Request) -> None:
+    """Dependency that requires request from localhost (127.0.0.1 or ::1).
+
+    Use this for sensitive pages like /pair that should ONLY be accessible
+    from the same machine running the server.
+
+    Raises 403 Forbidden if request is not from localhost.
+    """
+    if is_request_from_tunnel(request):
+        raise HTTPException(
+            status_code=403,
+            detail="This page is only accessible from localhost.",
+        )
+    if not is_localhost_request(request):
+        raise HTTPException(
+            status_code=403,
+            detail="This page is only accessible from localhost (127.0.0.1). "
+            "Open this URL on the same machine where the server is running.",
         )
 
 
@@ -87,7 +108,7 @@ async def verify_api_key_or_localhost(
     request: Request,
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     api_key: Optional[str] = Query(None, alias="api_key"),
-):
+) -> Optional[str]:
     """Allow access if localhost OR valid API key.
 
     Used for settings endpoints that dashboard accesses locally.
@@ -103,7 +124,7 @@ async def verify_api_key_or_localhost(
 async def require_dashboard_auth(
     request: Request,
     dashboard_session: Optional[str] = Cookie(None),
-):
+) -> None:
     """Dependency that requires dashboard authentication.
 
     If password is enabled and user is not authenticated, raises 401.

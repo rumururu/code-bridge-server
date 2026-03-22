@@ -18,7 +18,7 @@ class ProjectViewTest(unittest.TestCase):
             "dev_server": {"port": 5173, "command": "npm run dev"},
         }
 
-        result = build_project_view(project, detected_port=3000)
+        result = build_project_view(project, detected_port=3000, managed=True)
 
         self.assertEqual(result["name"], "demo")
         self.assertEqual(result["path"], "/tmp/demo")

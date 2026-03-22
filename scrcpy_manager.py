@@ -1,11 +1,14 @@
 """Tango scrcpy process management for Android device mirroring."""
 
 import asyncio
+import logging
 import os
 import socket
 import time
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Default Tango server port
 DEFAULT_SCRCPY_PORT = 8000
@@ -192,10 +195,11 @@ class ScrcpyManager:
             self._devices_cached_at = time.time()
 
         except FileNotFoundError:
+            # adb not found
             self._devices_cache = []
             self._devices_cached_at = time.time()
-        except Exception as e:
-            print(f"Error getting devices: {e}")
+        except OSError as e:
+            logger.warning("Error getting devices: %s", e)
             # Keep old cache on error, but mark as stale
             if not self._devices_cache:
                 self._devices_cache = []
@@ -220,8 +224,8 @@ class ScrcpyManager:
         except FileNotFoundError:
             # emulator command not found
             return []
-        except Exception as e:
-            print(f"Error getting AVDs: {e}")
+        except OSError as e:
+            logger.debug("Error getting AVDs: %s", e)
             return []
 
     async def _get_running_avd_names(self, emulator_ids: set[str]) -> dict[str, str]:
@@ -243,7 +247,8 @@ class ScrcpyManager:
                 avd_name = stdout.decode().strip().split("\n")[0].strip()
                 if avd_name and avd_name != "OK":
                     result[emulator_id] = avd_name
-            except Exception:
+            except (asyncio.TimeoutError, OSError):
+                # Timeout or ADB error - skip this emulator
                 pass
         return result
 
@@ -300,7 +305,7 @@ class ScrcpyManager:
                 if self._process.stdout is not None:
                     try:
                         output = await asyncio.wait_for(self._process.stdout.read(), timeout=1.0)
-                    except Exception:
+                    except (asyncio.TimeoutError, OSError):
                         output = b""
                 text = output.decode("utf-8", errors="replace")
                 last_error = self._extract_start_error(text)
@@ -312,7 +317,8 @@ class ScrcpyManager:
             self._process = None
             return {"success": False, "error": last_error}
 
-        except Exception as e:
+        except OSError as e:
+            logger.warning("Failed to start Tango server: %s", e)
             self._running = False
             return {"success": False, "error": str(e)}
 
@@ -331,7 +337,8 @@ class ScrcpyManager:
         except asyncio.TimeoutError:
             self._process.kill()
             await self._process.wait()
-        except Exception as e:
+        except (OSError, ProcessLookupError) as e:
+            logger.debug("Error stopping Tango server: %s", e)
             return {"success": False, "error": str(e)}
         finally:
             self._running = False

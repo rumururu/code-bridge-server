@@ -21,7 +21,8 @@ class ProjectManagerCoreTest(unittest.TestCase):
         }
 
         manager = ProjectManager(_project_db_factory=lambda: fake_db)
-        with patch.object(manager, "get_server_port", return_value=3000):
+        with patch.object(manager, "get_server_port", return_value=3000), \
+             patch.object(manager, "is_server_running", return_value=True):
             result = manager.get_project("demo")
 
         fake_db.get.assert_called_once_with("demo")
@@ -36,13 +37,12 @@ class ProjectManagerCoreTest(unittest.TestCase):
             {"name": "a", "path": "/tmp/a", "type": "nextjs", "dev_server": {"port": 3000}},
             {"name": "b", "path": "/tmp/b", "type": "flutter", "dev_server": None},
         ]
+        fake_db.get.side_effect = lambda name: fake_db.get_all.return_value[0] if name == "a" else fake_db.get_all.return_value[1]
         manager = ProjectManager(_project_db_factory=lambda: fake_db)
 
-        with patch.object(
-            manager,
-            "get_server_port",
-            side_effect=lambda name: 3000 if name == "a" else None,
-        ):
+        with patch("project_manager.list_listening_processes", return_value={}), \
+             patch("project_manager.list_process_cwds", return_value={}), \
+             patch("project_manager.detect_port_for_project", side_effect=lambda p, t, **kw: 3000 if "a" in p else None):
             result = manager.get_all_projects()
 
         fake_db.get_all.assert_called_once_with()
@@ -62,7 +62,7 @@ class ProjectManagerCoreTest(unittest.TestCase):
         }
         manager = ProjectManager(_project_db_factory=lambda: fake_db)
 
-        with patch("projects.detect_project_running_server_port", return_value=5173) as mock_detect:
+        with patch("project_manager.detect_project_running_server_port", return_value=5173) as mock_detect:
             result = manager.detect_running_server_port("demo")
 
         fake_db.get.assert_called_once_with("demo")

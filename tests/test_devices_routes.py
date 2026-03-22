@@ -10,7 +10,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from routes.deps import verify_api_key
+from routes.deps import verify_api_key, verify_api_key_or_localhost
 from routes.devices import router as devices_router
 
 
@@ -19,6 +19,7 @@ class DevicesRoutesTest(unittest.TestCase):
         app = FastAPI()
         app.include_router(devices_router)
         app.dependency_overrides[verify_api_key] = lambda: True
+        app.dependency_overrides[verify_api_key_or_localhost] = lambda: True
         self.client = TestClient(app)
 
     def tearDown(self):

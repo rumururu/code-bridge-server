@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass
 from typing import Any, Optional
 
 from database import get_settings_db
@@ -15,6 +13,7 @@ from llm_settings import (
     set_codex_sandbox_mode,
     set_selected_llm,
 )
+from base_result import BaseRouteResult
 
 # Setting keys
 SETTING_ALLOW_IP_LOGIN = "allow_ip_login"
@@ -22,54 +21,32 @@ SETTING_ALLOW_IP_LOGIN = "allow_ip_login"
 HEARTBEAT_MINUTES_MIN = 5
 HEARTBEAT_MINUTES_MAX = 15
 
-
-@dataclass(frozen=True)
-class SystemSettingsResult:
-    """Typed result for system-settings route responses."""
-
-    success: bool
-    status_code: int
-    payload: dict[str, Any]
-
-    def as_response_fields(self) -> dict[str, Any]:
-        """Serialize for route response helpers."""
-        return self.payload
+# Backwards-compatible alias
+SystemSettingsResult = BaseRouteResult
 
 
 def get_heartbeat_settings_for_current_server() -> SystemSettingsResult:
     """Get heartbeat settings snapshot."""
-    return SystemSettingsResult(
-        success=True,
-        status_code=200,
-        payload={
-            "interval_minutes": get_heartbeat_interval(),
-            "min": HEARTBEAT_MINUTES_MIN,
-            "max": HEARTBEAT_MINUTES_MAX,
-        },
-    )
+    return SystemSettingsResult.ok({
+        "interval_minutes": get_heartbeat_interval(),
+        "min": HEARTBEAT_MINUTES_MIN,
+        "max": HEARTBEAT_MINUTES_MAX,
+    })
 
 
 def update_heartbeat_settings_for_current_server(interval_minutes: int) -> SystemSettingsResult:
     """Update heartbeat interval and return updated snapshot."""
     new_interval = set_heartbeat_interval(interval_minutes)
-    return SystemSettingsResult(
-        success=True,
-        status_code=200,
-        payload={
-            "interval_minutes": new_interval,
-            "min": HEARTBEAT_MINUTES_MIN,
-            "max": HEARTBEAT_MINUTES_MAX,
-        },
-    )
+    return SystemSettingsResult.ok({
+        "interval_minutes": new_interval,
+        "min": HEARTBEAT_MINUTES_MIN,
+        "max": HEARTBEAT_MINUTES_MAX,
+    })
 
 
 def get_llm_options_for_current_server() -> SystemSettingsResult:
     """Return current LLM provider/model options."""
-    return SystemSettingsResult(
-        success=True,
-        status_code=200,
-        payload=get_llm_options_snapshot(),
-    )
+    return SystemSettingsResult.ok(get_llm_options_snapshot())
 
 
 def update_llm_selection_for_current_server(company_id: str, model: str) -> SystemSettingsResult:
@@ -77,25 +54,17 @@ def update_llm_selection_for_current_server(company_id: str, model: str) -> Syst
     try:
         payload = set_selected_llm(company_id, model)
     except ValueError as exc:
-        return SystemSettingsResult(
-            success=False,
-            status_code=400,
-            payload={"error": str(exc)},
-        )
+        return SystemSettingsResult.error(400, str(exc))
 
-    return SystemSettingsResult(success=True, status_code=200, payload=payload)
+    return SystemSettingsResult.ok(payload)
 
 
 def get_codex_settings_for_current_server() -> SystemSettingsResult:
     """Get Codex-specific settings."""
-    return SystemSettingsResult(
-        success=True,
-        status_code=200,
-        payload={
-            "sandbox_mode": get_codex_sandbox_mode(),
-            "sandbox_modes": CODEX_SANDBOX_MODES,
-        },
-    )
+    return SystemSettingsResult.ok({
+        "sandbox_mode": get_codex_sandbox_mode(),
+        "sandbox_modes": CODEX_SANDBOX_MODES,
+    })
 
 
 def update_codex_settings_for_current_server(sandbox_mode: str) -> SystemSettingsResult:
@@ -103,13 +72,9 @@ def update_codex_settings_for_current_server(sandbox_mode: str) -> SystemSetting
     try:
         payload = set_codex_sandbox_mode(sandbox_mode)
     except ValueError as exc:
-        return SystemSettingsResult(
-            success=False,
-            status_code=400,
-            payload={"error": str(exc)},
-        )
+        return SystemSettingsResult.error(400, str(exc))
 
-    return SystemSettingsResult(success=True, status_code=200, payload=payload)
+    return SystemSettingsResult.ok(payload)
 
 
 # ============================================================================
@@ -133,14 +98,10 @@ def set_allow_ip_login(enabled: bool) -> bool:
 
 def get_ip_login_settings_for_current_server() -> SystemSettingsResult:
     """Get IP login settings snapshot."""
-    return SystemSettingsResult(
-        success=True,
-        status_code=200,
-        payload={
-            "allow_ip_login": get_allow_ip_login(),
-            "warning": "When enabled, anyone on your network can access without QR pairing. Use only for development/testing.",
-        },
-    )
+    return SystemSettingsResult.ok({
+        "allow_ip_login": get_allow_ip_login(),
+        "warning": "When enabled, anyone on your network can access without QR pairing. Use only for development/testing.",
+    })
 
 
 async def update_ip_login_settings_for_current_server(
@@ -179,12 +140,8 @@ async def update_ip_login_settings_for_current_server(
     if tunnel_stopped:
         message += " Tunnel has been stopped for security."
 
-    return SystemSettingsResult(
-        success=True,
-        status_code=200,
-        payload={
-            "allow_ip_login": new_value,
-            "tunnel_stopped": tunnel_stopped,
-            "message": message,
-        },
-    )
+    return SystemSettingsResult.ok({
+        "allow_ip_login": new_value,
+        "tunnel_stopped": tunnel_stopped,
+        "message": message,
+    })

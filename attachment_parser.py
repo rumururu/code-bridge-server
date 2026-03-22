@@ -95,7 +95,7 @@ def attachment_to_multimodal_block(
         with open(full_path, "rb") as f:
             image_data = f.read()
         base64_data = base64.standard_b64encode(image_data).decode("utf-8")
-    except Exception:
+    except OSError:
         return None
 
     return {

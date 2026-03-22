@@ -6,6 +6,7 @@ Session persistence is handled via Codex's built-in session files for resume cap
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import signal
@@ -13,6 +14,8 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator
 
 from llm_session import LlmSession
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -127,8 +130,13 @@ class CodexSession(LlmSession):
                     continue
 
                 await self._handle_jsonl_line(text)
-        except Exception:
+        except asyncio.CancelledError:
+            raise
+        except (OSError, IOError):
+            # Process terminated or pipe closed - expected during shutdown
             pass
+        except (UnicodeDecodeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+            logger.warning("Unexpected error reading stdout: %s", exc)
         finally:
             # Signal end of stream
             await self._event_queue.put({"type": "stream_end"})
@@ -148,8 +156,13 @@ class CodexSession(LlmSession):
                 text = line.decode("utf-8", errors="replace").strip()
                 if text:
                     self._stderr_lines.append(text)
-        except Exception:
+        except asyncio.CancelledError:
+            raise
+        except (OSError, IOError):
+            # Process terminated or pipe closed - expected during shutdown
             pass
+        except (UnicodeDecodeError, ValueError, RuntimeError) as exc:
+            logger.warning("Unexpected error reading stderr: %s", exc)
 
     async def _handle_jsonl_line(self, line: str) -> None:
         """Parse one JSONL line and enqueue normalized event."""
@@ -394,7 +407,7 @@ class CodexSession(LlmSession):
 
                 yield event
 
-        except Exception as exc:
+        except (OSError, ConnectionError, RuntimeError, ValueError, asyncio.TimeoutError) as exc:
             yield {"type": "error", "error": {"message": str(exc)}}
         finally:
             self._turn_in_progress = False

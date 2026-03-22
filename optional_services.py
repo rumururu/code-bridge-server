@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 
-def _none_callable(*args, **kwargs):
+def _none_callable(*args: Any, **kwargs: Any) -> None:
     return None
 
 

@@ -13,7 +13,7 @@ import pairing_qr_service
 
 class PairingQrServiceTest(unittest.TestCase):
     def test_build_pairing_qr_payload_for_current_server(self):
-        fake_config = SimpleNamespace(port=8080, server_name="Code Bridge")
+        fake_config = SimpleNamespace(api_port=8080, dashboard_port=8080, server_name="Code Bridge")
         fake_pairing_data = SimpleNamespace(
             to_qr_url=lambda: "codebridge://pair?x=1",
             local_url="http://127.0.0.1:8080",

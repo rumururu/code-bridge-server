@@ -32,7 +32,7 @@ def _has_file_handler(logger: logging.Logger, log_path: Path) -> bool:
         try:
             if Path(filename).resolve() == resolved:
                 return True
-        except Exception:
+        except OSError:
             continue
     return False
 

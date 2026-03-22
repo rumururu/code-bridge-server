@@ -26,7 +26,7 @@ class ProjectQueryServiceTest(unittest.TestCase):
             }
         ]
 
-        result = build_project_list_view(projects, get_server_port=lambda _name: 3000)
+        result = build_project_list_view(projects, get_server_port=lambda _name: 3000, is_managed_server=lambda _name: True)
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["dev_server"]["port"], 3000)
@@ -34,7 +34,7 @@ class ProjectQueryServiceTest(unittest.TestCase):
         self.assertTrue(result[0]["dev_server"]["running"])
 
     def test_build_single_project_view_returns_none_when_missing(self):
-        result = build_single_project_view("demo", None, get_server_port=lambda _name: None)
+        result = build_single_project_view("demo", None, get_server_port=lambda _name: None, is_managed_server=lambda _name: False)
         self.assertIsNone(result)
 
     def test_build_single_project_view_includes_command(self):
@@ -45,7 +45,7 @@ class ProjectQueryServiceTest(unittest.TestCase):
             "dev_server": {"command": "npm run dev", "port": 5173},
         }
 
-        result = build_single_project_view("demo", project, get_server_port=lambda _name: None)
+        result = build_single_project_view("demo", project, get_server_port=lambda _name: None, is_managed_server=lambda _name: False)
 
         assert result is not None
         self.assertEqual(result["dev_server"]["port"], 5173)

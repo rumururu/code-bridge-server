@@ -8,9 +8,11 @@ Option 2 Implementation: App-only authentication, server token verification.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import platform
+import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,8 +71,8 @@ class FirebaseAuthService:
             with open(FIREBASE_CONFIG_PATH, "r") as f:
                 self._config = json.load(f)
             return True
-        except Exception as e:
-            logger.error(f"Failed to load Firebase config: {e}")
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error("Failed to load Firebase config: %s", e)
             return False
 
     def _load_server_info(self) -> None:
@@ -87,8 +89,8 @@ class FirebaseAuthService:
                     self._refresh_token = data.get("refresh_token")
                     self._auth_mode = data.get("auth_mode", "id_token")
                 return
-            except Exception as e:
-                logger.error(f"Failed to load server info: {e}")
+            except (json.JSONDecodeError, OSError) as e:
+                logger.error("Failed to load server info: %s", e)
 
         # Migrate from legacy device_info.json
         if LEGACY_DEVICE_INFO_PATH.exists():
@@ -106,8 +108,8 @@ class FirebaseAuthService:
                 # Remove legacy file
                 LEGACY_DEVICE_INFO_PATH.unlink()
                 logger.info("Migrated device_info.json to server_info.json")
-            except Exception as e:
-                logger.error(f"Failed to migrate legacy device info: {e}")
+            except (json.JSONDecodeError, OSError) as e:
+                logger.error("Failed to migrate legacy device info: %s", e)
 
     def _save_server_info(self) -> None:
         """Save server info to file."""
@@ -125,18 +127,80 @@ class FirebaseAuthService:
                 data["id_token"] = self._current_id_token
             with open(SERVER_INFO_PATH, "w") as f:
                 json.dump(data, f)
-        except Exception as e:
-            logger.error(f"Failed to save server info: {e}")
+        except OSError as e:
+            logger.error("Failed to save server info: %s", e)
 
     def _get_server_id(self) -> str:
-        """Get or generate a unique server ID."""
+        """Get or generate a unique server ID based on machine identifier.
+
+        Uses a stable machine identifier to ensure the same physical machine
+        always gets the same server ID, even if server_info.json is deleted.
+        """
         if self._server_id:
             return self._server_id
 
-        # Generate a new server ID
-        self._server_id = str(uuid.uuid4())
+        # Generate server ID from stable machine identifier
+        machine_id = self._get_machine_identifier()
+        # Create a UUID-like hash for consistency with existing IDs
+        self._server_id = hashlib.sha256(machine_id.encode()).hexdigest()[:32]
+        # Format as UUID-like string for readability
+        self._server_id = f"{self._server_id[:8]}-{self._server_id[8:12]}-{self._server_id[12:16]}-{self._server_id[16:20]}-{self._server_id[20:32]}"
         self._save_server_info()
         return self._server_id
+
+    def _get_machine_identifier(self) -> str:
+        """Get a stable machine identifier.
+
+        Tries to get hardware UUID on macOS, machine-id on Linux,
+        falls back to hostname + platform info if unavailable.
+        """
+        system = platform.system()
+
+        try:
+            if system == "Darwin":  # macOS
+                result = subprocess.run(
+                    ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.split("\n"):
+                        if "IOPlatformUUID" in line:
+                            # Extract UUID from line like: "IOPlatformUUID" = "XXXXXX-..."
+                            parts = line.split('"')
+                            if len(parts) >= 4:
+                                return parts[3]
+
+            elif system == "Linux":
+                # Try /etc/machine-id first (systemd)
+                machine_id_path = Path("/etc/machine-id")
+                if machine_id_path.exists():
+                    return machine_id_path.read_text().strip()
+                # Try /var/lib/dbus/machine-id as fallback
+                dbus_path = Path("/var/lib/dbus/machine-id")
+                if dbus_path.exists():
+                    return dbus_path.read_text().strip()
+
+            elif system == "Windows":
+                result = subprocess.run(
+                    ["wmic", "csproduct", "get", "uuid"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    lines = result.stdout.strip().split("\n")
+                    if len(lines) >= 2:
+                        return lines[1].strip()
+
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.debug("Could not get hardware ID: %s", e)
+
+        # Fallback: use hostname + platform info (less stable but better than random)
+        fallback = f"{platform.node()}-{platform.machine()}-{platform.system()}"
+        logger.warning(f"Using fallback machine identifier: {fallback}")
+        return fallback
 
     def _get_device_name(self) -> str:
         """Get a human-readable device name."""
@@ -181,19 +245,19 @@ class FirebaseAuthService:
                     if await self.refresh_id_token():
                         logger.info(f"Restored authentication via refresh token")
                     else:
-                        logger.warning("Refresh token invalid, clearing auth")
-                        self._clear_auth_state()
+                        logger.warning("Refresh token invalid, clearing tokens (preserving ownership)")
+                        self._clear_token_state()
                 else:
-                    logger.info("Saved ID token expired, clearing (id_token mode)")
-                    self._clear_auth_state()
+                    logger.info("Saved ID token expired, clearing tokens (id_token mode)")
+                    self._clear_token_state()
             elif self._auth_mode == "refresh_token" and self._refresh_token:
                 # No ID token but have refresh token
                 logger.info("No ID token, attempting refresh...")
                 if await self.refresh_id_token():
                     logger.info(f"Restored authentication via refresh token")
                 else:
-                    logger.warning("Refresh token invalid, clearing auth")
-                    self._clear_auth_state()
+                    logger.warning("Refresh token invalid, clearing tokens (preserving ownership)")
+                    self._clear_token_state()
 
         self._initialized = True
         logger.info("Firebase auth service initialized (token verification mode)")
@@ -205,13 +269,28 @@ class FirebaseAuthService:
             self._keys_refresh_task = asyncio.create_task(self._fetch_public_keys())
 
     def _clear_auth_state(self) -> None:
-        """Clear authentication state (internal use)."""
+        """Clear ALL authentication state including user ownership (internal use).
+
+        Use this for complete auth reset (e.g., clear_auth() API).
+        For token expiration/invalidation, use _clear_token_state() instead.
+        """
         self._current_user_id = None
         self._current_email = None
         self._current_id_token = None
         self._refresh_token = None
         self._auth_mode = "id_token"
         self._token_expires_at = None
+
+    def _clear_token_state(self) -> None:
+        """Clear token state but preserve user ownership (user_id/email).
+
+        Use this when tokens expire or become invalid but we want to
+        preserve server ownership for SSO re-authentication.
+        """
+        self._current_id_token = None
+        self._refresh_token = None
+        self._token_expires_at = None
+        # Keep user_id, email, auth_mode - these represent server ownership
 
     def _extract_token_expiration(self, id_token: str) -> None:
         """Extract and store token expiration from ID token.
@@ -226,8 +305,8 @@ class FirebaseAuthService:
                 self._token_expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
                 remaining = (self._token_expires_at - datetime.now(timezone.utc)).total_seconds()
                 logger.debug(f"Token expires at: {self._token_expires_at} ({remaining:.0f}s remaining)")
-        except Exception as e:
-            logger.debug(f"Could not extract token expiration: {e}")
+        except jwt.PyJWTError as e:
+            logger.debug("Could not extract token expiration: %s", e)
 
     async def _fetch_public_keys(self) -> bool:
         """Fetch Google's public keys for JWT verification.
@@ -254,8 +333,8 @@ class FirebaseAuthService:
         except asyncio.TimeoutError:
             logger.warning("Timeout fetching public keys (will retry)")
             return False
-        except Exception as e:
-            logger.error(f"Error fetching public keys: {e}")
+        except httpx.HTTPError as e:
+            logger.error("Error fetching public keys: %s", e)
             return False
 
     async def _ensure_public_keys(self) -> bool:
@@ -352,10 +431,7 @@ class FirebaseAuthService:
             logger.warning("Token issuer mismatch")
             return None
         except jwt.InvalidTokenError as e:
-            logger.warning(f"Invalid token: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Token verification error: {e}")
+            logger.warning("Invalid token: %s", e)
             return None
 
     async def refresh_id_token(self) -> bool:
@@ -412,8 +488,8 @@ class FirebaseAuthService:
                     logger.error(f"Token refresh failed: {response.text}")
                     return False
 
-        except Exception as e:
-            logger.error(f"Token refresh error: {e}")
+        except httpx.HTTPError as e:
+            logger.error("Token refresh error: %s", e)
             return False
 
     async def ensure_valid_token(self) -> bool:
@@ -461,8 +537,8 @@ class FirebaseAuthService:
                         if remaining < self.TOKEN_REFRESH_THRESHOLD_SECONDS:
                             logger.info(f"Token expiring in {remaining:.0f}s, refreshing...")
                             return await self.refresh_id_token()
-                except Exception as e:
-                    logger.debug(f"Could not decode token for expiration check: {e}")
+                except jwt.PyJWTError as e:
+                    logger.debug("Could not decode token for expiration check: %s", e)
 
         return True
 
@@ -499,8 +575,8 @@ class FirebaseAuthService:
             if exp:
                 self._token_expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
                 logger.debug(f"Token expires at: {self._token_expires_at}")
-        except Exception as e:
-            logger.debug(f"Could not extract token expiration: {e}")
+        except jwt.PyJWTError as e:
+            logger.debug("Could not extract token expiration: %s", e)
 
         if auth_mode == "refresh_token" and refresh_token:
             self._refresh_token = refresh_token
@@ -576,8 +652,8 @@ class FirebaseAuthService:
                     logger.error(f"Device registration failed: {response.text}")
                     return False
 
-        except Exception as e:
-            logger.error(f"Device registration error: {e}")
+        except httpx.HTTPError as e:
+            logger.error("Device registration error: %s", e)
             return False
 
     async def update_tunnel_url(self, tunnel_url: str) -> bool:
@@ -653,8 +729,8 @@ class FirebaseAuthService:
 
                 return response.status_code in (200, 201)
 
-        except Exception as e:
-            logger.error(f"Heartbeat error: {e}")
+        except httpx.HTTPError as e:
+            logger.error("Heartbeat error: %s", e)
             return False
 
     def get_status(self) -> dict[str, Any]:
@@ -709,8 +785,8 @@ class FirebaseAuthService:
                             headers={"Authorization": f"Bearer {self._current_id_token}"},
                         )
                         logger.info(f"Server removed from Firebase: {server_id}")
-            except Exception as e:
-                logger.warning(f"Failed to remove device from Firebase: {e}")
+            except httpx.HTTPError as e:
+                logger.warning("Failed to remove device from Firebase: %s", e)
 
         # Clear all auth state
         self._clear_auth_state()

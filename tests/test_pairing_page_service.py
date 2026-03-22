@@ -20,6 +20,7 @@ class PairingPageServiceTest(unittest.TestCase):
             local_url="http://127.0.0.1:8080",
             pair_token="token-1",
             expires_in_seconds=240,
+            pairing_code="1234",
         )
 
         qr_encoder = MagicMock(return_value="BASE64")
@@ -40,6 +41,8 @@ class PairingPageServiceTest(unittest.TestCase):
             local_url="http://127.0.0.1:8080",
             pair_token="token-1",
             expires_in_seconds=240,
+            pairing_code="1234",
+            embed=False,
         )
 
     def test_build_pairing_page_html_for_current_server_invalid_context(self):

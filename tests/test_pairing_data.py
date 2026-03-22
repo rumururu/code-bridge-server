@@ -108,9 +108,9 @@ class PairingDataTest(unittest.TestCase):
         )
 
         with (
-            patch("pairing.get_config", return_value=SimpleNamespace(port=8080, server_name="Demo")),
-            patch("pairing.get_active_tunnel_url", return_value="https://demo.tunnel"),
-            patch("pairing.create_current_pairing_data", return_value=expected_pairing_data) as mock_create,
+            patch("pairing_service.get_config", return_value=SimpleNamespace(api_port=8080, server_name="Demo")),
+            patch("pairing_service.get_active_tunnel_url", return_value="https://demo.tunnel"),
+            patch("pairing_service.create_current_pairing_data", return_value=expected_pairing_data) as mock_create,
         ):
             result = build_current_pairing_data_result()
 
@@ -125,7 +125,7 @@ class PairingDataTest(unittest.TestCase):
         )
 
     def test_build_current_pairing_data_result_returns_error_on_exception(self):
-        with patch("pairing.get_config", side_effect=RuntimeError("broken")):
+        with patch("pairing_service.get_config", side_effect=RuntimeError("broken")):
             result = build_current_pairing_data_result()
 
         self.assertFalse(result.success)
@@ -134,7 +134,7 @@ class PairingDataTest(unittest.TestCase):
 
     def test_build_current_pairing_qr_result_propagates_pairing_data_error(self):
         with patch(
-            "pairing.build_current_pairing_data_result",
+            "pairing_service.build_current_pairing_data_result",
             return_value=CurrentPairingDataResult(
                 success=False,
                 status_code=503,
@@ -155,7 +155,7 @@ class PairingDataTest(unittest.TestCase):
         fake_pairing_data.expires_in_seconds.return_value = 180
 
         with patch(
-            "pairing.build_current_pairing_data_result",
+            "pairing_service.build_current_pairing_data_result",
             return_value=CurrentPairingDataResult(
                 success=True,
                 status_code=200,
@@ -180,11 +180,12 @@ class PairingDataTest(unittest.TestCase):
             local_url="http://127.0.0.1:8080",
             pair_token="token-1",
             expires_in_seconds=None,
+            pairing_code=None,
         )
 
         self.assertEqual(
             result.to_render_context(),
-            ("codebridge://pair/demo", "http://127.0.0.1:8080", "token-1", 0),
+            ("codebridge://pair/demo", "http://127.0.0.1:8080", "token-1", 0, ""),
         )
 
     def test_pairing_page_context_result_to_render_context_returns_none_on_invalid_fields(self):
@@ -253,6 +254,7 @@ class PairingDataTest(unittest.TestCase):
                         "device_name": "Pixel",
                         "paired_at": 1000.0,
                         "last_used": 1001.5,
+                        "is_connected": False,
                     }
                 ],
             },
@@ -381,3 +383,105 @@ class PairingDataTest(unittest.TestCase):
             self.assertFalse(result.success)
             self.assertEqual(result.status_code, 404)
             self.assertEqual(result.error, "Client missing not found")
+
+    def test_find_client_by_device_name_returns_existing_client_id(self):
+        """Test that _find_client_by_device_name finds existing client by device_name."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = PairingService(config_dir=Path(tmp_dir))
+            service._api_keys["existing-client-id"] = {
+                "api_key": "k1",
+                "device_name": "Pixel 7",
+                "paired_at": 1000.0,
+                "last_used": 1000.0,
+            }
+
+            result = service._find_client_by_device_name("Pixel 7")
+
+            self.assertEqual(result, "existing-client-id")
+
+    def test_find_client_by_device_name_returns_none_for_unknown_device(self):
+        """Test that _find_client_by_device_name returns None for unknown device."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = PairingService(config_dir=Path(tmp_dir))
+            service._api_keys["existing-client-id"] = {
+                "api_key": "k1",
+                "device_name": "Pixel 7",
+                "paired_at": 1000.0,
+                "last_used": 1000.0,
+            }
+
+            result = service._find_client_by_device_name("Galaxy S24")
+
+            self.assertIsNone(result)
+
+    def test_find_client_by_device_name_returns_none_for_empty_name(self):
+        """Test that _find_client_by_device_name returns None for empty device name."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = PairingService(config_dir=Path(tmp_dir))
+
+            result = service._find_client_by_device_name("")
+
+            self.assertIsNone(result)
+
+    def test_verify_pair_token_updates_existing_client_with_same_device_name(self):
+        """Test that pairing with same device_name updates existing client instead of creating new."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = PairingService(config_dir=Path(tmp_dir))
+
+            # Register existing client
+            service._api_keys["old-client-id"] = {
+                "api_key": "old-key",
+                "device_name": "Pixel 7",
+                "paired_at": 1000.0,
+                "last_used": 1000.0,
+            }
+
+            # Create a valid token
+            pairing_data = service.create_pairing_data(port=8080)
+            token = pairing_data.pair_token
+
+            # Verify with new client_id but same device_name
+            result = service.verify_pair_token(
+                pair_token=token,
+                client_id="new-client-id",  # Different client_id
+                device_name="Pixel 7",  # Same device_name
+            )
+
+            self.assertTrue(result.success)
+            # Should use old client_id, not new one
+            self.assertEqual(result.client_id, "old-client-id")
+            # Old client should be updated with new api_key
+            self.assertIn("old-client-id", service._api_keys)
+            self.assertNotEqual(service._api_keys["old-client-id"]["api_key"], "old-key")
+            # New client_id should not be created
+            self.assertNotIn("new-client-id", service._api_keys)
+
+    def test_verify_pair_token_creates_new_client_for_new_device_name(self):
+        """Test that pairing with new device_name creates new client."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = PairingService(config_dir=Path(tmp_dir))
+
+            # Register existing client
+            service._api_keys["existing-client-id"] = {
+                "api_key": "old-key",
+                "device_name": "Pixel 7",
+                "paired_at": 1000.0,
+                "last_used": 1000.0,
+            }
+
+            # Create a valid token
+            pairing_data = service.create_pairing_data(port=8080)
+            token = pairing_data.pair_token
+
+            # Verify with different device_name
+            result = service.verify_pair_token(
+                pair_token=token,
+                client_id="new-client-id",
+                device_name="Galaxy S24",  # Different device_name
+            )
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.client_id, "new-client-id")
+            # Both clients should exist
+            self.assertIn("existing-client-id", service._api_keys)
+            self.assertIn("new-client-id", service._api_keys)

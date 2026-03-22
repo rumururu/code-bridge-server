@@ -80,8 +80,8 @@ class TunnelService:
             logger.warning("Tunnel started but URL not detected within timeout")
             return self._tunnel_url
 
-        except Exception as e:
-            logger.error(f"Failed to start tunnel: {e}")
+        except OSError as e:
+            logger.error("Failed to start tunnel: %s", e)
             self._running = False
             return None
 
@@ -114,13 +114,16 @@ class TunnelService:
                             if self._on_url_change:
                                 try:
                                     self._on_url_change(new_url)
-                                except Exception as e:
-                                    logger.error(f"URL change callback error: {e}")
+                                except (OSError, RuntimeError, ValueError) as exc:
+                                    logger.exception("URL change callback error: %s", exc)
 
         except asyncio.CancelledError:
+            raise
+        except (OSError, IOError):
+            # I/O error during read - expected during shutdown
             pass
-        except Exception as e:
-            logger.error(f"Tunnel monitor error: {e}")
+        except (RuntimeError, ValueError, UnicodeDecodeError) as e:
+            logger.warning("Unexpected tunnel monitor error: %s", e)
         finally:
             if self._running and self._process.returncode is not None:
                 logger.warning(
@@ -154,8 +157,8 @@ class TunnelService:
             except asyncio.TimeoutError:
                 self._process.kill()
                 await self._process.wait()
-            except Exception as e:
-                logger.error(f"Error stopping tunnel: {e}")
+            except (OSError, ProcessLookupError) as e:
+                logger.debug("Error stopping tunnel process: %s", e)
             finally:
                 self._process = None
 

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from claude_session import get_session_manager
 from heartbeat_settings import get_heartbeat_interval, set_heartbeat_interval
@@ -35,7 +38,7 @@ async def register_device_with_local_url_for_current_server(
     resolved_pairing = pairing_service or get_pairing_service()
     local_url = f"http://{resolved_pairing.get_local_ip()}:{config.api_port}"
     await firebase_auth.register_device(None, local_url)
-    print(f"Device registered to Firebase with local URL: {local_url}")
+    logger.info("Device registered to Firebase with local URL: %s", local_url)
     return local_url
 
 
@@ -65,10 +68,10 @@ async def initialize_firebase_for_current_server(
                 )
                 return firebase_auth, False
 
-            print("Firebase auth expired or invalid. QR pairing required.")
+            logger.info("Firebase auth expired or invalid. QR pairing required.")
             return firebase_auth, True
         except Exception as exc:
-            print(f"Warning: Firebase initialization failed: {exc}")
+            logger.warning("Firebase initialization failed: %s", exc)
             needs_pairing = True
     else:
         needs_pairing = True
@@ -120,9 +123,9 @@ def display_pairing_qr_for_current_server(
             browser_opener = webbrowser.open
         try:
             browser_opener(pair_url)
-            print(f"Opening browser: {pair_url}")
-        except Exception as exc:
-            print(f"Could not open browser: {exc}")
+            logger.info("Opening browser: %s", pair_url)
+        except OSError as exc:
+            logger.warning("Could not open browser: %s", exc)
         _mark_initialized()
 
     if not qrcode_available:
@@ -131,8 +134,8 @@ def display_pairing_qr_for_current_server(
     try:
         payload = payload_builder(tunnel_url=None, config=config)
         payload_display(payload)
-    except Exception as exc:
-        print(f"Could not display QR: {exc}")
+    except OSError as exc:
+        logger.warning("Could not display QR: %s", exc)
 
 
 async def start_remote_tunnel_for_current_server(
@@ -155,16 +158,16 @@ async def start_remote_tunnel_for_current_server(
                 # Ensure token is valid before updating Firebase
                 if hasattr(firebase_auth, 'ensure_valid_token'):
                     if not await firebase_auth.ensure_valid_token():
-                        print("Warning: Token validation failed, cannot update tunnel URL in Firebase")
+                        logger.warning("Token validation failed, cannot update tunnel URL in Firebase")
                         return
 
                 pairing = pairing_service_factory()
                 local_url = f"http://{pairing.get_local_ip()}:{config.api_port}"
                 success = await firebase_auth.register_device(url, local_url)
                 if success:
-                    print(f"Updated tunnel URL in Firebase: {url}")
+                    logger.info("Updated tunnel URL in Firebase: %s", url)
                 else:
-                    print(f"Warning: Failed to update tunnel URL in Firebase")
+                    logger.warning("Failed to update tunnel URL in Firebase")
 
         tunnel_service = tunnel_service_factory(
             local_port=config.api_port,  # Tunnel exposes API server, not Dashboard
@@ -172,17 +175,17 @@ async def start_remote_tunnel_for_current_server(
         )
         tunnel_url = await tunnel_service.start()
         if tunnel_url:
-            print(f"Cloudflare Tunnel started: {tunnel_url}")
+            logger.info("Cloudflare Tunnel started: %s", tunnel_url)
 
             if firebase_auth and firebase_auth.is_authenticated:
                 pairing = pairing_service_factory()
                 local_url = f"http://{pairing.get_local_ip()}:{config.api_port}"
                 await firebase_auth.register_device(tunnel_url, local_url)
-                print("Device registration updated with tunnel URL")
+                logger.info("Device registration updated with tunnel URL")
 
         return tunnel_service
-    except Exception as exc:
-        print(f"Warning: Remote access setup failed: {exc}")
+    except OSError as exc:
+        logger.warning("Remote access setup failed: %s", exc)
         return None
 
 
@@ -198,7 +201,7 @@ def start_heartbeat_for_current_server(
         return None
 
     set_heartbeat_interval(config.heartbeat_interval_minutes)
-    print(f"Starting Firebase heartbeat (interval: {get_heartbeat_interval()} min)")
+    logger.info("Starting Firebase heartbeat (interval: %d min)", get_heartbeat_interval())
 
     async def heartbeat_loop():
         consecutive_failures = 0
@@ -209,19 +212,19 @@ def start_heartbeat_for_current_server(
             await sleep_fn(interval_seconds)
 
             if not (firebase_auth and firebase_auth.is_authenticated):
-                print("Heartbeat: Firebase auth no longer valid, stopping heartbeat")
+                logger.warning("Heartbeat: Firebase auth no longer valid, stopping heartbeat")
                 break
 
             success = await firebase_auth.heartbeat()
             if success:
                 consecutive_failures = 0
-                print("Heartbeat sent successfully")
+                logger.debug("Heartbeat sent successfully")
             else:
                 consecutive_failures += 1
-                print(f"Heartbeat failed (attempt {consecutive_failures}/{max_failures})")
+                logger.warning("Heartbeat failed (attempt %d/%d)", consecutive_failures, max_failures)
 
                 if consecutive_failures >= max_failures:
-                    print("Heartbeat: Too many consecutive failures, server may need re-pairing")
+                    logger.error("Heartbeat: Too many consecutive failures, server may need re-pairing")
                     # Don't break - keep trying in case network recovers
 
     return create_task(heartbeat_loop())
@@ -237,7 +240,7 @@ async def shutdown_runtime_for_current_server(
     preview_proxy_factory: Callable[[], Any] = get_preview_proxy,
 ) -> None:
     """Shutdown runtime tasks/services and close global managers."""
-    print("Code Bridge Server shutting down...")
+    logger.info("Code Bridge Server shutting down...")
 
     if heartbeat_task:
         heartbeat_task.cancel()
@@ -249,8 +252,8 @@ async def shutdown_runtime_for_current_server(
     if tunnel_service:
         try:
             await tunnel_service.stop()
-        except Exception as exc:
-            print(f"Warning: Tunnel shutdown error: {exc}")
+        except OSError as exc:
+            logger.warning("Tunnel shutdown error: %s", exc)
 
     resolved_session_manager = session_manager or session_manager_factory()
     await resolved_session_manager.close_all()

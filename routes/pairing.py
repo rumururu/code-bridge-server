@@ -1,34 +1,52 @@
 """Pairing API routes - QR code pairing for mobile app."""
 
-from fastapi import APIRouter, Depends, Request, HTTPException
-from fastapi.responses import HTMLResponse, Response
+import base64
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from models import PairCodeVerifyRequest, PairVerifyRequest, SSOPairRequest
 from pairing import (
+    RateLimiter,
     build_current_pairing_qr_result,
     get_pair_token_status_for_current_server,
     get_pairing_status_for_current_server,
     revoke_paired_client_for_current_server,
     verify_pairing_code_for_current_server,
     verify_sso_pairing_for_current_server,
-    RateLimiter,
 )
 from pairing_page import make_qr_png_base64
 from pairing_page_service import build_pairing_page_html_for_current_server
 from remote_access_service import verify_pair_token_for_current_server
+
+from .deps import require_local_access, require_localhost_only, verify_api_key
 from .result_response import as_route_response
-from .deps import require_local_access, verify_api_key
-import base64
+
+# Rate limiting constants for pairing endpoints
+TOKEN_STATUS_MAX_ATTEMPTS = 20
+TOKEN_STATUS_LOCKOUT_SECONDS = 300
+VERIFY_MAX_ATTEMPTS = 10
+VERIFY_LOCKOUT_SECONDS = 600
+RATE_LIMIT_WINDOW_SECONDS = 60
 
 router = APIRouter(tags=["pairing"])
 
 # Rate limiters for unauthenticated endpoints
-_token_status_limiter = RateLimiter(max_attempts=20, window_seconds=60, lockout_seconds=300)
-_verify_limiter = RateLimiter(max_attempts=10, window_seconds=60, lockout_seconds=600)
+_token_status_limiter = RateLimiter(
+    max_attempts=TOKEN_STATUS_MAX_ATTEMPTS,
+    window_seconds=RATE_LIMIT_WINDOW_SECONDS,
+    lockout_seconds=TOKEN_STATUS_LOCKOUT_SECONDS,
+)
+_verify_limiter = RateLimiter(
+    max_attempts=VERIFY_MAX_ATTEMPTS,
+    window_seconds=RATE_LIMIT_WINDOW_SECONDS,
+    lockout_seconds=VERIFY_LOCKOUT_SECONDS,
+)
 
 
 @router.get("/api/pair/qr", dependencies=[Depends(require_local_access)])
-async def get_pair_qr():
+async def get_pair_qr() -> JSONResponse:
     """Get QR code pairing data.
 
     Only accessible from local network for security.
@@ -47,7 +65,7 @@ async def get_pair_qr():
 
 
 @router.get("/api/pair/qr-image", dependencies=[Depends(require_local_access)])
-async def get_pair_qr_image():
+async def get_pair_qr_image() -> Response:
     """Get QR code as PNG image for dashboard display.
 
     Only accessible from local network for security.
@@ -72,13 +90,13 @@ async def get_pair_qr_image():
 @router.get(
     "/pair",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_access)],
+    dependencies=[Depends(require_localhost_only)],
 )
-async def get_pair_page(embed: bool = False):
+async def get_pair_page(embed: bool = False) -> HTMLResponse:
     """Show QR code pairing page in browser.
 
-    This page is only accessible from local network.
-    External access via Cloudflare Tunnel is blocked for security.
+    This page is ONLY accessible from localhost (127.0.0.1).
+    Must be opened on the same machine where the server is running.
 
     Args:
         embed: If True, hides title and dashboard link (for iframe embed in dashboard modal)
@@ -96,7 +114,7 @@ async def get_pair_page(embed: bool = False):
 
 
 @router.get("/api/pair/token-status/{token}")
-async def get_token_status(token: str, request: Request):
+async def get_token_status(token: str, request: Request) -> dict[str, Any]:
     """Check if a pairing token has been used.
 
     Rate limited to prevent token enumeration attacks.
@@ -154,8 +172,8 @@ def _get_client_ip(request: Request) -> str:
     return "unknown"
 
 
-@router.post("/api/pair/code", dependencies=[Depends(require_local_access)])
-async def verify_pairing_code(request: Request, body: PairCodeVerifyRequest):
+@router.post("/api/pair/code", dependencies=[Depends(require_local_access)], response_model=None)
+async def verify_pairing_code(request: Request, body: PairCodeVerifyRequest) -> dict[str, Any] | Response:
     """Verify a 6-digit pairing code and return a pair_token.
 
     Only accessible from local network for security (prevents external brute-force).
@@ -165,8 +183,8 @@ async def verify_pairing_code(request: Request, body: PairCodeVerifyRequest):
     return as_route_response(result)
 
 
-@router.post("/api/pair/verify")
-async def verify_pair_token(request: Request, body: PairVerifyRequest):
+@router.post("/api/pair/verify", response_model=None)
+async def verify_pair_token(request: Request, body: PairVerifyRequest) -> dict[str, Any] | Response:
     """Verify a pairing token and issue an API key.
 
     Rate limited to prevent brute-force attacks on pairing tokens.
@@ -195,8 +213,8 @@ async def verify_pair_token(request: Request, body: PairVerifyRequest):
     return as_route_response(result)
 
 
-@router.post("/api/pair/sso", dependencies=[Depends(require_local_access)])
-async def verify_sso_pairing(request: Request, body: SSOPairRequest):
+@router.post("/api/pair/sso", dependencies=[Depends(require_local_access)], response_model=None)
+async def verify_sso_pairing(request: Request, body: SSOPairRequest) -> dict[str, Any] | Response:
     """Verify Firebase SSO and issue API key if user owns this server.
 
     This endpoint is called when app selects a remote server from Firebase.
@@ -227,7 +245,7 @@ async def verify_sso_pairing(request: Request, body: SSOPairRequest):
 
 
 @router.get("/api/pair/status", dependencies=[Depends(verify_api_key)])
-async def get_pair_status():
+async def get_pair_status() -> dict[str, Any]:
     """Get current pairing status."""
     return get_pairing_status_for_current_server().as_response_fields()
 
@@ -235,11 +253,32 @@ async def get_pair_status():
 @router.delete(
     "/api/pair/clients/{client_id}",
     dependencies=[Depends(require_local_access)],
+    response_model=None,
 )
-async def revoke_paired_client(client_id: str):
+async def revoke_paired_client(client_id: str) -> dict[str, Any] | Response:
     """Revoke a paired client's API key.
 
     This is a dashboard management endpoint - only accessible locally.
     """
     result = revoke_paired_client_for_current_server(client_id)
     return as_route_response(result)
+
+
+@router.post("/api/pair/show-qr")
+async def show_qr_on_server() -> dict[str, Any]:
+    """Open QR code page in browser on the SERVER PC.
+
+    Called from mobile app to trigger QR display on the PC where server is running.
+    Uses webbrowser.open() which runs on the SERVER machine, not the mobile device.
+    No authentication required - QR display is safe and useful for initial pairing.
+    """
+    import webbrowser
+    from pairing_qr_service import build_pairing_qr_payload_for_current_server, open_pairing_page
+
+    try:
+        payload = build_pairing_qr_payload_for_current_server()
+        # pair_url is "http://localhost:{dashboard_port}/pair"
+        open_pairing_page(payload.pair_url, opener=webbrowser.open)
+        return {"success": True, "message": "QR code page opened in browser on PC"}
+    except OSError as exc:
+        return {"success": False, "error": str(exc)}

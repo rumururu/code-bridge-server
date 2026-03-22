@@ -15,13 +15,13 @@ import server_cli
 
 class ServerCliTest(unittest.TestCase):
     def test_show_pairing_qr_prints_error_when_qrcode_unavailable(self):
-        with patch("server_cli.QRCODE_AVAILABLE", False):
-            captured = io.StringIO()
-            with redirect_stdout(captured):
-                server_cli.show_pairing_qr()
+        with patch("server_cli.QRCODE_AVAILABLE", False), \
+             patch("server_cli.logger") as mock_logger:
+            server_cli.show_pairing_qr()
 
-        output = captured.getvalue()
-        self.assertIn("QR code library not installed", output)
+        mock_logger.error.assert_called_once()
+        call_args = mock_logger.error.call_args[0][0]
+        self.assertIn("QR code library not installed", call_args)
 
     def test_show_pairing_qr_displays_and_opens_browser(self):
         payload = SimpleNamespace(pair_url="http://localhost:8080/pair")

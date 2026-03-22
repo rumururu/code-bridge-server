@@ -131,7 +131,7 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_tunnel_for_current_server_uses_config_port(self):
         with (
-            patch.object(remote_access_service, "get_config", return_value=SimpleNamespace(port=9191)),
+            patch.object(remote_access_service, "get_config", return_value=SimpleNamespace(api_port=9191)),
             patch.object(
                 remote_access_service,
                 "start_tunnel_for_remote_access",
@@ -260,7 +260,7 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 remote_access_service,
                 "get_config",
-                return_value=SimpleNamespace(firebase_enabled=True, port=9090),
+                return_value=SimpleNamespace(firebase_enabled=True, api_port=9090),
             ),
             patch.object(
                 remote_access_service,
@@ -399,7 +399,7 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         fake_pairing = MagicMock()
 
         with (
-            patch.object(remote_access_service, "get_config", return_value=SimpleNamespace(port=9191)),
+            patch.object(remote_access_service, "get_config", return_value=SimpleNamespace(api_port=9191)),
             patch.object(
                 remote_access_service,
                 "verify_pairing_flow",

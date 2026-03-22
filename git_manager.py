@@ -103,7 +103,7 @@ class GitManager:
                 error=f"Git command timed out after {timeout}s",
                 exit_code=124,
             )
-        except Exception as e:
+        except OSError as e:
             return GitResult(
                 error=str(e),
                 exit_code=1,

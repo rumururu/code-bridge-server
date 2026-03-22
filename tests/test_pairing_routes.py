@@ -18,7 +18,7 @@ from pairing import (
 )
 from pairing_page_service import PairingPageRenderResult
 from remote_access_service import PairVerifyFlowResult
-from routes.deps import verify_api_key
+from routes.deps import require_localhost_only, verify_api_key
 from routes.pairing import router as pairing_router
 
 
@@ -27,6 +27,7 @@ class PairingRoutesTest(unittest.TestCase):
         app = FastAPI()
         app.include_router(pairing_router)
         app.dependency_overrides[verify_api_key] = lambda: True
+        app.dependency_overrides[require_localhost_only] = lambda: True
         self.client = TestClient(app)
 
     def tearDown(self):

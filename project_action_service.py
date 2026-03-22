@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import sqlite3
 from typing import Any, Awaitable, Callable
 
 from claude_session import get_session_manager
@@ -10,27 +10,10 @@ from database import get_project_db
 from filesystem_service import validate_accessible_path
 from project_utils import collect_existing_project_state, prepare_project_payload
 from projects import get_project_manager
+from routes.result_response import BaseRouteResult
 
-
-@dataclass(frozen=True)
-class ProjectRegistryResult:
-    """Typed result for project registry route responses."""
-
-    success: bool
-    status_code: int
-    payload: dict[str, Any]
-
-    def as_response_fields(self) -> dict[str, Any]:
-        """Serialize for route response helpers."""
-        return self.payload
-
-
-def _project_registry_error(status_code: int, message: str) -> ProjectRegistryResult:
-    return ProjectRegistryResult(
-        success=False,
-        status_code=status_code,
-        payload={"error": message},
-    )
+# Backwards-compatible alias
+ProjectRegistryResult = BaseRouteResult
 
 
 def _resolve_project_manager(manager: Any | None) -> Any:
@@ -90,6 +73,31 @@ async def stop_project_dev_server_for_current_server(
     """Stop a project's dev server via active project manager."""
     resolved_manager = _resolve_project_manager(manager)
     return await resolved_manager.stop_dev_server(name)
+
+
+async def restart_project_dev_server_for_current_server(
+    name: str,
+    *,
+    manager: Any | None = None,
+) -> dict[str, Any]:
+    """Restart a project's dev server (stop then start)."""
+    resolved_manager = _resolve_project_manager(manager)
+
+    # Stop first (ignore errors if not running)
+    stop_result = await resolved_manager.stop_dev_server(name)
+
+    # Start the server
+    start_result = await resolved_manager.start_dev_server(name)
+
+    # Check success based on start_result
+    success = start_result.get("success", False)
+
+    return {
+        "success": success,
+        "status": "restarted" if success else "restart_failed",
+        "stop_result": stop_result,
+        "start_result": start_result,
+    }
 
 
 async def run_project_on_device_for_current_server(
@@ -155,7 +163,7 @@ def create_project_record_for_current_server(
     """Create a project record using project-path validation helpers."""
     # Validate path is within accessible_folders (security boundary)
     if not validate_accessible_path(path_value):
-        return _project_registry_error(
+        return ProjectRegistryResult.error(
             403,
             f"Path '{path_value}' is outside accessible folders. "
             "Add the parent folder to Accessible Folders first.",
@@ -173,10 +181,10 @@ def create_project_record_for_current_server(
         dev_server=dev_server,
     )
     if payload is None:
-        return _project_registry_error(status_code or 400, error or "Invalid project")
+        return ProjectRegistryResult.error(status_code or 400, error or "Invalid project")
 
     created = resolved_project_db.create(payload)
-    return ProjectRegistryResult(success=True, status_code=200, payload=created)
+    return ProjectRegistryResult.ok(created)
 
 
 def import_project_records_for_current_server(
@@ -186,7 +194,7 @@ def import_project_records_for_current_server(
 ) -> ProjectRegistryResult:
     """Import multiple project records from absolute paths."""
     if not paths:
-        return _project_registry_error(400, "No project paths provided")
+        return ProjectRegistryResult.error(400, "No project paths provided")
 
     resolved_project_db = _resolve_project_db(project_db)
     existing_names, existing_paths = _load_existing_project_state(resolved_project_db)
@@ -227,24 +235,20 @@ def import_project_records_for_current_server(
                 existing_names.add(created_name)
             if isinstance(created_path, str):
                 existing_paths[created_path] = created_name or ""
-        except Exception as exc:
+        except (sqlite3.Error, KeyError, TypeError) as exc:
             failed.append({"path": raw_path, "reason": f"Failed to create: {exc}"})
 
-    return ProjectRegistryResult(
-        success=True,
-        status_code=200,
-        payload={
-            "created": created,
-            "skipped": skipped,
-            "failed": failed,
-            "summary": {
-                "created": len(created),
-                "skipped": len(skipped),
-                "failed": len(failed),
-                "requested": len(paths),
-            },
+    return ProjectRegistryResult.ok({
+        "created": created,
+        "skipped": skipped,
+        "failed": failed,
+        "summary": {
+            "created": len(created),
+            "skipped": len(skipped),
+            "failed": len(failed),
+            "requested": len(paths),
         },
-    )
+    })
 
 
 def update_project_record_for_current_server(
@@ -257,10 +261,10 @@ def update_project_record_for_current_server(
     resolved_project_db = _resolve_project_db(project_db)
 
     if not resolved_project_db.exists(name):
-        return _project_registry_error(404, f"Project {name} not found")
+        return ProjectRegistryResult.error(404, f"Project {name} not found")
 
     updated = resolved_project_db.update(name, updates)
-    return ProjectRegistryResult(success=True, status_code=200, payload=updated)
+    return ProjectRegistryResult.ok(updated)
 
 
 async def delete_project_record_for_current_server(
@@ -274,7 +278,7 @@ async def delete_project_record_for_current_server(
     resolved_project_db = _resolve_project_db(project_db)
 
     if not resolved_project_db.exists(name):
-        return _project_registry_error(404, f"Project {name} not found")
+        return ProjectRegistryResult.error(404, f"Project {name} not found")
 
     resolved_is_running = is_dev_server_running or is_project_dev_server_running_for_current_server
     resolved_stop_dev_server = stop_dev_server or stop_project_dev_server_for_current_server
@@ -284,13 +288,9 @@ async def delete_project_record_for_current_server(
 
     deleted = resolved_project_db.delete(name)
     if not deleted:
-        return _project_registry_error(500, "Failed to delete project")
+        return ProjectRegistryResult.error(500, "Failed to delete project")
 
-    return ProjectRegistryResult(
-        success=True,
-        status_code=200,
-        payload={"status": "deleted", "name": name},
-    )
+    return ProjectRegistryResult.ok({"status": "deleted", "name": name})
 
 
 async def close_project_session_for_current_server(

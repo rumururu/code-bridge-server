@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -29,7 +30,7 @@ class AddFolderRequest(BaseModel):
 
 
 @router.get("/accessible-folders")
-async def list_accessible_folders():
+async def list_accessible_folders() -> dict[str, Any]:
     """List all accessible folders.
 
     These folders define the security boundary for file system access.
@@ -55,7 +56,7 @@ async def list_accessible_folders():
 
 
 @router.post("/accessible-folders")
-async def add_accessible_folder(data: AddFolderRequest):
+async def add_accessible_folder(data: AddFolderRequest) -> dict[str, Any]:
     """Add a new accessible folder.
 
     This defines the security boundary for file system access.
@@ -78,7 +79,7 @@ async def add_accessible_folder(data: AddFolderRequest):
 
 
 @router.delete("/accessible-folders")
-async def remove_accessible_folder(path: str = Query(...)):
+async def remove_accessible_folder(path: str = Query(...)) -> dict[str, Any]:
     """Remove an accessible folder.
 
     Note: This only removes the folder from the accessible list,
@@ -94,7 +95,7 @@ async def remove_accessible_folder(path: str = Query(...)):
 
 
 @router.get("/browse-unrestricted")
-async def browse_filesystem_unrestricted(path: str | None = Query(None)):
+async def browse_filesystem_unrestricted(path: str | None = Query(None)) -> dict[str, Any]:
     """Browse filesystem without accessible_folders restrictions.
 
     This endpoint is used by the dashboard's folder picker to add new
@@ -162,7 +163,7 @@ async def browse_filesystem_unrestricted(path: str | None = Query(None)):
 
 
 @router.get("/browse")
-async def browse_filesystem(path: str | None = Query(None)):
+async def browse_filesystem(path: str | None = Query(None)) -> dict[str, Any]:
     """Browse a directory within accessible folders only.
 
     Security: Only paths within server's accessible_folders config are allowed.
@@ -193,7 +194,7 @@ async def browse_filesystem(path: str | None = Query(None)):
 
 
 @router.get("/quick-access")
-async def get_quick_access():
+async def get_quick_access() -> dict[str, Any]:
     """Get quick access paths for common directories.
 
     Returns:

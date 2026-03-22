@@ -76,8 +76,8 @@ async def scrcpy_stream_proxy(
                         await scrcpy_ws.send(data)
                 except WebSocketDisconnect:
                     logger.info("[ScrcpyProxy] Client disconnected")
-                except Exception as e:
-                    logger.debug(f"[ScrcpyProxy] Client->Scrcpy error: {e}")
+                except OSError as e:
+                    logger.debug("[ScrcpyProxy] Client->Scrcpy error: %s", e)
 
             async def scrcpy_to_client():
                 """Forward messages from scrcpy server to client."""
@@ -89,8 +89,8 @@ async def scrcpy_stream_proxy(
                             await websocket.send_text(message)
                 except ConnectionClosed:
                     logger.info("[ScrcpyProxy] Scrcpy server closed connection")
-                except Exception as e:
-                    logger.debug(f"[ScrcpyProxy] Scrcpy->Client error: {e}")
+                except OSError as e:
+                    logger.debug("[ScrcpyProxy] Scrcpy->Client error: %s", e)
 
             # Run both directions concurrently
             done, pending = await asyncio.wait(
@@ -112,9 +112,9 @@ async def scrcpy_stream_proxy(
     except ConnectionRefusedError:
         logger.error("[ScrcpyProxy] Cannot connect to local scrcpy server")
         await websocket.close(code=4003, reason="Scrcpy server unavailable")
-    except Exception as e:
-        logger.error(f"[ScrcpyProxy] Proxy error: {e}")
+    except OSError as e:
+        logger.error("[ScrcpyProxy] Proxy error: %s", e)
         try:
             await websocket.close(code=4000, reason=str(e))
-        except Exception:
+        except OSError:
             pass

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import select
@@ -11,8 +12,11 @@ import subprocess
 import time
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 CLAUDE_USAGE_CACHE_TTL_SECONDS = 300
 CLAUDE_USAGE_UNSUPPORTED_TTL_SECONDS = 300
+CLAUDE_USAGE_ERROR_RETRY_TTL_SECONDS = 30
 
 _claude_usage_cache: dict[str, Any] = {
     "expires_at": 0.0,
@@ -112,18 +116,22 @@ def _probe_claude_usage_percent_via_tui(timeout_seconds: float = 10.0) -> float 
                 sent_exit = True
 
         return None
-    except Exception:
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("Error probing Claude usage: %s", exc)
+        return None
+    except (ValueError, UnicodeDecodeError, RuntimeError) as exc:
+        logger.warning("Unexpected error probing Claude usage: %s", exc)
         return None
     finally:
         if process is not None:
             try:
                 process.terminate()
                 process.wait(timeout=1.0)
-            except Exception:
+            except (subprocess.TimeoutExpired, OSError):
                 try:
                     process.kill()
                     process.wait(timeout=0.5)
-                except Exception:
+                except (subprocess.TimeoutExpired, OSError, ProcessLookupError):
                     pass
         if master_fd is not None:
             try:
@@ -182,14 +190,14 @@ async def fetch_claude_usage_snapshot(
             proc.kill()
             await proc.wait()
             payload["claude_usage_error"] = "timeout"
-            ttl_seconds = 30
+            ttl_seconds = CLAUDE_USAGE_ERROR_RETRY_TTL_SECONDS
         else:
             stdout_text = stdout_raw.decode("utf-8", errors="replace").strip()
             stderr_text = stderr_raw.decode("utf-8", errors="replace").strip()
 
             if not stdout_text:
                 payload["claude_usage_error"] = "empty_output"
-                ttl_seconds = 30
+                ttl_seconds = CLAUDE_USAGE_ERROR_RETRY_TTL_SECONDS
             else:
                 try:
                     parsed = json.loads(stdout_text)
@@ -226,7 +234,7 @@ async def fetch_claude_usage_snapshot(
                     payload["claude_usage_percent"] = usage_percent
                     if usage_percent is None:
                         payload["claude_usage_error"] = "percent_not_found"
-                        ttl_seconds = 30
+                        ttl_seconds = CLAUDE_USAGE_ERROR_RETRY_TTL_SECONDS
 
                 if stderr_text and payload["claude_usage_error"] is None:
                     payload["claude_usage_error"] = f"stderr: {stderr_text[:120]}"
@@ -234,9 +242,9 @@ async def fetch_claude_usage_snapshot(
         payload["claude_usage_supported"] = False
         payload["claude_usage_error"] = "claude_not_found"
         ttl_seconds = CLAUDE_USAGE_UNSUPPORTED_TTL_SECONDS
-    except Exception as exc:
+    except (OSError, subprocess.SubprocessError, ValueError, UnicodeDecodeError) as exc:
         payload["claude_usage_error"] = f"exec_error: {exc}"
-        ttl_seconds = 30
+        ttl_seconds = CLAUDE_USAGE_ERROR_RETRY_TTL_SECONDS
 
     _claude_usage_cache["payload"] = dict(payload)
     _claude_usage_cache["expires_at"] = now + float(ttl_seconds)

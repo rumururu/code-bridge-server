@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,27 +16,10 @@ from project_utils import (
     resolve_project_path,
     scan_project_candidates,
 )
+from routes.result_response import BaseRouteResult
 
-
-@dataclass(frozen=True)
-class SystemInspectResult:
-    """Typed result for system-inspection route responses."""
-
-    success: bool
-    status_code: int
-    payload: dict[str, Any]
-
-    def as_response_fields(self) -> dict[str, Any]:
-        """Serialize for route response helpers."""
-        return self.payload
-
-
-def _error_result(status_code: int, message: str) -> SystemInspectResult:
-    return SystemInspectResult(
-        success=False,
-        status_code=status_code,
-        payload={"error": message},
-    )
+# Backwards-compatible alias
+SystemInspectResult = BaseRouteResult
 
 
 def list_system_directories_for_current_server(path: str | None = None) -> SystemInspectResult:
@@ -54,35 +36,31 @@ def list_system_directories_for_current_server(path: str | None = None) -> Syste
             path = roots[0]["path"]
         else:
             # Multiple roots: return selection screen
-            return SystemInspectResult(
-                success=True,
-                status_code=200,
-                payload={
-                    "current_path": "",
-                    "parent_path": None,
-                    "folders": roots,
-                    "is_accessible_roots": True,
-                },
-            )
+            return SystemInspectResult.ok({
+                "current_path": "",
+                "parent_path": None,
+                "folders": roots,
+                "is_accessible_roots": True,
+            })
 
     # Validate and resolve the path
     try:
         requested_path = Path(path).expanduser()
         if not requested_path.is_absolute():
-            return _error_result(400, "Path must be absolute (start with /)")
+            return SystemInspectResult.error(400, "Path must be absolute (start with /)")
         target_path = requested_path.resolve()
-    except Exception:
-        return _error_result(400, "Invalid path")
+    except OSError:
+        return SystemInspectResult.error(400, "Invalid path")
 
     # Security: Validate path is within accessible_folders
     if not validate_accessible_path(str(target_path)):
-        return _error_result(403, f"Access denied: {path} is outside accessible folders")
+        return SystemInspectResult.error(403, f"Access denied: {path} is outside accessible folders")
 
     if not target_path.exists():
-        return _error_result(404, f"Path not found: {target_path}")
+        return SystemInspectResult.error(404, f"Path not found: {target_path}")
 
     if not target_path.is_dir():
-        return _error_result(400, f"Not a directory: {target_path}")
+        return SystemInspectResult.error(400, f"Not a directory: {target_path}")
 
     try:
         directories: list[dict[str, str]] = []
@@ -94,7 +72,7 @@ def list_system_directories_for_current_server(path: str | None = None) -> Syste
             except (OSError, PermissionError):
                 continue
     except (OSError, PermissionError):
-        return _error_result(403, f"Cannot access directory: {target_path}")
+        return SystemInspectResult.error(403, f"Cannot access directory: {target_path}")
 
     # Compute parent_path - only if parent is still within accessible_folders
     parent = target_path.parent
@@ -102,16 +80,12 @@ def list_system_directories_for_current_server(path: str | None = None) -> Syste
     if parent != target_path and validate_accessible_path(str(parent)):
         parent_path = str(parent)
 
-    return SystemInspectResult(
-        success=True,
-        status_code=200,
-        payload={
-            "current_path": str(target_path),
-            "parent_path": parent_path,
-            "folders": directories,
-            "is_accessible_roots": False,
-        },
-    )
+    return SystemInspectResult.ok({
+        "current_path": str(target_path),
+        "parent_path": parent_path,
+        "folders": directories,
+        "is_accessible_roots": False,
+    })
 
 
 def list_project_candidates_for_current_server(
@@ -127,14 +101,14 @@ def list_project_candidates_for_current_server(
     """
     resolved_root, error, status_code = resolve_project_path(root_path)
     if resolved_root is None:
-        return _error_result(status_code or 400, error or "Invalid root path")
+        return SystemInspectResult.error(status_code or 400, error or "Invalid root path")
 
     # Security: Validate path is within accessible_folders
     if not validate_accessible_path(str(resolved_root)):
-        return _error_result(403, f"Access denied: {root_path} is outside accessible folders")
+        return SystemInspectResult.error(403, f"Access denied: {root_path} is outside accessible folders")
 
     if max_depth < 0 or max_depth > MAX_SCAN_DEPTH:
-        return _error_result(400, f"max_depth must be between 0 and {MAX_SCAN_DEPTH}")
+        return SystemInspectResult.error(400, f"max_depth must be between 0 and {MAX_SCAN_DEPTH}")
 
     excluded = parse_excluded_dirs(exclude_dirs)
     candidates = scan_project_candidates(
@@ -159,16 +133,12 @@ def list_project_candidates_for_current_server(
             }
         )
 
-    return SystemInspectResult(
-        success=True,
-        status_code=200,
-        payload={
-            "root_path": str(resolved_root),
-            "excluded_dirs": sorted(excluded),
-            "candidates": enriched_candidates,
-            "count": len(enriched_candidates),
-        },
-    )
+    return SystemInspectResult.ok({
+        "root_path": str(resolved_root),
+        "excluded_dirs": sorted(excluded),
+        "candidates": enriched_candidates,
+        "count": len(enriched_candidates),
+    })
 
 
 async def get_system_usage_for_current_server(
@@ -185,4 +155,4 @@ async def get_system_usage_for_current_server(
     )
     claude_snapshot = await fetch_claude_usage_snapshot()
     merged = merge_usage_for_display(summary, claude_snapshot)
-    return SystemInspectResult(success=True, status_code=200, payload=merged)
+    return SystemInspectResult.ok(merged)

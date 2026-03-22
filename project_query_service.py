@@ -13,16 +13,24 @@ def build_project_list_view(
     projects: list[dict[str, Any]],
     *,
     get_server_port: Callable[[str], int | None],
+    is_managed_server: Callable[[str], bool],
 ) -> list[dict[str, Any]]:
-    """Build list response for all projects with runtime status."""
+    """Build list response for all projects with runtime status.
+
+    Args:
+        get_server_port: Returns the detected port for a project (or None).
+        is_managed_server: Returns True if Code Bridge started this server.
+    """
     result: list[dict[str, Any]] = []
     for project in projects:
         name = project.get("name", "")
         detected_port = get_server_port(name)
+        managed = is_managed_server(name)
         result.append(
             build_project_view(
                 project,
                 detected_port,
+                managed=managed,
                 include_command=False,
             )
         )
@@ -34,12 +42,14 @@ def build_single_project_view(
     project: dict[str, Any] | None,
     *,
     get_server_port: Callable[[str], int | None],
+    is_managed_server: Callable[[str], bool],
 ) -> dict[str, Any] | None:
     """Build detail response for one project or return None when missing."""
     if project is None:
         return None
     detected_port = get_server_port(name)
-    return build_project_view(project, detected_port)
+    managed = is_managed_server(name)
+    return build_project_view(project, detected_port, managed=managed)
 
 
 def detect_project_running_server_port(

@@ -18,7 +18,7 @@ from remote_access_service import (
     RemoteNetworkStatus,
     RemoteTunnelStatus,
 )
-from routes.deps import verify_api_key
+from routes.deps import verify_api_key, verify_api_key_or_localhost
 from routes.system_remote import router as system_remote_router
 
 
@@ -27,6 +27,7 @@ class SystemRemoteRoutesTest(unittest.TestCase):
         app = FastAPI()
         app.include_router(system_remote_router)
         app.dependency_overrides[verify_api_key] = lambda: True
+        app.dependency_overrides[verify_api_key_or_localhost] = lambda: True
         self.client = TestClient(app)
 
     def tearDown(self):

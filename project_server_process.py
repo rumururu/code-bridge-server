@@ -52,5 +52,5 @@ def extract_process_error(process: subprocess.Popen) -> str | None:
             return None
 
         return lines[-1][:240]
-    except Exception:
+    except OSError:
         return None

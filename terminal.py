@@ -134,7 +134,7 @@ class TerminalSession:
                     timed_out=True,
                 )
 
-        except Exception as e:
+        except OSError as e:
             return CommandResult(
                 error=str(e),
                 exit_code=1,
@@ -219,7 +219,7 @@ class TerminalSession:
             for result in results:
                 yield result
 
-        except Exception as e:
+        except OSError as e:
             yield {"type": "error", "data": str(e)}
             yield {"type": "exit", "data": 1}
         finally:

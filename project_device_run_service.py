@@ -37,7 +37,7 @@ def prepare_device_run_log(log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         log_path.write_text("", encoding="utf-8")
-    except Exception:
+    except OSError:
         pass
 
 
@@ -67,7 +67,7 @@ def start_flutter_run_process(
             command=command,
             error_message="Flutter CLI not found on server",
         )
-    except Exception as exc:
+    except OSError as exc:
         return FlutterRunStartResult(
             success=False,
             command=command,

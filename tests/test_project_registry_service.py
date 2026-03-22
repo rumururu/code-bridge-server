@@ -16,6 +16,9 @@ class ProjectRegistryServiceSyncTest(unittest.TestCase):
         fake_db.get_all.return_value = []
 
         with patch(
+            "project_action_service.validate_accessible_path",
+            return_value=True,
+        ), patch(
             "project_action_service.collect_existing_project_state",
             return_value=(set(), {}),
         ), patch(
@@ -37,6 +40,9 @@ class ProjectRegistryServiceSyncTest(unittest.TestCase):
         fake_db.create.return_value = {"name": "demo", "path": "/tmp/demo"}
 
         with patch(
+            "project_action_service.validate_accessible_path",
+            return_value=True,
+        ), patch(
             "project_action_service.collect_existing_project_state",
             return_value=(set(), {}),
         ), patch(
@@ -66,6 +72,9 @@ class ProjectRegistryServiceSyncTest(unittest.TestCase):
         fake_db.create.return_value = {"name": "demo", "path": "/tmp/demo"}
 
         with patch(
+            "project_action_service.validate_accessible_path",
+            return_value=True,
+        ), patch(
             "project_action_service.collect_existing_project_state",
             return_value=(set(), {}),
         ), patch(

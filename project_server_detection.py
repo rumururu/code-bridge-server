@@ -22,7 +22,7 @@ def get_bridge_port() -> int | None:
         from config import get_config
 
         return get_config().port
-    except Exception:
+    except (ImportError, AttributeError):
         return None
 
 
@@ -112,7 +112,7 @@ def list_process_cwds(
             if pids is None or current_pid in pids:
                 try:
                     cwd_map[current_pid] = Path(value).resolve()
-                except Exception:
+                except OSError:
                     pass
 
     return cwd_map
@@ -142,7 +142,7 @@ def get_process_cwd(
         if line.startswith("n") and len(line) > 1:
             try:
                 return Path(line[1:]).resolve()
-            except Exception:
+            except OSError:
                 return None
     return None
 
@@ -168,7 +168,7 @@ def detect_port_for_project(
     """
     try:
         target = Path(project_path).resolve()
-    except Exception:
+    except OSError:
         return None
 
     resolved_bridge_port = get_bridge_port() if bridge_port is None else bridge_port

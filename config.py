@@ -1,12 +1,15 @@
 """Configuration loader for Code Bridge server."""
 
+import logging
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+logger = logging.getLogger(__name__)
+
 # Server version
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 class Config:
@@ -26,7 +29,7 @@ class Config:
         path = Path(path)
         if not path.exists():
             self._create_default_config(path)
-            print(f"Created default config: {path}")
+            logger.info("Created default config: %s", path)
 
         with open(path, "r") as f:
             return yaml.safe_load(f)
@@ -117,6 +120,11 @@ server:
         import os
         os.environ["CODEBRIDGE_DASHBOARD_PORT"] = str(port)
         self._runtime_port = port
+
+    def set_runtime_api_port(self, port: int) -> None:
+        """Set runtime API port override (when auto-assigned due to port conflict)."""
+        import os
+        os.environ["CODEBRIDGE_API_PORT"] = str(port)
 
     @property
     def api_key(self) -> str:
@@ -218,7 +226,7 @@ server:
         count = db.migrate_from_config(self.config_projects)
 
         if count > 0:
-            print(f"Migrated {count} projects from config.yaml to database")
+            logger.info("Migrated %d projects from config.yaml to database", count)
 
         self._migration_done = True
         return count

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import signal
@@ -14,6 +15,8 @@ from websockets.exceptions import ConnectionClosed
 from websockets.server import WebSocketServer, WebSocketServerProtocol, serve
 
 from llm_session import LlmSession
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -232,8 +235,13 @@ class ClaudeSession(LlmSession):
                 text = self._normalize_line(raw_line)
                 if text:
                     self._stderr_lines.append(text)
-        except Exception:
+        except asyncio.CancelledError:
+            raise
+        except (OSError, IOError):
+            # Process terminated or pipe closed - expected during shutdown
             pass
+        except (UnicodeDecodeError, ValueError, RuntimeError) as exc:
+            logger.warning("Unexpected error reading stderr: %s", exc)
 
     async def _wait_for_process_exit(self) -> None:
         """Watch process exit and emit session_closed event."""
@@ -346,7 +354,7 @@ class ClaudeSession(LlmSession):
 
                 async for event in self._stream_until_pause_or_result():
                     yield event
-        except Exception as exc:
+        except (OSError, ConnectionError, RuntimeError, ValueError, asyncio.TimeoutError) as exc:
             self._turn_in_progress = False
             yield {"type": "error", "error": {"message": str(exc)}}
 
@@ -355,7 +363,7 @@ class ClaudeSession(LlmSession):
         try:
             from attachment_parser import build_multimodal_content
             return build_multimodal_content(message, self.project_path)
-        except Exception:
+        except (ImportError, ValueError, TypeError, AttributeError, OSError):
             # Fallback to plain text if parsing fails
             return message
 
@@ -407,7 +415,7 @@ class ClaudeSession(LlmSession):
                     },
                 }
             )
-        except Exception as exc:
+        except (RuntimeError, OSError) as exc:
             self._turn_in_progress = False
             self._pending_permission_request = None
             yield {"type": "error", "error": {"message": str(exc)}}
@@ -458,8 +466,11 @@ class ClaudeSession(LlmSession):
         if self._sdk_connection is not None:
             try:
                 await self._sdk_connection.close()
-            except Exception:
+            except ConnectionClosed:
+                # Already closed - expected
                 pass
+            except (OSError, RuntimeError, ConnectionError) as exc:
+                logger.debug("Error closing SDK connection: %s", exc)
             self._sdk_connection = None
         self._sdk_connected_event.clear()
 

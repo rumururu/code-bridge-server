@@ -61,7 +61,7 @@ def resolve_dev_server_start_plan(
         if command and project_db is not None:
             try:
                 project_db.update(name, {"dev_server": {"command": command}})
-            except Exception:
+            except OSError:
                 pass
 
     if not command:

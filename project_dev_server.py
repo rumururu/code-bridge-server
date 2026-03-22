@@ -11,7 +11,7 @@ def load_package_json_file(package_json_path: Path) -> dict[str, Any]:
     """Safely read and parse package.json."""
     try:
         return json.loads(package_json_path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, json.JSONDecodeError):
         return {}
 
 

@@ -1,62 +1,90 @@
 """SQLite database management for Code Bridge."""
 
 import json
+import logging
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Generator, Optional
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent / "code_bridge.db"
 
 
-def init_db():
-    """Initialize database and create tables."""
+@contextmanager
+def get_db_connection(
+    use_row_factory: bool = False,
+) -> Generator[sqlite3.Connection, None, None]:
+    """Context manager for database connections.
+
+    Args:
+        use_row_factory: If True, sets row_factory to sqlite3.Row for dict-like access.
+
+    Yields:
+        SQLite connection that auto-closes on exit.
+
+    Example:
+        with get_db_connection(use_row_factory=True) as conn:
+            rows = conn.execute("SELECT * FROM projects").fetchall()
+    """
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS projects (
-            name TEXT PRIMARY KEY,
-            path TEXT NOT NULL,
-            type TEXT DEFAULT 'flutter',
-            dev_server_command TEXT,
-            dev_server_port INTEGER,
-            enabled INTEGER DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    # Migration: add enabled column if missing
+    if use_row_factory:
+        conn.row_factory = sqlite3.Row
     try:
-        conn.execute("ALTER TABLE projects ADD COLUMN enabled INTEGER DEFAULT 1")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS usage_turns (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_name TEXT NOT NULL,
-            cost_usd REAL NOT NULL DEFAULT 0,
-            input_tokens INTEGER NOT NULL DEFAULT 0,
-            output_tokens INTEGER NOT NULL DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_usage_turns_created_at
-        ON usage_turns(created_at)
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS accessible_folders (
-            path TEXT PRIMARY KEY,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+        yield conn
+    finally:
+        conn.close()
+
+
+def init_db() -> None:
+    """Initialize database and create tables."""
+    with get_db_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                name TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                type TEXT DEFAULT 'flutter',
+                dev_server_command TEXT,
+                dev_server_port INTEGER,
+                enabled INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Migration: add enabled column if missing
+        try:
+            conn.execute("ALTER TABLE projects ADD COLUMN enabled INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS usage_turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_name TEXT NOT NULL,
+                cost_usd REAL NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_usage_turns_created_at
+            ON usage_turns(created_at)
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS accessible_folders (
+                path TEXT PRIMARY KEY,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
 
 
 class ProjectDB:
@@ -67,47 +95,40 @@ class ProjectDB:
 
     def get_all(self) -> list[dict]:
         """Get all projects."""
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM projects ORDER BY name").fetchall()
-        conn.close()
-        return [self._row_to_dict(row) for row in rows]
+        with get_db_connection(use_row_factory=True) as conn:
+            rows = conn.execute("SELECT * FROM projects ORDER BY name").fetchall()
+            return [self._row_to_dict(row) for row in rows]
 
     def get(self, name: str) -> Optional[dict]:
         """Get a project by name."""
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT * FROM projects WHERE name = ?", (name,)
-        ).fetchone()
-        conn.close()
-        return self._row_to_dict(row) if row else None
+        with get_db_connection(use_row_factory=True) as conn:
+            row = conn.execute(
+                "SELECT * FROM projects WHERE name = ?", (name,)
+            ).fetchone()
+            return self._row_to_dict(row) if row else None
 
     def create(self, project: dict) -> dict:
         """Create a new project."""
-        conn = sqlite3.connect(DB_PATH)
         dev_server = project.get("dev_server") or {}
-        conn.execute(
-            """
-            INSERT INTO projects (name, path, type, dev_server_command, dev_server_port)
-            VALUES (?, ?, ?, ?, ?)
-        """,
-            (
-                project["name"],
-                project["path"],
-                project.get("type", "flutter"),
-                dev_server.get("command"),
-                dev_server.get("port"),
-            ),
-        )
-        conn.commit()
-        conn.close()
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO projects (name, path, type, dev_server_command, dev_server_port)
+                VALUES (?, ?, ?, ?, ?)
+            """,
+                (
+                    project["name"],
+                    project["path"],
+                    project.get("type", "flutter"),
+                    dev_server.get("command"),
+                    dev_server.get("port"),
+                ),
+            )
+            conn.commit()
         return self.get(project["name"])
 
     def update(self, name: str, data: dict) -> Optional[dict]:
         """Update an existing project."""
-        conn = sqlite3.connect(DB_PATH)
-
         # Build dynamic UPDATE query
         updates = []
         values = []
@@ -134,35 +155,32 @@ class ProjectDB:
             values.append(1 if data["enabled"] else 0)
 
         if not updates:
-            conn.close()
             return self.get(name)
 
         updates.append("updated_at = CURRENT_TIMESTAMP")
         values.append(name)
 
         query = f"UPDATE projects SET {', '.join(updates)} WHERE name = ?"
-        conn.execute(query, values)
-        conn.commit()
-        conn.close()
+        with get_db_connection() as conn:
+            conn.execute(query, values)
+            conn.commit()
 
         return self.get(name)
 
     def delete(self, name: str) -> bool:
         """Delete a project."""
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.execute("DELETE FROM projects WHERE name = ?", (name,))
-        conn.commit()
-        conn.close()
-        return cursor.rowcount > 0
+        with get_db_connection() as conn:
+            cursor = conn.execute("DELETE FROM projects WHERE name = ?", (name,))
+            conn.commit()
+            return cursor.rowcount > 0
 
     def exists(self, name: str) -> bool:
         """Check if a project exists."""
-        conn = sqlite3.connect(DB_PATH)
-        row = conn.execute(
-            "SELECT 1 FROM projects WHERE name = ?", (name,)
-        ).fetchone()
-        conn.close()
-        return row is not None
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM projects WHERE name = ?", (name,)
+            ).fetchone()
+            return row is not None
 
     def migrate_from_config(self, projects: list[dict]) -> int:
         """Migrate projects from config.yaml to database."""
@@ -205,46 +223,43 @@ class UsageDB:
         output_tokens: int = 0,
     ) -> None:
         """Persist one completed turn usage row."""
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute(
-            """
-            INSERT INTO usage_turns (project_name, cost_usd, input_tokens, output_tokens)
-            VALUES (?, ?, ?, ?)
-        """,
-            (
-                project_name,
-                max(float(cost_usd), 0.0),
-                max(int(input_tokens), 0),
-                max(int(output_tokens), 0),
-            ),
-        )
-        conn.commit()
-        conn.close()
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO usage_turns (project_name, cost_usd, input_tokens, output_tokens)
+                VALUES (?, ?, ?, ?)
+            """,
+                (
+                    project_name,
+                    max(float(cost_usd), 0.0),
+                    max(int(input_tokens), 0),
+                    max(int(output_tokens), 0),
+                ),
+            )
+            conn.commit()
 
     def get_weekly_summary(self, budget_usd: float | None = None, window_days: int = 7) -> dict:
         """Return rolling-window usage summary and optional budget percentage."""
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            """
-            SELECT
-                COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
-                COUNT(*) AS turn_count,
-                COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                MAX(created_at) AS last_turn_at
-            FROM usage_turns
-            WHERE created_at >= datetime('now', ?)
-        """,
-            (f"-{max(window_days, 1)} days",),
-        ).fetchone()
-        conn.close()
+        with get_db_connection(use_row_factory=True) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
+                    COUNT(*) AS turn_count,
+                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                    MAX(created_at) AS last_turn_at
+                FROM usage_turns
+                WHERE created_at >= datetime('now', ?)
+            """,
+                (f"-{max(window_days, 1)} days",),
+            ).fetchone()
 
-        total_cost = float(row["total_cost_usd"] or 0.0)
-        turn_count = int(row["turn_count"] or 0)
-        total_input_tokens = int(row["input_tokens"] or 0)
-        total_output_tokens = int(row["output_tokens"] or 0)
-        last_turn_at = row["last_turn_at"]
+            total_cost = float(row["total_cost_usd"] or 0.0)
+            turn_count = int(row["turn_count"] or 0)
+            total_input_tokens = int(row["input_tokens"] or 0)
+            total_output_tokens = int(row["output_tokens"] or 0)
+            last_turn_at = row["last_turn_at"]
 
         has_budget = budget_usd is not None and float(budget_usd) > 0
         usage_percent = None
@@ -272,31 +287,29 @@ class SettingsDB:
 
     def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Get one setting value by key."""
-        conn = sqlite3.connect(DB_PATH)
-        row = conn.execute(
-            "SELECT value FROM app_settings WHERE key = ?",
-            (key,),
-        ).fetchone()
-        conn.close()
-        if row is None:
-            return default
-        return row[0]
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM app_settings WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                return default
+            return row[0]
 
     def set(self, key: str, value: Optional[str]) -> None:
         """Upsert one setting value."""
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute(
-            """
-            INSERT INTO app_settings (key, value, updated_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(key) DO UPDATE SET
-                value = excluded.value,
-                updated_at = CURRENT_TIMESTAMP
-        """,
-            (key, value),
-        )
-        conn.commit()
-        conn.close()
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = CURRENT_TIMESTAMP
+            """,
+                (key, value),
+            )
+            conn.commit()
 
     def get_json(self, key: str, default: Any) -> Any:
         """Get one JSON setting value by key."""
@@ -325,12 +338,11 @@ class AccessibleFolderDB:
 
     def get_all(self) -> list[str]:
         """Get all accessible folder paths."""
-        conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute(
-            "SELECT path FROM accessible_folders ORDER BY path"
-        ).fetchall()
-        conn.close()
-        return [row[0] for row in rows]
+        with get_db_connection() as conn:
+            rows = conn.execute(
+                "SELECT path FROM accessible_folders ORDER BY path"
+            ).fetchall()
+            return [row[0] for row in rows]
 
     def add(self, path: str) -> bool:
         """Add an accessible folder path.
@@ -339,18 +351,16 @@ class AccessibleFolderDB:
         """
         resolved_path = str(Path(path).expanduser().resolve())
 
-        conn = sqlite3.connect(DB_PATH)
-        try:
-            conn.execute(
-                "INSERT INTO accessible_folders (path) VALUES (?)",
-                (resolved_path,),
-            )
-            conn.commit()
-            conn.close()
-            return True
-        except sqlite3.IntegrityError:
-            conn.close()
-            return False
+        with get_db_connection() as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO accessible_folders (path) VALUES (?)",
+                    (resolved_path,),
+                )
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
 
     def remove(self, path: str) -> bool:
         """Remove an accessible folder path.
@@ -359,27 +369,24 @@ class AccessibleFolderDB:
         """
         resolved_path = str(Path(path).expanduser().resolve())
 
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.execute(
-            "DELETE FROM accessible_folders WHERE path = ?",
-            (resolved_path,),
-        )
-        conn.commit()
-        deleted = cursor.rowcount > 0
-        conn.close()
-        return deleted
+        with get_db_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM accessible_folders WHERE path = ?",
+                (resolved_path,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def exists(self, path: str) -> bool:
         """Check if a path is in accessible folders."""
         resolved_path = str(Path(path).expanduser().resolve())
 
-        conn = sqlite3.connect(DB_PATH)
-        row = conn.execute(
-            "SELECT 1 FROM accessible_folders WHERE path = ?",
-            (resolved_path,),
-        ).fetchone()
-        conn.close()
-        return row is not None
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM accessible_folders WHERE path = ?",
+                (resolved_path,),
+            ).fetchone()
+            return row is not None
 
 
 # Global database instance
@@ -426,6 +433,7 @@ def migrate_accessible_folders_from_projects() -> int:
 
     Extracts unique parent directories from all registered projects
     and adds them to the accessible_folders table.
+    If no projects exist, adds the home directory as default.
 
     Returns:
         Number of folders migrated.
@@ -439,7 +447,13 @@ def migrate_accessible_folders_from_projects() -> int:
         return 0
 
     projects = project_db.get_all()
+
+    # No projects - add home directory as default
     if not projects:
+        home_dir = str(Path.home())
+        if folder_db.add(home_dir):
+            logger.info("Added home directory as default accessible folder: %s", home_dir)
+            return 1
         return 0
 
     # Extract unique parent folders
@@ -457,6 +471,6 @@ def migrate_accessible_folders_from_projects() -> int:
             count += 1
 
     if count > 0:
-        print(f"Migrated {count} accessible folders from existing projects")
+        logger.info("Migrated %d accessible folders from existing projects", count)
 
     return count

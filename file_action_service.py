@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -11,24 +10,15 @@ from uuid import uuid4
 
 from files import get_file_manager
 from projects import get_project_manager
+from routes.result_response import BaseRouteResult
 
+
+# Backwards-compatible alias
+FileActionResult = BaseRouteResult
 
 FileManagerFactory = Callable[[str], Any]
 MAX_ATTACHMENT_UPLOAD_BYTES = 15 * 1024 * 1024
 ATTACHMENTS_DIR_NAME = ".codebridge_uploads"
-
-
-@dataclass(frozen=True)
-class FileActionResult:
-    """Typed result for file-route responses."""
-
-    success: bool
-    status_code: int
-    payload: dict[str, Any]
-
-    def as_response_fields(self) -> dict[str, Any]:
-        """Serialize for route response helpers."""
-        return self.payload
 
 
 def _resolve_project_file_manager(
@@ -41,19 +31,11 @@ def _resolve_project_file_manager(
     project = resolved_manager.get_project(project_name)
 
     if project is None:
-        return None, FileActionResult(
-            success=False,
-            status_code=404,
-            payload={"error": f"Project {project_name} not found"},
-        )
+        return None, FileActionResult.error(404, f"Project {project_name} not found")
 
     project_path = project.get("path")
     if not project_path:
-        return None, FileActionResult(
-            success=False,
-            status_code=400,
-            payload={"error": "Project has no path configured"},
-        )
+        return None, FileActionResult.error(400, "Project has no path configured")
 
     resolved_factory = file_manager_factory or get_file_manager
     return resolved_factory(project_path), None
@@ -68,47 +50,30 @@ def _resolve_project_root_path(
     project = resolved_manager.get_project(project_name)
 
     if project is None:
-        return None, FileActionResult(
-            success=False,
-            status_code=404,
-            payload={"error": f"Project {project_name} not found"},
-        )
+        return None, FileActionResult.error(404, f"Project {project_name} not found")
 
     project_path = project.get("path")
     if not project_path:
-        return None, FileActionResult(
-            success=False,
-            status_code=400,
-            payload={"error": "Project has no path configured"},
-        )
+        return None, FileActionResult.error(400, "Project has no path configured")
 
     try:
         root = Path(project_path).resolve()
     except OSError:
-        return None, FileActionResult(
-            success=False,
-            status_code=400,
-            payload={"error": "Project path is invalid"},
-        )
+        return None, FileActionResult.error(400, "Project path is invalid")
 
     if not root.exists() or not root.is_dir():
-        return None, FileActionResult(
-            success=False,
-            status_code=400,
-            payload={"error": "Project path does not exist"},
-        )
+        return None, FileActionResult.error(400, "Project path does not exist")
 
     return root, None
 
 
 def _to_file_action_result(payload: dict[str, Any]) -> FileActionResult:
     if "error" in payload:
-        return FileActionResult(
-            success=False,
-            status_code=int(payload.get("code", 400)),
-            payload={"error": str(payload["error"])},
+        return FileActionResult.error(
+            int(payload.get("code", 400)),
+            str(payload["error"]),
         )
-    return FileActionResult(success=True, status_code=200, payload=payload)
+    return FileActionResult.ok(payload)
 
 
 def _safe_attachment_filename(original_name: str) -> str:
@@ -357,22 +322,12 @@ def upload_project_attachment_for_current_server(
 
     file_size = len(content)
     if file_size <= 0:
-        return FileActionResult(
-            success=False,
-            status_code=400,
-            payload={"error": "Uploaded file is empty"},
-        )
+        return FileActionResult.error(400, "Uploaded file is empty")
 
     if file_size > MAX_ATTACHMENT_UPLOAD_BYTES:
-        return FileActionResult(
-            success=False,
-            status_code=413,
-            payload={
-                "error": (
-                    f"File too large ({file_size} bytes). "
-                    f"Max: {MAX_ATTACHMENT_UPLOAD_BYTES} bytes"
-                )
-            },
+        return FileActionResult.error(
+            413,
+            f"File too large ({file_size} bytes). Max: {MAX_ATTACHMENT_UPLOAD_BYTES} bytes",
         )
 
     safe_name = _safe_attachment_filename(filename)
@@ -384,33 +339,21 @@ def upload_project_attachment_for_current_server(
     try:
         uploads_dir.relative_to(project_root)
     except ValueError:
-        return FileActionResult(
-            success=False,
-            status_code=400,
-            payload={"error": "Invalid upload directory"},
-        )
+        return FileActionResult.error(400, "Invalid upload directory")
 
     try:
         uploads_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        return FileActionResult(
-            success=False,
-            status_code=500,
-            payload={"error": f"Cannot create upload directory: {exc}"},
-        )
+        return FileActionResult.error(500, f"Cannot create upload directory: {exc}")
 
     stored_path = uploads_dir / stored_name
     try:
         stored_path.write_bytes(content)
     except OSError as exc:
-        return FileActionResult(
-            success=False,
-            status_code=500,
-            payload={"error": f"Cannot store uploaded file: {exc}"},
-        )
+        return FileActionResult.error(500, f"Cannot store uploaded file: {exc}")
 
     relative_path = stored_path.relative_to(project_root).as_posix()
-    payload = {
+    return FileActionResult.ok({
         "success": True,
         "path": relative_path,
         "name": safe_name,
@@ -418,5 +361,4 @@ def upload_project_attachment_for_current_server(
         "size": file_size,
         "content_type": content_type or "application/octet-stream",
         "source": source,
-    }
-    return FileActionResult(success=True, status_code=200, payload=payload)
+    })

@@ -106,7 +106,7 @@ def _detect_codex_models_from_config() -> list[dict[str, str]]:
                     "source": "config",
                     "config_path": str(config_path),
                 })
-        except Exception:
+        except (OSError, tomllib.TOMLDecodeError):
             pass  # Ignore parse errors
 
     return detected
@@ -147,7 +147,7 @@ def _detect_claude_models_from_config() -> list[dict[str, str]]:
                     "source": "config",
                     "config_path": str(settings_path),
                 })
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             pass  # Ignore parse errors
 
     return detected
@@ -258,7 +258,7 @@ def _check_cli_available(command: str, *, use_cache: bool = True) -> tuple[bool,
         result = (False, f"{command} --version timed out")
         _cli_cache[command] = (result[0], result[1], now)
         return result
-    except Exception as e:
+    except OSError as e:
         result = (False, str(e))
         _cli_cache[command] = (result[0], result[1], now)
         return result

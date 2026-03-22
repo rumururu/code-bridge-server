@@ -17,6 +17,7 @@ class PreviewToken:
     project_name: str
     created_at: datetime
     expires_at: datetime
+    api_key: str | None = None  # API key that created this token
 
 
 class PreviewAccessManager:
@@ -42,7 +43,7 @@ class PreviewAccessManager:
         for token in expired:
             del self._preview_tokens[token]
 
-    def generate_preview_token(self, project_name: str) -> str:
+    def generate_preview_token(self, project_name: str, api_key: str | None = None) -> str:
         self._cleanup_expired_tokens()
         token = secrets.token_urlsafe(32)
         now = datetime.now()
@@ -51,6 +52,7 @@ class PreviewAccessManager:
             project_name=project_name,
             created_at=now,
             expires_at=now + timedelta(minutes=self._ttl_minutes),
+            api_key=api_key,
         )
         return token
 
@@ -60,6 +62,13 @@ class PreviewAccessManager:
         if token_data is None:
             return False
         return token_data.project_name == project_name and token_data.expires_at > datetime.now()
+
+    def get_token_api_key(self, token: str) -> str | None:
+        """Get the API key associated with a preview token."""
+        token_data = self._preview_tokens.get(token)
+        if token_data is None:
+            return None
+        return token_data.api_key
 
     def get_client_ip(self, request: Request) -> str:
         # Check forwarded headers first.

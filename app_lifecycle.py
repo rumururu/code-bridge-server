@@ -1,10 +1,14 @@
 """FastAPI lifespan hooks for startup and shutdown."""
 
 import asyncio
+import logging
+from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+
+logger = logging.getLogger(__name__)
 
 from config import get_config
 from database import migrate_accessible_folders_from_projects
@@ -22,9 +26,9 @@ _warmup_executor = ThreadPoolExecutor(max_workers=1)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
-    print("Code Bridge Server starting...")
+    logger.info("Code Bridge Server starting...")
 
     config = get_config()
     config.migrate_projects_to_db()

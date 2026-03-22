@@ -21,7 +21,7 @@ class AuthServiceTest(unittest.TestCase):
         result = auth_service.validate_api_key_for_current_server(None, config=config)
 
         self.assertFalse(result.success)
-        self.assertEqual(result.error, "API key required")
+        self.assertIn("IP_LOGIN_DISABLED", result.error)
 
     @patch("auth_service._check_allow_ip_login", return_value=False)
     def test_validate_api_key_for_current_server_rejects_invalid_key_when_auth_enabled(

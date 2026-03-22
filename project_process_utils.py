@@ -20,9 +20,9 @@ def terminate_process_safely(
     try:
         process.terminate()
         process.wait(timeout=terminate_timeout)
-    except Exception:
+    except (subprocess.TimeoutExpired, OSError, RuntimeError):
         try:
             process.kill()
             process.wait(timeout=kill_timeout)
-        except Exception:
+        except (subprocess.TimeoutExpired, OSError, ProcessLookupError, RuntimeError):
             pass

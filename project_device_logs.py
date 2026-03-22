@@ -30,7 +30,7 @@ def read_log_tail(
         return ""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    except OSError:
         return ""
 
     lines = text.splitlines()

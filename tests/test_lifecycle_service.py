@@ -16,7 +16,7 @@ class LifecycleServiceSyncTest(unittest.TestCase):
     def test_display_pairing_qr_for_current_server_noop_without_need(self):
         display_mock = MagicMock()
         builder_mock = MagicMock()
-        config = SimpleNamespace(port=8080)
+        config = SimpleNamespace(dashboard_port=8080)
 
         lifecycle_service.display_pairing_qr_for_current_server(
             config,
@@ -58,7 +58,7 @@ class LifecycleServiceSyncTest(unittest.TestCase):
 
 class LifecycleServiceAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_initialize_firebase_for_current_server_registers_local_url(self):
-        config = SimpleNamespace(firebase_enabled=True, port=8080)
+        config = SimpleNamespace(firebase_enabled=True, api_port=8080)
         firebase_auth = SimpleNamespace(
             is_authenticated=True,
             initialize=AsyncMock(),
@@ -80,7 +80,7 @@ class LifecycleServiceAsyncTest(unittest.IsolatedAsyncioTestCase):
         firebase_auth.register_device.assert_awaited_once_with(None, "http://192.168.0.10:8080")
 
     async def test_initialize_firebase_for_current_server_handles_init_error(self):
-        config = SimpleNamespace(firebase_enabled=True, port=8080)
+        config = SimpleNamespace(firebase_enabled=True, api_port=8080)
         firebase_auth = SimpleNamespace(initialize=AsyncMock(side_effect=RuntimeError("boom")))
 
         resolved_auth, needs_pairing = await lifecycle_service.initialize_firebase_for_current_server(
@@ -93,7 +93,7 @@ class LifecycleServiceAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(needs_pairing)
 
     async def test_start_remote_tunnel_for_current_server_returns_none_when_disabled(self):
-        config = SimpleNamespace(remote_access_enabled=False, port=8080)
+        config = SimpleNamespace(remote_access_enabled=False, api_port=8080)
 
         tunnel_service = await lifecycle_service.start_remote_tunnel_for_current_server(
             config,
@@ -104,7 +104,7 @@ class LifecycleServiceAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(tunnel_service)
 
     async def test_start_remote_tunnel_for_current_server_updates_device_registration(self):
-        config = SimpleNamespace(remote_access_enabled=True, port=8080)
+        config = SimpleNamespace(remote_access_enabled=True, api_port=8080)
         firebase_auth = SimpleNamespace(
             is_authenticated=True,
             register_device=AsyncMock(),

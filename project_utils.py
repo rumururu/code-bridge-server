@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import deque
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 NEXT_CONFIG_MARKERS = (
     "next.config.js",
@@ -68,8 +71,8 @@ def infer_project_type(project_path: Path) -> str:
             dev_dependencies = package_data.get("devDependencies", {}) or {}
             if "next" in dependencies or "next" in dev_dependencies:
                 return "nextjs"
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.debug("Could not parse package.json: %s", exc)
         return "web"
 
     for marker in NEXT_CONFIG_MARKERS:
@@ -102,7 +105,8 @@ def resolve_project_path(path_value: str) -> tuple[Path | None, str | None, int 
 
     try:
         resolved_path = requested_path.resolve()
-    except Exception:
+    except OSError as exc:
+        logger.debug("Could not resolve path %s: %s", requested_path, exc)
         return None, "Invalid project path", 400
 
     if not resolved_path.exists():
@@ -133,7 +137,8 @@ def collect_existing_project_state(
         try:
             resolved = str(Path(project_path).expanduser().resolve())
             existing_paths[resolved] = project_name or resolved
-        except Exception:
+        except OSError:
+            # Skip invalid paths
             continue
 
     return existing_names, existing_paths

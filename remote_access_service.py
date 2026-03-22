@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import logging
 from typing import Any, Awaitable, Callable, Optional
 
 from config import get_config
@@ -14,6 +15,19 @@ from optional_services import (
     get_tunnel_service,
 )
 from pairing import get_pairing_service
+from remote_access_models import (
+    PairingRemoteAccessResult,
+    PairVerifyFlowResult,
+    RemoteAccessActionResult,
+    RemoteAccessLoginPayload,
+    RemoteAccessLoginResult,
+    RemoteFirebaseStatus,
+    RemoteMdnsStatus,
+    RemoteNetworkStatus,
+    RemoteTunnelStatus,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_firebase_auth(firebase_auth: Any | None) -> Any | None:
@@ -34,189 +48,6 @@ def _firebase_unavailable_action_result() -> RemoteAccessActionResult:
         status_code=400,
         error="Firebase is not available",
     )
-
-
-@dataclass(frozen=True)
-class RemoteAccessLoginPayload:
-    """Parsed payload for remote access login requests."""
-
-    id_token: str
-    refresh_token: Optional[str]
-    auth_mode: str
-    register_device: bool
-
-
-@dataclass(frozen=True)
-class PairingRemoteAccessResult:
-    """Typed result for pairing-time remote access registration."""
-
-    firebase_registered: Optional[bool] = None
-    firebase_error: Optional[str] = None
-
-    def as_response_fields(self) -> dict[str, Any]:
-        """Convert to route response fields, omitting unset values."""
-        payload: dict[str, Any] = {}
-        if self.firebase_registered is not None:
-            payload["firebase_registered"] = self.firebase_registered
-        if self.firebase_error:
-            payload["firebase_error"] = self.firebase_error
-        return payload
-
-
-@dataclass(frozen=True)
-class ServiceFlowResult:
-    """Common base for service flow results."""
-
-    success: bool
-    status_code: int
-    error: Optional[str] = None
-
-    def error_response(self, fallback_message: str) -> dict[str, Any]:
-        return {"error": self.error or fallback_message}
-
-
-@dataclass(frozen=True)
-class RemoteAccessLoginResult(ServiceFlowResult):
-    """Typed result for remote-access login flow."""
-
-    user_id: Optional[str] = None
-    server_id: Optional[str] = None
-    server_name: Optional[str] = None
-    auth_mode: Optional[str] = None
-
-    def as_response_fields(self) -> dict[str, Any]:
-        if not self.success:
-            return self.error_response("Remote access login failed")
-        return {
-            "success": True,
-            "user_id": self.user_id,
-            "server_id": self.server_id,
-            "server_name": self.server_name,
-            "auth_mode": self.auth_mode,
-        }
-
-
-@dataclass(frozen=True)
-class PairVerifyFlowResult(ServiceFlowResult):
-    """Typed result for pair-token verification flow."""
-
-    api_key: Optional[str] = None
-    server_id: Optional[str] = None
-    client_id: Optional[str] = None
-    firebase_registered: Optional[bool] = None
-    firebase_error: Optional[str] = None
-
-    def as_response_fields(self) -> dict[str, Any]:
-        if not self.success:
-            return self.error_response("Pairing failed")
-
-        payload: dict[str, Any] = {"success": True}
-        if self.api_key:
-            payload["api_key"] = self.api_key
-        if self.server_id:
-            payload["server_id"] = self.server_id
-        if self.client_id:
-            payload["client_id"] = self.client_id
-        if self.firebase_registered is not None:
-            payload["firebase_registered"] = self.firebase_registered
-        if self.firebase_error:
-            payload["firebase_error"] = self.firebase_error
-        return payload
-
-
-@dataclass(frozen=True)
-class RemoteAccessActionResult(ServiceFlowResult):
-    """Typed result for logout/disconnect remote-access flows."""
-
-    url: Optional[str] = None
-    message: Optional[str] = None
-
-    def as_response_fields(self) -> dict[str, Any]:
-        if not self.success:
-            return self.error_response("Remote access action failed")
-
-        payload: dict[str, Any] = {"success": True}
-        if self.url:
-            payload["url"] = self.url
-        if self.message:
-            payload["message"] = self.message
-        return payload
-
-
-@dataclass(frozen=True)
-class RemoteMdnsStatus:
-    """Typed mDNS status for remote-network state responses."""
-
-    available: bool
-    enabled: bool
-    registered: bool
-    server_name: str
-
-    def as_response_fields(self) -> dict[str, Any]:
-        return {
-            "available": self.available,
-            "enabled": self.enabled,
-            "registered": self.registered,
-            "server_name": self.server_name,
-        }
-
-
-@dataclass(frozen=True)
-class RemoteTunnelStatus:
-    """Typed tunnel status for remote-network state responses."""
-
-    available: bool
-    enabled: bool
-    running: bool
-    url: Optional[str]
-    installed: Optional[bool] = None
-
-    def as_response_fields(self) -> dict[str, Any]:
-        payload = {
-            "available": self.available,
-            "enabled": self.enabled,
-            "running": self.running,
-            "url": self.url,
-        }
-        if self.installed is not None:
-            payload["installed"] = self.installed
-        return payload
-
-
-@dataclass(frozen=True)
-class RemoteFirebaseStatus:
-    """Typed Firebase auth status for remote-network state responses."""
-
-    available: bool
-    enabled: bool
-    authenticated: bool
-    user_id: Optional[str]
-    server_id: Optional[str]
-
-    def as_response_fields(self) -> dict[str, Any]:
-        return {
-            "available": self.available,
-            "enabled": self.enabled,
-            "authenticated": self.authenticated,
-            "user_id": self.user_id,
-            "server_id": self.server_id,
-        }
-
-
-@dataclass(frozen=True)
-class RemoteNetworkStatus:
-    """Typed aggregate network/remote-access status payload."""
-
-    mdns: RemoteMdnsStatus
-    tunnel: RemoteTunnelStatus
-    firebase: RemoteFirebaseStatus
-
-    def as_response_fields(self) -> dict[str, Any]:
-        return {
-            "mdns": self.mdns.as_response_fields(),
-            "tunnel": self.tunnel.as_response_fields(),
-            "firebase": self.firebase.as_response_fields(),
-        }
 
 
 def parse_remote_access_login_payload(body: Any) -> tuple[RemoteAccessLoginPayload | None, str | None]:
@@ -255,14 +86,14 @@ async def _resolve_tunnel_url_for_registration(*, local_port: int, autostart_tun
     tunnel_service = get_tunnel_service()
     if tunnel_service:
         if autostart_tunnel and not tunnel_service.is_running:
-            print("Auto-starting tunnel for remote access...")
+            logger.info("Auto-starting tunnel for remote access...")
             return await tunnel_service.start()
         return tunnel_service.tunnel_url
 
     if autostart_tunnel:
         tunnel_service = create_tunnel_service(local_port=local_port)
         if tunnel_service:
-            print("Creating and starting tunnel for remote access...")
+            logger.info("Creating and starting tunnel for remote access...")
             return await tunnel_service.start()
 
     return None
@@ -317,7 +148,7 @@ async def register_pairing_remote_access(
         autostart_tunnel=True,
     )
     if registered:
-        print(f"Server registered to Firebase for user: {firebase_auth.get_status().get('user_id')}")
+        logger.info("Server registered to Firebase for user: %s", firebase_auth.get_status().get('user_id'))
 
     return PairingRemoteAccessResult(firebase_registered=registered)
 
@@ -428,7 +259,7 @@ async def login_for_remote_access_request_json_for_current_server(
     """Read request JSON and process remote-access login for current server."""
     try:
         body = await request_json_loader()
-    except Exception:
+    except (ValueError, json.JSONDecodeError):
         return RemoteAccessLoginResult(
             success=False,
             status_code=400,
@@ -700,7 +531,7 @@ async def start_tunnel_for_remote_access(*, local_port: int) -> RemoteAccessActi
                 local_url = f"http://localhost:{local_port}"
                 registered = await firebase_auth.register_device(url, local_url)
                 if registered:
-                    print(f"Tunnel URL registered to Firebase: {url}")
+                    logger.info("Tunnel URL registered to Firebase: %s", url)
 
         return RemoteAccessActionResult(
             success=True,
