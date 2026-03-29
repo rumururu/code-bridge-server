@@ -9,7 +9,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 # Server version
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 class Config:

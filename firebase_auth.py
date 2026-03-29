@@ -112,7 +112,10 @@ class FirebaseAuthService:
                 logger.error("Failed to migrate legacy device info: %s", e)
 
     def _save_server_info(self) -> None:
-        """Save server info to file."""
+        """Save server info to file.
+
+        Always preserves refresh_token if available (for retry capability).
+        """
         try:
             data = {"server_id": self._server_id}
             if self._current_user_id:
@@ -121,9 +124,11 @@ class FirebaseAuthService:
                 data["email"] = self._current_email
             if self._auth_mode:
                 data["auth_mode"] = self._auth_mode
-            if self._auth_mode == "refresh_token" and self._refresh_token:
+            # Always save refresh_token if available (critical for recovery)
+            if self._refresh_token:
                 data["refresh_token"] = self._refresh_token
-            elif self._auth_mode == "id_token" and self._current_id_token:
+            # Save id_token for id_token mode
+            if self._auth_mode == "id_token" and self._current_id_token:
                 data["id_token"] = self._current_id_token
             with open(SERVER_INFO_PATH, "w") as f:
                 json.dump(data, f)
@@ -282,14 +287,15 @@ class FirebaseAuthService:
         self._token_expires_at = None
 
     def _clear_token_state(self) -> None:
-        """Clear token state but preserve user ownership (user_id/email).
+        """Clear ID token state but preserve refresh_token and user ownership.
 
-        Use this when tokens expire or become invalid but we want to
-        preserve server ownership for SSO re-authentication.
+        Use this when ID token expires or becomes invalid. Preserves:
+        - refresh_token: For automatic re-authentication attempts
+        - user_id, email, auth_mode: Server ownership info
         """
         self._current_id_token = None
-        self._refresh_token = None
         self._token_expires_at = None
+        # Keep refresh_token for retry capability
         # Keep user_id, email, auth_mode - these represent server ownership
 
     def _extract_token_expiration(self, id_token: str) -> None:

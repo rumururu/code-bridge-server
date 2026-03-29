@@ -25,7 +25,7 @@ def create_code_bridge_app(
     app = FastAPI(
         title="Code Bridge",
         description="Remote IDE bridge for Claude Code",
-        version="1.1.0",
+        version="1.2.0",
         lifespan=lifespan,
     )
 
@@ -56,7 +56,7 @@ def create_dashboard_app(
     app = FastAPI(
         title="Code Bridge Dashboard",
         description="Code Bridge Dashboard (localhost only)",
-        version="1.1.0",
+        version="1.2.0",
         # No lifespan - managed in server_cli.py
     )
 
@@ -87,7 +87,7 @@ def create_api_app(
     app = FastAPI(
         title="Code Bridge API",
         description="Code Bridge API (tunnel-exposed)",
-        version="1.1.0",
+        version="1.2.0",
         lifespan=lifespan,
     )
 
