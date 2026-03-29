@@ -18,7 +18,19 @@ from .deps import require_dashboard_auth, require_local_access
 router = APIRouter()
 
 
-# Get the server directory for git operations
+# Get the git repository root (search upward from server directory)
+def _find_git_root() -> Path | None:
+    """Find the git repository root by searching upward."""
+    current = Path(__file__).parent.parent
+    for _ in range(5):  # Search up to 5 levels
+        if (current / ".git").exists():
+            return current
+        if current.parent == current:
+            break
+        current = current.parent
+    return None
+
+GIT_ROOT = _find_git_root()
 SERVER_DIR = Path(__file__).parent.parent
 
 
@@ -78,11 +90,18 @@ async def check_update() -> dict[str, Any]:
         - message: Status message
         - output: Git command output
     """
+    if GIT_ROOT is None:
+        return {
+            "updated": False,
+            "message": "Git repository not found. Server was not installed via git.",
+            "error": True,
+        }
+
     try:
         # Run git fetch first to get latest refs
         fetch_proc = await asyncio.create_subprocess_exec(
             "git", "fetch",
-            cwd=str(SERVER_DIR),
+            cwd=str(GIT_ROOT),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -91,7 +110,7 @@ async def check_update() -> dict[str, Any]:
         # Check if we're behind
         status_proc = await asyncio.create_subprocess_exec(
             "git", "status", "-uno",
-            cwd=str(SERVER_DIR),
+            cwd=str(GIT_ROOT),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -108,7 +127,7 @@ async def check_update() -> dict[str, Any]:
         # Run git pull
         pull_proc = await asyncio.create_subprocess_exec(
             "git", "pull",
-            cwd=str(SERVER_DIR),
+            cwd=str(GIT_ROOT),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
