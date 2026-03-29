@@ -1,12 +1,17 @@
 """Dashboard routes for Code Bridge Server."""
 
 import asyncio
+import logging
+import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
+
+logger = logging.getLogger(__name__)
 
 from dashboard_page import render_dashboard_html
 from dashboard_service import get_dashboard_overview_for_current_server
@@ -32,6 +37,25 @@ def _find_git_root() -> Path | None:
 
 GIT_ROOT = _find_git_root()
 SERVER_DIR = Path(__file__).parent.parent
+
+
+async def _restart_server_delayed(delay: float = 1.0) -> None:
+    """Restart the server after a delay to allow response to be sent."""
+    await asyncio.sleep(delay)
+    logger.info("Restarting server after update...")
+
+    # Get the original command line arguments
+    python = sys.executable
+    args = sys.argv[:]
+
+    # If running as module, reconstruct properly
+    if args[0].endswith("server_cli.py") or args[0].endswith("main.py"):
+        script = args[0]
+        os.chdir(SERVER_DIR)
+        os.execv(python, [python, script] + args[1:])
+    else:
+        # Fallback: restart with same args
+        os.execv(python, [python] + args)
 
 
 @router.get("/", include_in_schema=False, dependencies=[Depends(require_local_access)])
@@ -136,10 +160,14 @@ async def check_update() -> dict[str, Any]:
 
         if pull_proc.returncode == 0:
             updated = "Already up to date" not in output
+            if updated:
+                # Schedule server restart in background
+                asyncio.create_task(_restart_server_delayed(1.5))
             return {
                 "updated": updated,
-                "message": "Updated successfully. Restart server to apply changes." if updated else "Already up to date",
+                "message": "Updated successfully. Server restarting..." if updated else "Already up to date",
                 "output": output.strip(),
+                "restarting": updated,
             }
         else:
             return {
