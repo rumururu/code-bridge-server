@@ -5,7 +5,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, Response
 
-from system_inspect_service import (
+from system.system_inspect_service import (
     get_system_usage_for_current_server,
     list_project_candidates_for_current_server,
     list_system_directories_for_current_server,

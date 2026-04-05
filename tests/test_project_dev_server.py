@@ -8,13 +8,13 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from project_dev_server import (
+from projects.project_dev_server import (
     build_js_script_command_for_runner,
     guess_js_runner_from_package_manager,
     infer_default_dev_server_command_from_project,
     load_package_json_file,
 )
-from project_models import ProjectType
+from projects.project_models import ProjectType
 
 
 class ProjectDevServerHelpersTest(unittest.TestCase):

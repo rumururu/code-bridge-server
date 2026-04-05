@@ -8,8 +8,8 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-import remote_access_service
-from pairing import PairingVerifyTokenResult
+from remote import remote_access_service
+from pairing.pairing import PairingVerifyTokenResult
 
 
 class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -22,7 +22,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(payload.id_token, "token")
-        self.assertEqual(payload.auth_mode, "refresh_token")
         self.assertIsNone(payload.refresh_token)
         self.assertTrue(payload.register_device)
 
@@ -36,7 +35,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         config = SimpleNamespace(
             server_name="demo-server",
             remote_access_enabled=True,
-            firebase_enabled=True,
         )
         fake_firebase_auth = MagicMock()
         fake_firebase_auth.get_status.return_value = {
@@ -64,7 +62,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         fake_config = SimpleNamespace(
             server_name="demo-server",
             remote_access_enabled=True,
-            firebase_enabled=False,
         )
         expected_status = remote_access_service.RemoteNetworkStatus(
             mdns=remote_access_service.RemoteMdnsStatus(
@@ -163,7 +160,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
             result = await remote_access_service.register_pairing_remote_access(
                 firebase_id_token="token",
                 firebase_refresh_token=None,
-                auth_mode="refresh_token",
                 local_port=8080,
             )
 
@@ -171,6 +167,7 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_register_pairing_remote_access_returns_error_on_auth_failure(self):
         fake_firebase_auth = MagicMock()
+        fake_firebase_auth.verify_id_token = AsyncMock(return_value=None)
         fake_firebase_auth.authenticate_with_token = AsyncMock(return_value=False)
 
         with (
@@ -180,7 +177,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
             result = await remote_access_service.register_pairing_remote_access(
                 firebase_id_token="token",
                 firebase_refresh_token=None,
-                auth_mode="refresh_token",
                 local_port=8080,
             )
 
@@ -196,13 +192,11 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         payload = remote_access_service.RemoteAccessLoginPayload(
             id_token="token",
             refresh_token=None,
-            auth_mode="refresh_token",
             register_device=True,
         )
 
         result = await remote_access_service.login_for_remote_access(
             payload,
-            firebase_enabled=True,
             local_port=8080,
             firebase_available=False,
             firebase_auth=MagicMock(),
@@ -216,7 +210,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         payload = remote_access_service.RemoteAccessLoginPayload(
             id_token="token",
             refresh_token="refresh",
-            auth_mode="refresh_token",
             register_device=False,
         )
         fake_firebase_auth = MagicMock()
@@ -225,7 +218,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
             "user_id": "user-1",
             "server_id": "server-1",
             "server_name": "Pixel",
-            "auth_mode": "refresh_token",
         }
 
         with patch.object(
@@ -235,7 +227,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         ) as mock_register:
             result = await remote_access_service.login_for_remote_access(
                 payload,
-                firebase_enabled=True,
                 local_port=8080,
                 firebase_available=True,
                 firebase_auth=fake_firebase_auth,
@@ -251,7 +242,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         payload = remote_access_service.RemoteAccessLoginPayload(
             id_token="token",
             refresh_token=None,
-            auth_mode="refresh_token",
             register_device=True,
         )
         fake_firebase_auth = MagicMock()
@@ -260,7 +250,7 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 remote_access_service,
                 "get_config",
-                return_value=SimpleNamespace(firebase_enabled=True, api_port=9090),
+                return_value=SimpleNamespace(api_port=9090),
             ),
             patch.object(
                 remote_access_service,
@@ -284,7 +274,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.user_id, "u1")
         mock_login.assert_awaited_once_with(
             payload,
-            firebase_enabled=True,
             local_port=9090,
             firebase_available=True,
             firebase_auth=fake_firebase_auth,
@@ -343,7 +332,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
             device_name=None,
             firebase_id_token=None,
             firebase_refresh_token=None,
-            auth_mode="refresh_token",
             local_port=8080,
         )
 
@@ -362,15 +350,22 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
             client_id="c1",
         )
 
-        with patch.object(
-            remote_access_service,
-            "register_pairing_remote_access",
-            new=AsyncMock(
-                return_value=remote_access_service.PairingRemoteAccessResult(
-                    firebase_registered=True,
-                )
+        with (
+            patch.object(
+                remote_access_service,
+                "check_ownership_conflict",
+                new=AsyncMock(return_value=(False, None)),
             ),
-        ) as mock_remote:
+            patch.object(
+                remote_access_service,
+                "register_pairing_remote_access",
+                new=AsyncMock(
+                    return_value=remote_access_service.PairingRemoteAccessResult(
+                        firebase_registered=True,
+                    )
+                ),
+            ) as mock_remote,
+        ):
             result = await remote_access_service.verify_pairing_flow(
                 pairing_service=fake_pairing,
                 pair_token="valid",
@@ -378,7 +373,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
                 device_name="phone",
                 firebase_id_token="id-token",
                 firebase_refresh_token="refresh-token",
-                auth_mode="refresh_token",
                 local_port=9090,
             )
 
@@ -391,8 +385,8 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         mock_remote.assert_awaited_once_with(
             firebase_id_token="id-token",
             firebase_refresh_token="refresh-token",
-            auth_mode="refresh_token",
             local_port=9090,
+            force_replace=True,
         )
 
     async def test_verify_pairing_flow_for_current_server_uses_config_port(self):
@@ -419,7 +413,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
                 device_name="Phone",
                 firebase_id_token=None,
                 firebase_refresh_token=None,
-                auth_mode="refresh_token",
             )
 
         self.assertTrue(result.success)
@@ -431,8 +424,8 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
             device_name="Phone",
             firebase_id_token=None,
             firebase_refresh_token=None,
-            auth_mode="refresh_token",
             local_port=9191,
+            force_replace=False,
         )
 
     async def test_verify_pair_token_for_current_server_uses_default_pairing_service(self):
@@ -458,7 +451,6 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
                 device_name="Phone",
                 firebase_id_token=None,
                 firebase_refresh_token=None,
-                auth_mode="refresh_token",
             )
 
         self.assertTrue(result.success)
@@ -470,7 +462,7 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
             device_name="Phone",
             firebase_id_token=None,
             firebase_refresh_token=None,
-            auth_mode="refresh_token",
+            force_replace=False,
         )
 
     async def test_logout_remote_access_unavailable_returns_400(self):

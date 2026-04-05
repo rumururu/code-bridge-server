@@ -10,7 +10,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from build_preview import serve_build_preview
+from preview.build_preview import serve_build_preview
 
 
 class BuildPreviewTest(unittest.TestCase):

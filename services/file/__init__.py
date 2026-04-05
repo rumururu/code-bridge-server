@@ -3,7 +3,7 @@
 Provides file operations, directory navigation, and file content management.
 """
 
-from file_manager import (
+from files.file_manager import (
     FileManager,
     get_file_manager,
 )

@@ -9,7 +9,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from pairing import (
+from pairing.pairing import (
     CurrentPairingDataResult,
     PairingClientStatus,
     PairingPageContextResult,
@@ -18,9 +18,9 @@ from pairing import (
     PairingVerifyTokenResult,
     PairTokenStatus,
 )
-from pairing import PairingData
-from pairing import PairingService
-from pairing import (
+from pairing.pairing import PairingData
+from pairing.pairing import PairingService
+from pairing.pairing import (
     build_current_pairing_data_result,
     build_current_pairing_page_context_result,
     build_current_pairing_qr_result,
@@ -108,9 +108,9 @@ class PairingDataTest(unittest.TestCase):
         )
 
         with (
-            patch("pairing_service.get_config", return_value=SimpleNamespace(api_port=8080, server_name="Demo")),
-            patch("pairing_service.get_active_tunnel_url", return_value="https://demo.tunnel"),
-            patch("pairing_service.create_current_pairing_data", return_value=expected_pairing_data) as mock_create,
+            patch("pairing.pairing_service.get_config", return_value=SimpleNamespace(api_port=8080, server_name="Demo")),
+            patch("pairing.pairing_service.get_active_tunnel_url", return_value="https://demo.tunnel"),
+            patch("pairing.pairing_service.create_current_pairing_data", return_value=expected_pairing_data) as mock_create,
         ):
             result = build_current_pairing_data_result()
 
@@ -125,7 +125,7 @@ class PairingDataTest(unittest.TestCase):
         )
 
     def test_build_current_pairing_data_result_returns_error_on_exception(self):
-        with patch("pairing_service.get_config", side_effect=RuntimeError("broken")):
+        with patch("pairing.pairing_service.get_config", side_effect=RuntimeError("broken")):
             result = build_current_pairing_data_result()
 
         self.assertFalse(result.success)
@@ -134,7 +134,7 @@ class PairingDataTest(unittest.TestCase):
 
     def test_build_current_pairing_qr_result_propagates_pairing_data_error(self):
         with patch(
-            "pairing_service.build_current_pairing_data_result",
+            "pairing.pairing_service.build_current_pairing_data_result",
             return_value=CurrentPairingDataResult(
                 success=False,
                 status_code=503,
@@ -155,7 +155,7 @@ class PairingDataTest(unittest.TestCase):
         fake_pairing_data.expires_in_seconds.return_value = 180
 
         with patch(
-            "pairing_service.build_current_pairing_data_result",
+            "pairing.pairing_service.build_current_pairing_data_result",
             return_value=CurrentPairingDataResult(
                 success=True,
                 status_code=200,

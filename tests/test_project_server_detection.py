@@ -8,12 +8,12 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from project_server_detection import (
+from projects.project_server_detection import (
     detect_port_for_project,
     get_process_cwd,
     list_listening_processes,
 )
-from project_models import ProjectType
+from projects.project_models import ProjectType
 
 
 class ProjectServerDetectionTest(unittest.TestCase):

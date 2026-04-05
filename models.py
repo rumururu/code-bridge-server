@@ -130,7 +130,7 @@ class PairVerifyRequest(BaseModel):
     device_name: Optional[str] = None
     firebase_id_token: Optional[str] = None
     firebase_refresh_token: Optional[str] = None
-    auth_mode: str = "refresh_token"  # "id_token" (1hr) or "refresh_token" (permanent)
+    force_replace: bool = False  # If True, replace existing owner without confirmation
 
 
 class PairCodeVerifyRequest(BaseModel):
@@ -148,6 +148,6 @@ class SSOPairRequest(BaseModel):
 
     firebase_id_token: str
     firebase_refresh_token: Optional[str] = None
-    auth_mode: str = "refresh_token"  # "id_token" (1hr) or "refresh_token" (permanent)
     client_id: Optional[str] = None
     device_name: Optional[str] = None
+    force_replace: bool = False  # If True, replace existing owner without confirmation

@@ -6,7 +6,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from project_models import BuildStatus, ProjectType
+from projects.project_models import BuildStatus, ProjectType
 
 
 class ProjectModelsTest(unittest.TestCase):

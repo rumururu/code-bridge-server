@@ -8,12 +8,12 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from project_dev_server_start import (
+from projects.project_dev_server_start import (
     NO_COMMAND_TEMPLATE,
     resolve_dev_server_start_plan,
     spawn_dev_server_process,
 )
-from project_models import ProjectType
+from projects.project_models import ProjectType
 
 
 class ProjectDevServerStartTest(unittest.TestCase):
@@ -94,7 +94,7 @@ class ProjectDevServerStartTest(unittest.TestCase):
     def test_spawn_dev_server_process_invokes_popen(self):
         fake_process = MagicMock()
         with patch(
-            "project_dev_server_start.subprocess.Popen",
+            "projects.project_dev_server_start.subprocess.Popen",
             return_value=fake_process,
         ) as mock_popen:
             result = spawn_dev_server_process("npm run dev", "/tmp/demo")

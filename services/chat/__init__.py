@@ -3,14 +3,14 @@
 Provides WebSocket management, streaming, and session management.
 """
 
-from chat_stream_service import stream_claude_turn
-from chat_session_service import (
+from chat.chat_stream_service import stream_claude_turn
+from chat.chat_session_service import (
     ChatProviderSelection,
     ChatSessionInitError,
     get_chat_provider_selection,
     create_chat_session,
 )
-from chat_ws_service import (
+from chat.chat_ws_service import (
     create_chat_session_for_current_server,
     process_disconnect_server_message_for_current_server,
     process_firebase_auth_message_for_current_server,

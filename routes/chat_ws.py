@@ -8,15 +8,15 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
 
-from chat_stream_service import stream_claude_turn
-from chat_ws_service import (
+from chat.chat_stream_service import stream_claude_turn
+from chat.chat_ws_service import (
     create_chat_session_for_current_server,
     process_disconnect_server_message_for_current_server,
     process_firebase_auth_message_for_current_server,
     resolve_chat_provider_selection_for_current_server,
     validate_chat_websocket_access_for_current_server,
 )
-from pairing import get_pairing_service
+from pairing.pairing import get_pairing_service
 from services.chat.ws_manager import get_ws_manager
 
 router = APIRouter(tags=["chat"])
@@ -229,43 +229,42 @@ async def chat_websocket(
     _ws_manager.register_connection(websocket)
     logger.info("accepted project=%s path=%s", project_name, websocket.url.path)
 
-    project_path = access.project_path or ""
-    local_port = access.local_port or 0
-
-    selection_result = resolve_chat_provider_selection_for_current_server()
-    if not selection_result.success or selection_result.selection is None:
-        await websocket.send_json(
-            {
-                "type": "error",
-                "message": selection_result.error_message or "Failed to resolve provider",
-            }
-        )
-        await websocket.close()
-        return
-
-    provider_name = selection_result.provider_name or "LLM"
-    await websocket.send_json({"type": "status", "message": f"Connecting to {provider_name}..."})
-
-    session_result = await create_chat_session_for_current_server(
-        project_name,
-        project_path,
-        selection_result.selection,
-    )
-    if not session_result.success or session_result.session is None:
-        await websocket.send_json(
-            {
-                "type": "error",
-                "message": session_result.error_message or "Failed to create chat session",
-            }
-        )
-        await websocket.close()
-        return
-
-    session = session_result.session
-    await websocket.send_json({"type": "status", "message": f"Connected to {provider_name}"})
-    logger.info("project=%s connected provider=%s", project_name, provider_name)
-
     try:
+        project_path = access.project_path or ""
+        local_port = access.local_port or 0
+
+        selection_result = resolve_chat_provider_selection_for_current_server()
+        if not selection_result.success or selection_result.selection is None:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": selection_result.error_message or "Failed to resolve provider",
+                }
+            )
+            await websocket.close()
+            return
+
+        provider_name = selection_result.provider_name or "LLM"
+        await websocket.send_json({"type": "status", "message": f"Connecting to {provider_name}..."})
+
+        session_result = await create_chat_session_for_current_server(
+            project_name,
+            project_path,
+            selection_result.selection,
+        )
+        if not session_result.success or session_result.session is None:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": session_result.error_message or "Failed to create chat session",
+                }
+            )
+            await websocket.close()
+            return
+
+        session = session_result.session
+        await websocket.send_json({"type": "status", "message": f"Connected to {provider_name}"})
+        logger.info("project=%s connected provider=%s", project_name, provider_name)
         while True:
             try:
                 data = await websocket.receive_text()

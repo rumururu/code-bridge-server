@@ -11,7 +11,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from preview_route_service import PreviewRouteResult
+from preview.preview_route_service import PreviewRouteResult
 from routes.deps import verify_api_key
 from routes.preview import router as preview_router
 

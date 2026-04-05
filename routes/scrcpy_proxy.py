@@ -12,8 +12,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from scrcpy_manager import get_scrcpy_manager
-from auth_service import validate_api_key_for_current_server
+from devices.scrcpy_manager import get_scrcpy_manager
+from auth.auth_service import validate_api_key_for_current_server
 
 logger = logging.getLogger(__name__)
 

@@ -10,14 +10,14 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from pairing import (
+from pairing.pairing import (
     PairTokenStatus,
     PairingQrResult,
     PairingRevokeResult,
     PairingStatus,
 )
-from pairing_page_service import PairingPageRenderResult
-from remote_access_service import PairVerifyFlowResult
+from pairing.pairing_page_service import PairingPageRenderResult
+from remote.remote_access_service import PairVerifyFlowResult
 from routes.deps import require_localhost_only, verify_api_key
 from routes.pairing import router as pairing_router
 
@@ -113,7 +113,7 @@ class PairingRoutesTest(unittest.TestCase):
             device_name=None,
             firebase_id_token=None,
             firebase_refresh_token=None,
-            auth_mode="refresh_token",
+            force_replace=False,
         )
 
     def test_verify_pair_token_success_with_firebase_merges_remote_fields(self):
@@ -136,7 +136,6 @@ class PairingRoutesTest(unittest.TestCase):
                     "pair_token": "valid",
                     "firebase_id_token": "id-token",
                     "firebase_refresh_token": "refresh-token",
-                    "auth_mode": "refresh_token",
                 },
             )
 
@@ -151,7 +150,7 @@ class PairingRoutesTest(unittest.TestCase):
             device_name=None,
             firebase_id_token="id-token",
             firebase_refresh_token="refresh-token",
-            auth_mode="refresh_token",
+            force_replace=False,
         )
 
     def test_get_pair_status_passes_through_service_payload(self):

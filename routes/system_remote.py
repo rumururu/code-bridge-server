@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 
-from remote_access_service import (
+from remote.remote_access_service import (
     build_remote_network_status_for_current_server,
     disconnect_remote_access_for_current_server,
     login_for_remote_access_request_json_for_current_server,

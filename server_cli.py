@@ -3,27 +3,124 @@
 import argparse
 import asyncio
 import logging
+import os
 import signal
+import sys
 import webbrowser
+from pathlib import Path
 
 import uvicorn
 
-from config import get_config
+from core.config import get_config
 
 logger = logging.getLogger(__name__)
-from mdns_service import start_mdns_service, stop_mdns_service
-from optional_services import get_active_tunnel_url
-from pairing_qr_service import (
+
+# PID file path (same directory as server_info.json)
+PID_FILE = Path(__file__).parent / ".server.pid"
+
+
+def _get_running_server_pid() -> int | None:
+    """Check if a server is already running and return its PID."""
+    if not PID_FILE.exists():
+        return None
+
+    try:
+        pid = int(PID_FILE.read_text().strip())
+        # Check if process is still running
+        os.kill(pid, 0)  # Signal 0 doesn't kill, just checks
+        return pid
+    except (ValueError, ProcessLookupError, PermissionError):
+        # PID file is stale or process not running
+        PID_FILE.unlink(missing_ok=True)
+        return None
+
+
+def _write_pid_file() -> None:
+    """Write current process PID to file."""
+    PID_FILE.write_text(str(os.getpid()))
+
+
+def _remove_pid_file() -> None:
+    """Remove PID file on shutdown."""
+    PID_FILE.unlink(missing_ok=True)
+
+
+def _stop_existing_server(pid: int) -> bool:
+    """Stop existing server process."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+        # Wait for process to terminate
+        import time
+
+        for _ in range(30):  # Wait up to 3 seconds
+            time.sleep(0.1)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                PID_FILE.unlink(missing_ok=True)
+                return True
+        # Force kill if still running
+        os.kill(pid, signal.SIGKILL)
+        PID_FILE.unlink(missing_ok=True)
+        return True
+    except (ProcessLookupError, PermissionError):
+        PID_FILE.unlink(missing_ok=True)
+        return True
+
+
+def _check_and_handle_duplicate(auto_restart: bool = False) -> bool:
+    """Check for duplicate server and handle it.
+
+    Args:
+        auto_restart: If True, automatically stop existing server without prompting.
+
+    Returns True if we should continue starting, False to abort.
+    """
+    existing_pid = _get_running_server_pid()
+    if existing_pid is None:
+        return True
+
+    if auto_restart:
+        print(f"⚠️  기존 서버(PID: {existing_pid})를 종료하고 재시작합니다...")
+        if _stop_existing_server(existing_pid):
+            print("✅ 기존 서버가 종료되었습니다.\n")
+            return True
+        else:
+            print("❌ 기존 서버 종료에 실패했습니다.\n")
+            return False
+
+    print(f"\n⚠️  서버가 이미 실행 중입니다 (PID: {existing_pid})")
+    print("   이전 서버를 종료하고 새로 시작할까요?")
+
+    try:
+        response = input("   [Y/n]: ").strip().lower()
+        if response in ("", "y", "yes"):
+            print(f"   기존 서버(PID: {existing_pid})를 종료합니다...")
+            if _stop_existing_server(existing_pid):
+                print("   ✅ 기존 서버가 종료되었습니다.\n")
+                return True
+            else:
+                print("   ❌ 기존 서버 종료에 실패했습니다.\n")
+                return False
+        else:
+            print("   서버 시작을 취소합니다.\n")
+            return False
+    except (EOFError, KeyboardInterrupt):
+        print("\n   서버 시작을 취소합니다.\n")
+        return False
+from pairing.mdns_service import start_mdns_service, stop_mdns_service
+from system.optional_services import get_active_tunnel_url
+from pairing.pairing_qr_service import (
     build_pairing_qr_payload_for_current_server,
     display_pairing_qr_payload,
     open_pairing_page,
 )
-from qr_display import QRCODE_AVAILABLE
-from remote_access_service import (
+from pairing.qr_display import QRCODE_AVAILABLE
+from remote.remote_access_service import (
     start_tunnel_for_current_server,
     stop_tunnel_for_current_server,
 )
-from tunnel_service import TunnelService, get_tunnel_service
+from remote.tunnel_service import TunnelService, get_tunnel_service
 
 
 def show_pairing_qr(open_browser: bool = True) -> None:
@@ -72,6 +169,47 @@ def _find_available_port(host: str, start_port: int, max_tries: int = 20) -> int
     raise RuntimeError(f"No available port found in range {start_port}-{start_port + max_tries - 1}")
 
 
+async def _sync_server_url_to_firebase(api_port: int) -> None:
+    """Sync server URL to Firebase if authenticated.
+
+    This ensures that when the server starts (possibly on a new port),
+    the app can discover the correct URL via Firebase.
+    """
+    from system.optional_services import FIREBASE_AVAILABLE, get_firebase_auth, get_tunnel_service
+    from pairing.pairing import get_pairing_service
+
+    if not FIREBASE_AVAILABLE:
+        return
+
+    firebase_auth = get_firebase_auth()
+    if not firebase_auth:
+        return
+
+    status = firebase_auth.get_status()
+    if not status.get("authenticated"):
+        logger.debug("Firebase not authenticated, skipping URL sync")
+        return
+
+    # Build URLs
+    pairing = get_pairing_service()
+    local_url = f"http://{pairing.get_local_ip()}:{api_port}"
+
+    tunnel_url = None
+    tunnel_service = get_tunnel_service()
+    if tunnel_service and tunnel_service.is_running:
+        tunnel_url = tunnel_service.tunnel_url
+
+    # Register to Firebase
+    try:
+        registered = await firebase_auth.register_device(tunnel_url, local_url)
+        if registered:
+            logger.info("Server URL synced to Firebase: local=%s, tunnel=%s", local_url, tunnel_url)
+        else:
+            logger.warning("Failed to sync server URL to Firebase")
+    except Exception as e:
+        logger.error("Error syncing server URL to Firebase: %s", e)
+
+
 async def run_dual_servers() -> None:
     """Run Dashboard and API servers concurrently.
 
@@ -79,7 +217,7 @@ async def run_dual_servers() -> None:
     - API server: 0.0.0.0:api_port (tunnel-exposed)
     """
     from main import api_app, dashboard_app
-    from pairing import get_pairing_service
+    from pairing.pairing import get_pairing_service
 
     config = get_config()
 
@@ -103,9 +241,12 @@ async def run_dual_servers() -> None:
         dashboard_port=dashboard_port,
     )
 
+    # Sync server URL to Firebase if authenticated
+    await _sync_server_url_to_firebase(api_port)
+
     dashboard_config = uvicorn.Config(
         app=dashboard_app,
-        host="127.0.0.1",  # localhost only, not tunnel-exposed
+        host=config.dashboard_host,  # localhost only, not tunnel-exposed
         port=dashboard_port,
         log_level=config.log_level,
         # No reload in dual-server mode (not supported with programmatic run)
@@ -113,7 +254,7 @@ async def run_dual_servers() -> None:
 
     api_config = uvicorn.Config(
         app=api_app,
-        host="0.0.0.0",  # External access via tunnel
+        host=config.api_host,  # External access via tunnel
         port=api_port,
         log_level=config.log_level,
     )
@@ -124,6 +265,9 @@ async def run_dual_servers() -> None:
     print(f"Starting Dashboard server on http://127.0.0.1:{dashboard_port}")
     print(f"Starting API server on http://0.0.0.0:{api_port}")
 
+    # Write PID file for duplicate detection
+    _write_pid_file()
+
     try:
         # Run both servers concurrently, open dashboard after startup
         await asyncio.gather(
@@ -132,6 +276,7 @@ async def run_dual_servers() -> None:
             open_dashboard_after_delay(dashboard_port),
         )
     finally:
+        _remove_pid_file()
         await stop_mdns_service()
 
 
@@ -237,7 +382,17 @@ def main() -> None:
         action="store_true",
         help="Run in legacy single-server mode (all routes on one port)",
     )
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="Automatically restart if server is already running",
+    )
     args = parser.parse_args()
+
+    # Check for duplicate server when starting (not for tunnel subcommands)
+    if args.command is None:  # Server start mode
+        if not _check_and_handle_duplicate(auto_restart=args.restart):
+            sys.exit(0)
 
     # Handle tunnel subcommand
     if args.command == "tunnel":
@@ -267,13 +422,17 @@ def main() -> None:
         # Legacy single-server mode
         host = args.host or config.host
         port = config.dashboard_port
-        uvicorn.run(
-            "main:app",
-            host=host,
-            port=port,
-            reload=config.debug,
-            log_level=config.log_level,
-        )
+        _write_pid_file()
+        try:
+            uvicorn.run(
+                "main:app",
+                host=host,
+                port=port,
+                reload=config.debug,
+                log_level=config.log_level,
+            )
+        finally:
+            _remove_pid_file()
     else:
         # Dual-server mode (default)
         asyncio.run(run_dual_servers())

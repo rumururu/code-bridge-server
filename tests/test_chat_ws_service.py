@@ -8,8 +8,8 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-import chat_ws_service
-from remote_access_service import RemoteAccessLoginPayload
+from chat import chat_ws_service
+from remote.remote_access_service import RemoteAccessLoginPayload
 
 
 class ChatWsServiceTest(unittest.TestCase):
@@ -116,7 +116,6 @@ class ChatWsServiceAsyncTest(unittest.IsolatedAsyncioTestCase):
         payload = RemoteAccessLoginPayload(
             id_token="token",
             refresh_token=None,
-            auth_mode="refresh_token",
             register_device=False,
         )
         fake_auth = MagicMock()

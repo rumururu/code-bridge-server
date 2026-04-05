@@ -9,7 +9,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-import lifecycle_service
+from system import lifecycle_service
 
 
 class LifecycleServiceSyncTest(unittest.TestCase):
@@ -58,7 +58,7 @@ class LifecycleServiceSyncTest(unittest.TestCase):
 
 class LifecycleServiceAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_initialize_firebase_for_current_server_registers_local_url(self):
-        config = SimpleNamespace(firebase_enabled=True, api_port=8080)
+        config = SimpleNamespace(api_port=8080)
         firebase_auth = SimpleNamespace(
             is_authenticated=True,
             initialize=AsyncMock(),
@@ -80,7 +80,7 @@ class LifecycleServiceAsyncTest(unittest.IsolatedAsyncioTestCase):
         firebase_auth.register_device.assert_awaited_once_with(None, "http://192.168.0.10:8080")
 
     async def test_initialize_firebase_for_current_server_handles_init_error(self):
-        config = SimpleNamespace(firebase_enabled=True, api_port=8080)
+        config = SimpleNamespace(api_port=8080)
         firebase_auth = SimpleNamespace(initialize=AsyncMock(side_effect=RuntimeError("boom")))
 
         resolved_auth, needs_pairing = await lifecycle_service.initialize_firebase_for_current_server(

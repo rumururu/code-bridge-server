@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
 from models import DeviceRunRequest, ProjectCreate, ProjectImport, ProjectUpdate
-from project_action_service import (
+from projects.project_action_service import (
     build_project_flutter_web_for_current_server,
     close_project_session_for_current_server,
     create_project_record_for_current_server,

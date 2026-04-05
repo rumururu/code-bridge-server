@@ -7,7 +7,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-import project_action_service
+from projects import project_action_service
 
 
 class ProjectRegistryServiceSyncTest(unittest.TestCase):
@@ -16,13 +16,13 @@ class ProjectRegistryServiceSyncTest(unittest.TestCase):
         fake_db.get_all.return_value = []
 
         with patch(
-            "project_action_service.validate_accessible_path",
+            "projects.project_action_service.validate_accessible_path",
             return_value=True,
         ), patch(
-            "project_action_service.collect_existing_project_state",
+            "projects.project_action_service.collect_existing_project_state",
             return_value=(set(), {}),
         ), patch(
-            "project_action_service.prepare_project_payload",
+            "projects.project_action_service.prepare_project_payload",
             return_value=(None, "Invalid project", 422),
         ):
             result = project_action_service.create_project_record_for_current_server(
@@ -40,13 +40,13 @@ class ProjectRegistryServiceSyncTest(unittest.TestCase):
         fake_db.create.return_value = {"name": "demo", "path": "/tmp/demo"}
 
         with patch(
-            "project_action_service.validate_accessible_path",
+            "projects.project_action_service.validate_accessible_path",
             return_value=True,
         ), patch(
-            "project_action_service.collect_existing_project_state",
+            "projects.project_action_service.collect_existing_project_state",
             return_value=(set(), {}),
         ), patch(
-            "project_action_service.prepare_project_payload",
+            "projects.project_action_service.prepare_project_payload",
             return_value=({"name": "demo", "path": "/tmp/demo", "type": "flutter"}, None, None),
         ):
             result = project_action_service.create_project_record_for_current_server(
@@ -72,13 +72,13 @@ class ProjectRegistryServiceSyncTest(unittest.TestCase):
         fake_db.create.return_value = {"name": "demo", "path": "/tmp/demo"}
 
         with patch(
-            "project_action_service.validate_accessible_path",
+            "projects.project_action_service.validate_accessible_path",
             return_value=True,
         ), patch(
-            "project_action_service.collect_existing_project_state",
+            "projects.project_action_service.collect_existing_project_state",
             return_value=(set(), {}),
         ), patch(
-            "project_action_service.prepare_project_payload",
+            "projects.project_action_service.prepare_project_payload",
             side_effect=[
                 ({"name": "demo", "path": "/tmp/demo", "type": "flutter"}, None, None),
                 (None, "Path already registered as project", 400),

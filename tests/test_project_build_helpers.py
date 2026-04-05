@@ -7,7 +7,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from project_build_helpers import decode_build_error, resolve_nextjs_build_output_path
+from projects.project_build_helpers import decode_build_error, resolve_nextjs_build_output_path
 
 
 class ProjectBuildHelpersTest(unittest.TestCase):

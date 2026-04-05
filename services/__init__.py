@@ -9,8 +9,8 @@ Import directly from this package for backward compatibility:
     from services import PreviewProxy, get_preview_proxy
 """
 
-# Re-export from root modules for backward compatibility
-from pairing_service import (
+# Re-export from domain modules for backward compatibility
+from pairing.pairing_service import (
     PairingService,
     PairingData,
     PairingStatus,
@@ -29,17 +29,17 @@ from pairing_service import (
     get_pairing_service,
 )
 
-from project_manager import (
+from projects.project_manager import (
     ProjectManager,
     get_project_manager,
 )
 
-from file_manager import (
+from files.file_manager import (
     FileManager,
     get_file_manager,
 )
 
-from preview_service import (
+from preview.preview_service import (
     PreviewProxy,
     get_preview_proxy,
 )

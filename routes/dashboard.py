@@ -10,13 +10,18 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-from dashboard_page import render_dashboard_html
-from dashboard_service import get_dashboard_overview_for_current_server
-from project_device_logs import read_log_tail
-from server_logging import resolve_server_log_path
+from system.autostart_service import get_autostart_status, set_autostart
+from core.config import get_config
+from dashboard.dashboard_page import render_dashboard_html
+from dashboard.dashboard_service import get_dashboard_overview_for_current_server
+from system.optional_services import FIREBASE_AVAILABLE, get_firebase_auth, get_active_tunnel_url
+from pairing.pairing_service import get_pairing_service
+from projects.project_device_logs import read_log_tail
+from core.server_logging import resolve_server_log_path
 
 from .deps import require_dashboard_auth, require_local_access
 
@@ -40,22 +45,35 @@ SERVER_DIR = Path(__file__).parent.parent
 
 
 async def _restart_server_delayed(delay: float = 1.0) -> None:
-    """Restart the server after a delay to allow response to be sent."""
+    """Restart the server after a delay to allow response to be sent.
+
+    Used by check_update() when git pull brings new changes.
+    """
+    import subprocess
+
     await asyncio.sleep(delay)
     logger.info("Restarting server after update...")
 
-    # Get the original command line arguments
-    python = sys.executable
-    args = sys.argv[:]
+    current_pid = os.getpid()
+    server_script = SERVER_DIR / "server_cli.py"
+    venv_python = SERVER_DIR / ".venv" / "bin" / "python"
+    python = str(venv_python) if venv_python.exists() else sys.executable
 
-    # If running as module, reconstruct properly
-    if args[0].endswith("server_cli.py") or args[0].endswith("main.py"):
-        script = args[0]
-        os.chdir(SERVER_DIR)
-        os.execv(python, [python, script] + args[1:])
-    else:
-        # Fallback: restart with same args
-        os.execv(python, [python] + args)
+    # Remove PID file to allow new server to start
+    pid_file = SERVER_DIR / ".server.pid"
+    if pid_file.exists():
+        pid_file.unlink()
+
+    # Use shell to: kill current server (force), wait, then start new server
+    restart_cmd = f"sleep 1 && kill -9 {current_pid} && sleep 2 && {python} {server_script} >> /tmp/code_bridge_server.log 2>&1"
+
+    subprocess.Popen(
+        restart_cmd,
+        shell=True,
+        cwd=str(SERVER_DIR),
+        start_new_session=True,
+    )
+    logger.info("Restart command spawned")
 
 
 @router.get("/", include_in_schema=False, dependencies=[Depends(require_local_access)])
@@ -211,4 +229,171 @@ async def get_server_log(lines: int = Query(default=200, ge=20, le=1000)) -> dic
         "updated_at": updated_at,
         "lines": lines,
         "text": log_text,
+    }
+
+
+@router.post(
+    "/api/system/update-firebase",
+    dependencies=[Depends(require_dashboard_auth)],
+)
+async def update_firebase_server_info() -> dict[str, Any]:
+    """Manually update server info in Firebase.
+
+    Re-registers the device with current local URL and tunnel URL.
+    Useful when port or IP has changed but automatic update didn't trigger.
+
+    Only accessible from local network for security.
+    """
+    if not FIREBASE_AVAILABLE:
+        return {
+            "success": False,
+            "message": "Firebase is not available",
+            "error": True,
+        }
+
+    firebase_auth = get_firebase_auth()
+    if firebase_auth is None:
+        return {
+            "success": False,
+            "message": "Firebase auth service not initialized",
+            "error": True,
+        }
+
+    if not firebase_auth.is_authenticated:
+        return {
+            "success": False,
+            "message": "Not authenticated with Firebase. QR pairing required.",
+            "error": True,
+        }
+
+    try:
+        config = get_config()
+        pairing = get_pairing_service()
+        local_ip = pairing.get_local_ip()
+        local_url = f"http://{local_ip}:{config.api_port}"
+        tunnel_url = get_active_tunnel_url()
+
+        success = await firebase_auth.register_device(tunnel_url, local_url)
+
+        if success:
+            return {
+                "success": True,
+                "message": "Server info updated in Firebase",
+                "local_url": local_url,
+                "tunnel_url": tunnel_url or "(not active)",
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Failed to update Firebase. Check server logs.",
+                "error": True,
+            }
+    except Exception as e:
+        logger.error("Failed to update Firebase server info: %s", e)
+        return {
+            "success": False,
+            "message": f"Error: {str(e)}",
+            "error": True,
+        }
+
+
+@router.post(
+    "/api/system/restart",
+    dependencies=[Depends(require_dashboard_auth)],
+)
+async def restart_server() -> dict[str, Any]:
+    """Restart the server.
+
+    Kills all related processes and restarts the server.
+    Only accessible from local network for security.
+
+    Returns:
+        - success: True if restart initiated
+        - message: Status message
+    """
+    import subprocess
+
+    current_pid = os.getpid()
+    logger.info("Restart requested. Current PID: %d", current_pid)
+
+    # Find the server script
+    server_script = SERVER_DIR / "server_cli.py"
+    venv_python = SERVER_DIR / ".venv" / "bin" / "python"
+    python = str(venv_python) if venv_python.exists() else sys.executable
+
+    # Remove PID file to allow new server to start
+    pid_file = SERVER_DIR / ".server.pid"
+    if pid_file.exists():
+        pid_file.unlink()
+
+    # Use shell to: 1) kill current server (force), 2) wait, 3) start new server
+    # The 'kill' command will be executed after this response is sent
+    restart_cmd = f"sleep 1 && kill -9 {current_pid} && sleep 2 && {python} {server_script} >> /tmp/code_bridge_server.log 2>&1"
+
+    subprocess.Popen(
+        restart_cmd,
+        shell=True,
+        cwd=str(SERVER_DIR),
+        start_new_session=True,
+    )
+
+    logger.info("Restart command spawned")
+
+    return {
+        "success": True,
+        "message": "Server restart initiated. Page will reload automatically.",
+        "restarting": True,
+    }
+
+
+class AutostartRequest(BaseModel):
+    """Request body for autostart setting."""
+
+    enabled: bool
+
+
+@router.get(
+    "/api/system/autostart",
+    dependencies=[Depends(require_dashboard_auth)],
+)
+async def get_autostart() -> dict[str, Any]:
+    """Get current autostart status.
+
+    Returns autostart configuration for the current platform:
+    - available: Whether autostart can be configured
+    - enabled: Whether autostart is currently enabled
+    - platform: Current OS (darwin, linux, windows)
+    - method: How autostart is implemented (launchagent, systemd, startup_folder)
+    - path: Path to the autostart file if enabled
+
+    Only accessible from local network for security.
+    """
+    status = get_autostart_status()
+    return status.as_dict()
+
+
+@router.post(
+    "/api/system/autostart",
+    dependencies=[Depends(require_dashboard_auth)],
+)
+async def set_autostart_setting(request: AutostartRequest) -> dict[str, Any]:
+    """Enable or disable autostart on system boot.
+
+    Configures the server to start automatically when the system boots:
+    - macOS: Creates/removes LaunchAgent in ~/Library/LaunchAgents/
+    - Linux: Creates/removes systemd user service in ~/.config/systemd/user/
+    - Windows: Creates/removes shortcut in Startup folder
+
+    Only accessible from local network for security.
+
+    Args:
+        enabled: True to enable autostart, False to disable
+    """
+    success, message = set_autostart(request.enabled)
+    status = get_autostart_status()
+
+    return {
+        "success": success,
+        "message": message,
+        "autostart": status.as_dict(),
     }

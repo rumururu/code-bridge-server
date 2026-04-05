@@ -4,8 +4,8 @@ from typing import Any, Optional
 
 from fastapi import Cookie, Header, HTTPException, Query, Request
 
-from auth_service import validate_api_key_for_current_server
-from dashboard_auth_service import get_dashboard_auth_status
+from auth.auth_service import validate_api_key_for_current_server
+from dashboard.dashboard_auth_service import get_dashboard_auth_status
 
 
 async def verify_api_key(
@@ -19,7 +19,11 @@ async def verify_api_key(
     IP login and legacy mode only grant anonymous access for LOCAL requests.
     """
     provided_key = x_api_key or api_key
+    # Debug logging
+    key_preview = provided_key[:8] + "..." if provided_key and len(provided_key) > 8 else provided_key
+    print(f"[DEBUG verify_api_key] path={request.url.path}, X-API-Key={key_preview}, query_api_key={'present' if api_key else 'none'}")
     validation = validate_api_key_for_current_server(provided_key)
+    print(f"[DEBUG verify_api_key] validation.success={validation.success}, error={validation.error}")
 
     # Tunnel access ALWAYS requires API key (pairing), regardless of IP login setting
     # IP login only grants anonymous access for local network, not external tunnel

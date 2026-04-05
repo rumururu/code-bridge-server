@@ -447,6 +447,59 @@
             display: block;
         }
 
+        /* Toggle Switch */
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 48px;
+            height: 26px;
+            cursor: pointer;
+        }
+
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: var(--border-color);
+            transition: 0.3s;
+            border-radius: 26px;
+        }
+
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 20px;
+            width: 20px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: 0.3s;
+            border-radius: 50%;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+        }
+
+        .toggle-switch input:checked + .toggle-slider {
+            background-color: var(--success-color);
+        }
+
+        .toggle-switch input:checked + .toggle-slider:before {
+            transform: translateX(22px);
+        }
+
+        .toggle-switch input:disabled + .toggle-slider {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
         /* Server card sections */
         .server-grid {
             display: grid;
@@ -1371,17 +1424,13 @@
         </div>
 
         <div class="grid">
-            <!-- Server Card -->
+            <!-- Connection Info Card -->
             <div class="card">
                 <div class="card-header">
-                    <h2>Server</h2>
-                    <button class="btn btn-secondary btn-sm" onclick="checkUpdate()">Check Update</button>
+                    <h2 data-i18n="connection_info">Connection Info</h2>
+                    <button class="btn btn-secondary btn-sm" onclick="updateFirebaseServerInfo()" data-i18n="update_firebase">Update Firebase</button>
                 </div>
                 <div class="card-content">
-                    <div class="info-row">
-                        <span class="info-label">Version</span>
-                        <span id="serverVersion" class="info-value">-</span>
-                    </div>
                     <div class="info-row">
                         <span class="info-label">Dashboard</span>
                         <span id="dashboardUrl" class="info-value mono">-</span>
@@ -1401,7 +1450,12 @@
             <div class="card">
                 <div class="card-header">
                     <h2>⚡ Server Status</h2>
-                    <button class="btn btn-secondary btn-sm" onclick="refreshServerStatus()">Refresh</button>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span id="serverVersion" style="font-size: 13px; color: var(--text-secondary);">v-</span>
+                        <button class="btn btn-secondary btn-sm" onclick="checkUpdate()" data-i18n="check_update">Check Update</button>
+                        <button class="btn btn-danger btn-sm" onclick="restartServer()" data-i18n="restart_server">Restart</button>
+                        <button class="btn btn-secondary btn-sm" onclick="refreshServerStatus()">Refresh</button>
+                    </div>
                 </div>
                 <div class="card-content">
                     <div class="service-status-grid">
@@ -1433,6 +1487,18 @@
                             </div>
                             <span class="service-port" id="scrcpyPort">-</span>
                         </div>
+                    </div>
+
+                    <!-- Autostart Toggle -->
+                    <div class="info-row" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-color);">
+                        <div style="display: flex; flex-direction: column; gap: 2px;">
+                            <span class="info-label" style="font-weight: 500;" data-i18n="autostart">Auto-start on Boot</span>
+                            <span id="autostartMethodBadge" class="password-status-badge disabled" style="font-size: 11px;">-</span>
+                        </div>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="autostartToggle" onchange="toggleAutostart(this.checked)">
+                            <span class="toggle-slider"></span>
+                        </label>
                     </div>
                 </div>
             </div>
@@ -1680,7 +1746,25 @@
                 cancel: 'Cancel',
                 save: 'Save',
                 settings: 'Settings',
-                check_update: 'Check Update'
+                check_update: 'Check Update',
+                restart_server: 'Restart',
+                connection_info: 'Connection Info',
+                update_firebase: 'Update Firebase',
+                updating_firebase: 'Updating Firebase...',
+                firebase_updated: 'Firebase updated',
+                firebase_update_failed: 'Firebase update failed',
+                firebase_auth: 'Firebase Auth',
+                qr_pairing_required: 'QR Pairing Required',
+                firebase_pairing_required: 'QR pairing required to update Firebase',
+                // Autostart
+                autostart: 'Auto-start on Boot',
+                autostart_enabled: 'Autostart enabled',
+                autostart_disabled: 'Autostart disabled',
+                autostart_not_available: 'Not available on this platform',
+                autostart_launchagent: 'LaunchAgent (macOS)',
+                autostart_systemd: 'systemd (Linux)',
+                autostart_startup_folder: 'Startup (Windows)',
+                autostart_unsupported: 'Unsupported'
             },
             ko: {
                 // Header
@@ -1709,7 +1793,25 @@
                 cancel: '취소',
                 save: '저장',
                 settings: '설정',
-                check_update: '업데이트 확인'
+                check_update: '업데이트 확인',
+                restart_server: '재시작',
+                connection_info: '연결 정보',
+                update_firebase: 'Firebase 업데이트',
+                updating_firebase: 'Firebase 업데이트 중...',
+                firebase_updated: 'Firebase 업데이트 완료',
+                firebase_update_failed: 'Firebase 업데이트 실패',
+                firebase_auth: 'Firebase 인증',
+                qr_pairing_required: 'QR 페어링 필요',
+                firebase_pairing_required: 'Firebase 업데이트를 위해 QR 페어링이 필요합니다',
+                // Autostart
+                autostart: '시스템 부팅 시 자동 시작',
+                autostart_enabled: '자동 시작 활성화됨',
+                autostart_disabled: '자동 시작 비활성화됨',
+                autostart_not_available: '이 플랫폼에서는 사용 불가',
+                autostart_launchagent: 'LaunchAgent (macOS)',
+                autostart_systemd: 'systemd (Linux)',
+                autostart_startup_folder: '시작프로그램 (Windows)',
+                autostart_unsupported: '지원되지 않음'
             }
         };
 
@@ -2215,7 +2317,8 @@
             statusBadge.innerHTML = '<span class="status-dot"></span><span>Online</span>';
 
             // Server info
-            document.getElementById('serverVersion').textContent = dashboardData.server?.version || '-';
+            const version = dashboardData.server?.version;
+            document.getElementById('serverVersion').textContent = version ? `v${version}` : '-';
 
             // Dashboard URL (current page location)
             const dashboardUrl = window.location.origin;
@@ -2235,6 +2338,12 @@
             } else {
                 tunnelUrlRow.style.display = 'none';
             }
+
+            // Update Firebase Auth Status
+            updateFirebaseAuthStatus();
+
+            // Update Autostart Status
+            updateAutostartStatus();
 
             // Update access mode UI (Security section)
             updateAccessModeUI();
@@ -2268,13 +2377,19 @@
             const dashboardPortMatch = dashboardUrl.match(/:(\d+)/);
             const dashboardPort = dashboardPortMatch ? dashboardPortMatch[1] : '80';
 
-            // Dashboard indicator (always online if we can see the page)
-            document.getElementById('dashboardIndicator').className = 'service-indicator online';
-            document.getElementById('dashboardPort').textContent = `localhost:${dashboardPort}`;
+            // Dashboard indicator - check actual listening status
+            const dashboardHost = dashboardData.server?.dashboard_host || '127.0.0.1';
+            const actualDashboardPort = dashboardData.server?.dashboard_port || dashboardPort;
+            const dashboardListening = dashboardData.server?.dashboard_listening !== false;  // Default true if not provided
+            document.getElementById('dashboardIndicator').className = `service-indicator ${dashboardListening ? 'online' : 'error'}`;
+            document.getElementById('dashboardPort').textContent = `${dashboardHost}:${actualDashboardPort}`;
 
-            // API indicator (always online if dashboard loaded data)
-            document.getElementById('apiIndicator').className = 'service-indicator online';
-            document.getElementById('apiPort').textContent = `0.0.0.0:${apiPort}`;
+            // API indicator - check actual listening status from server
+            const apiHost = dashboardData.server?.api_host || '0.0.0.0';
+            const actualApiPort = dashboardData.server?.api_port || apiPort;
+            const apiListening = dashboardData.server?.api_listening === true;  // Must be explicitly true
+            document.getElementById('apiIndicator').className = `service-indicator ${apiListening ? 'online' : 'error'}`;
+            document.getElementById('apiPort').textContent = `${apiHost}:${actualApiPort}${!apiListening ? ' (NOT LISTENING)' : ''}`;
 
             // Tunnel indicator (stopped = gray, not red)
             const tunnelRunning = dashboardData.tunnel?.running === true;
@@ -2382,19 +2497,25 @@
                 container.innerHTML = '<div class="empty-state">No accessible folders</div>';
                 return;
             }
-            container.innerHTML = folders.map((folder) => `
+            container.innerHTML = folders.map((folder, index) => `
                 <div class="list-item">
                     <div class="list-item-info">
                         <span class="list-item-name">${escapeHtml(folder.name)}</span>
                         <span class="list-item-meta mono">${escapeHtml(folder.path)}</span>
                     </div>
                     <button class="btn-icon-toggle"
-                            onclick="removeAccessibleFolder('${escapeHtml(folder.path)}')"
+                            data-folder-index="${index}"
                             title="Remove folder">
                         ✕
                     </button>
                 </div>
             `).join('');
+
+            // Attach event listeners to avoid escaping issues
+            container.querySelectorAll('.btn-icon-toggle[data-folder-index]').forEach(btn => {
+                const index = parseInt(btn.dataset.folderIndex, 10);
+                btn.onclick = () => removeAccessibleFolder(folders[index].path);
+            });
         }
 
         async function removeAccessibleFolder(path) {
@@ -2469,6 +2590,147 @@
                 }
             } else {
                 showToast('Update check failed', 'error');
+            }
+        }
+
+        async function restartServer() {
+            if (!confirm('Are you sure you want to restart the server?')) {
+                return;
+            }
+            showToast('Restarting server...', 'success');
+            const result = await fetchApi('/api/system/restart', { method: 'POST' });
+            if (result && result.success) {
+                showToast('Server restarting... Page will reload in 5 seconds.', 'success');
+                // Wait for server to restart, then reload the page
+                setTimeout(() => {
+                    window.location.reload();
+                }, 5000);
+            } else {
+                showToast('Restart failed: ' + (result?.message || 'Unknown error'), 'error');
+            }
+        }
+
+        async function updateFirebaseServerInfo() {
+            // Check if authenticated before attempting update
+            const isAuthenticated = dashboardData?.firebase?.authenticated;
+            if (!isAuthenticated) {
+                showToast(t('firebase_pairing_required') || 'QR pairing required to update Firebase', 'error');
+                showPairingModal();
+                return;
+            }
+
+            showToast(t('updating_firebase') || 'Updating Firebase...', 'success');
+            const result = await fetchApi('/api/system/update-firebase', { method: 'POST' });
+            if (result) {
+                if (result.success) {
+                    const msg = `${t('firebase_updated') || 'Firebase updated'}: ${result.local_url}`;
+                    showToast(msg, 'success');
+                    await fetchDashboard();
+                } else {
+                    showToast(result.message || 'Update failed', 'error');
+                }
+            } else {
+                showToast(t('firebase_update_failed') || 'Firebase update failed', 'error');
+            }
+        }
+
+        function updateFirebaseAuthStatus() {
+            const statusEl = document.getElementById('firebaseAuthStatus');
+            if (!statusEl) return;
+
+            const isAuthenticated = dashboardData?.firebase?.authenticated;
+            const userEmail = dashboardData?.firebase?.email;
+
+            if (isAuthenticated) {
+                const displayEmail = userEmail || 'Connected';
+                statusEl.innerHTML = `<span style="color: var(--success-color);">✓ ${displayEmail}</span>`;
+            } else {
+                statusEl.innerHTML = `<span style="color: var(--warning-color);">⚠ ${t('qr_pairing_required')}</span>`;
+            }
+        }
+
+        function updateAutostartStatus() {
+            const toggle = document.getElementById('autostartToggle');
+            const badge = document.getElementById('autostartMethodBadge');
+            if (!toggle || !badge) return;
+
+            const autostart = dashboardData?.autostart;
+            if (!autostart) {
+                toggle.disabled = true;
+                toggle.checked = false;
+                badge.textContent = t('autostart_unsupported');
+                badge.className = 'password-status-badge disabled';
+                return;
+            }
+
+            if (!autostart.available) {
+                toggle.disabled = true;
+                toggle.checked = false;
+                badge.textContent = t('autostart_not_available');
+                badge.className = 'password-status-badge disabled';
+                return;
+            }
+
+            toggle.disabled = false;
+            toggle.checked = autostart.enabled;
+
+            // Set method badge
+            let methodText = '';
+            switch (autostart.method) {
+                case 'launchagent':
+                    methodText = t('autostart_launchagent');
+                    break;
+                case 'systemd':
+                    methodText = t('autostart_systemd');
+                    break;
+                case 'startup_folder':
+                    methodText = t('autostart_startup_folder');
+                    break;
+                default:
+                    methodText = autostart.platform;
+            }
+
+            if (autostart.enabled) {
+                badge.textContent = methodText;
+                badge.className = 'password-status-badge enabled';
+                badge.style.background = 'rgba(40, 167, 69, 0.15)';
+                badge.style.color = 'var(--success-color)';
+            } else {
+                badge.textContent = methodText;
+                badge.className = 'password-status-badge disabled';
+                badge.style.background = '';
+                badge.style.color = '';
+            }
+        }
+
+        async function toggleAutostart(enabled) {
+            const toggle = document.getElementById('autostartToggle');
+            toggle.disabled = true;
+
+            try {
+                const result = await fetchApi('/api/system/autostart', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled })
+                });
+
+                if (result && result.success) {
+                    showToast(enabled ? t('autostart_enabled') : t('autostart_disabled'), 'success');
+                    // Update local state
+                    if (dashboardData) {
+                        dashboardData.autostart = result.autostart;
+                    }
+                    updateAutostartStatus();
+                } else {
+                    showToast(result?.message || 'Failed to update autostart', 'error');
+                    // Revert toggle
+                    toggle.checked = !enabled;
+                }
+            } catch (e) {
+                showToast('Error updating autostart', 'error');
+                toggle.checked = !enabled;
+            } finally {
+                toggle.disabled = false;
             }
         }
 

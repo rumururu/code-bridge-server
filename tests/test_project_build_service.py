@@ -8,7 +8,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from project_build_service import build_flutter_web_project, build_nextjs_project
+from projects.project_build_service import build_flutter_web_project, build_nextjs_project
 
 
 class _FakeProcess:
@@ -25,7 +25,7 @@ class ProjectBuildServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_build_flutter_web_project_success(self):
         fake_process = _FakeProcess(returncode=0)
         with patch(
-            "project_build_service.asyncio.create_subprocess_exec",
+            "projects.project_build_service.asyncio.create_subprocess_exec",
             return_value=fake_process,
         ) as mock_exec:
             result = await build_flutter_web_project("/tmp/demo")
@@ -38,7 +38,7 @@ class ProjectBuildServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_build_flutter_web_project_failure(self):
         fake_process = _FakeProcess(returncode=1, stderr=b"flutter failed")
         with patch(
-            "project_build_service.asyncio.create_subprocess_exec",
+            "projects.project_build_service.asyncio.create_subprocess_exec",
             return_value=fake_process,
         ):
             result = await build_flutter_web_project("/tmp/demo")
@@ -49,7 +49,7 @@ class ProjectBuildServiceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_build_flutter_web_project_missing_cli(self):
         with patch(
-            "project_build_service.asyncio.create_subprocess_exec",
+            "projects.project_build_service.asyncio.create_subprocess_exec",
             side_effect=FileNotFoundError(),
         ):
             result = await build_flutter_web_project("/tmp/demo")
@@ -66,7 +66,7 @@ class ProjectBuildServiceTest(unittest.IsolatedAsyncioTestCase):
             fake_process = _FakeProcess(returncode=0)
 
             with patch(
-                "project_build_service.asyncio.create_subprocess_exec",
+                "projects.project_build_service.asyncio.create_subprocess_exec",
                 return_value=fake_process,
             ):
                 result = await build_nextjs_project(str(root))
@@ -79,7 +79,7 @@ class ProjectBuildServiceTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             fake_process = _FakeProcess(returncode=0)
             with patch(
-                "project_build_service.asyncio.create_subprocess_exec",
+                "projects.project_build_service.asyncio.create_subprocess_exec",
                 return_value=fake_process,
             ):
                 result = await build_nextjs_project(tmp_dir)
@@ -90,7 +90,7 @@ class ProjectBuildServiceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_build_nextjs_project_missing_npm(self):
         with patch(
-            "project_build_service.asyncio.create_subprocess_exec",
+            "projects.project_build_service.asyncio.create_subprocess_exec",
             side_effect=FileNotFoundError(),
         ):
             result = await build_nextjs_project("/tmp/demo")

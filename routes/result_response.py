@@ -5,7 +5,7 @@ from typing import Any, Protocol, TypeVar
 from fastapi.responses import JSONResponse
 
 # Import BaseRouteResult from base module to avoid circular imports
-from base_result import BaseRouteResult
+from core.base_result import BaseRouteResult
 
 
 class RouteResult(Protocol):

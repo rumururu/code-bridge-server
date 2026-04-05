@@ -3,7 +3,7 @@
 Provides QR code pairing, token verification, and API key management.
 """
 
-from pairing_service import (
+from pairing.pairing_service import (
     PairingService,
     PairingData,
     PairingStatus,

@@ -7,7 +7,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from file_manager_helpers import (
+from files.file_manager_helpers import (
     fuzzy_match,
     is_excluded_path,
     match_score,

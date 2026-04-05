@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from models import PairCodeVerifyRequest, PairVerifyRequest, SSOPairRequest
-from pairing import (
+from pairing.pairing import (
     RateLimiter,
     build_current_pairing_qr_result,
     get_pair_token_status_for_current_server,
@@ -16,9 +16,9 @@ from pairing import (
     verify_pairing_code_for_current_server,
     verify_sso_pairing_for_current_server,
 )
-from pairing_page import make_qr_png_base64
-from pairing_page_service import build_pairing_page_html_for_current_server
-from remote_access_service import verify_pair_token_for_current_server
+from pairing.pairing_page import make_qr_png_base64
+from pairing.pairing_page_service import build_pairing_page_html_for_current_server
+from remote.remote_access_service import verify_pair_token_for_current_server
 
 from .deps import require_local_access, require_localhost_only, verify_api_key
 from .result_response import as_route_response
@@ -204,7 +204,7 @@ async def verify_pair_token(request: Request, body: PairVerifyRequest) -> dict[s
         device_name=body.device_name,
         firebase_id_token=body.firebase_id_token,
         firebase_refresh_token=body.firebase_refresh_token,
-        auth_mode=body.auth_mode,
+        force_replace=body.force_replace,
     )
 
     # Record attempt
@@ -233,9 +233,9 @@ async def verify_sso_pairing(request: Request, body: SSOPairRequest) -> dict[str
     result = await verify_sso_pairing_for_current_server(
         firebase_id_token=body.firebase_id_token,
         firebase_refresh_token=body.firebase_refresh_token,
-        auth_mode=body.auth_mode,
         client_id=body.client_id,
         device_name=body.device_name,
+        force_replace=body.force_replace,
     )
 
     # Record attempt
@@ -273,7 +273,7 @@ async def show_qr_on_server() -> dict[str, Any]:
     No authentication required - QR display is safe and useful for initial pairing.
     """
     import webbrowser
-    from pairing_qr_service import build_pairing_qr_payload_for_current_server, open_pairing_page
+    from pairing.pairing_qr_service import build_pairing_qr_payload_for_current_server, open_pairing_page
 
     try:
         payload = build_pairing_qr_payload_for_current_server()

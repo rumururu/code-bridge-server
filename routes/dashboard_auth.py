@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Cookie, Depends, Response
 from pydantic import BaseModel
 
-from dashboard_auth_service import (
+from dashboard.dashboard_auth_service import (
     dashboard_login,
     get_dashboard_auth_status,
     invalidate_session,

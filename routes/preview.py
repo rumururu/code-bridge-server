@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from preview_route_service import (
+from preview.preview_route_service import (
     authorize_project_preview_request_for_current_server,
     create_preview_token_for_current_server,
     get_allowed_root_preview_proxy_path,

@@ -8,7 +8,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 import routes.chat_ws as chat_ws
-from chat_ws_service import ChatWebSocketMessageResult
+from chat.chat_ws_service import ChatWebSocketMessageResult
 
 
 class _DummyWebSocket:

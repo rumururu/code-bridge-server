@@ -8,8 +8,8 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from project_models import ProjectType
-from project_server_process import extract_process_error, wait_for_project_server_port
+from projects.project_models import ProjectType
+from projects.project_server_process import extract_process_error, wait_for_project_server_port
 
 
 class _FakeProcess:

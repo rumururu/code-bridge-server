@@ -10,7 +10,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from file_action_service import FileActionResult
+from files.file_action_service import FileActionResult
 from routes.deps import verify_api_key
 from routes.files import router as files_router
 

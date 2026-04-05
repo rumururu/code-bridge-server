@@ -8,8 +8,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from database import get_accessible_folder_db
-from filesystem_service import browse_directory, get_quick_access_paths
+from core.database import get_accessible_folder_db
+from files.filesystem_service import browse_directory, get_quick_access_paths
 
 from .deps import require_local_access
 
@@ -34,13 +34,10 @@ async def list_accessible_folders() -> dict[str, Any]:
     """List all accessible folders.
 
     These folders define the security boundary for file system access.
+    Note: DB is auto-initialized with home folder on first startup.
     """
     db = get_accessible_folder_db()
     folders = db.get_all()
-
-    # If no folders configured, return home directory as default
-    if not folders:
-        folders = [str(Path.home())]
 
     # Return with folder metadata
     result = []

@@ -7,7 +7,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from project_device_run_plan import resolve_device_run_plan
+from projects.project_device_run_plan import resolve_device_run_plan
 
 
 class ProjectDeviceRunPlanTest(unittest.TestCase):

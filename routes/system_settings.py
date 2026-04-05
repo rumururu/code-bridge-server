@@ -4,9 +4,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
-from firebase_auth import get_firebase_auth
+from auth.firebase_auth import get_firebase_auth
 from models import CodexSettingsUpdate, IpLoginUpdate, LlmSelectionUpdate
-from system_settings_service import (
+from system.system_settings_service import (
     get_codex_settings_for_current_server,
     get_heartbeat_settings_for_current_server,
     get_ip_login_settings_for_current_server,

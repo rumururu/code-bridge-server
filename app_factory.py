@@ -8,9 +8,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app_lifecycle import lifespan
-from config import get_config
+from core.config import get_config
 from routes import register_api_routers, register_dashboard_routers, register_routers
-from server_logging import configure_server_logging
+from core.server_logging import configure_server_logging
 
 
 def create_code_bridge_app(

@@ -7,8 +7,8 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from pairing import PairingPageContextResult
-from pairing_page_service import build_pairing_page_html_for_current_server
+from pairing.pairing import PairingPageContextResult
+from pairing.pairing_page_service import build_pairing_page_html_for_current_server
 
 
 class PairingPageServiceTest(unittest.TestCase):

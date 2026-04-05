@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import Response
 
-from file_action_service import (
+from files.file_action_service import (
     copy_project_path_for_current_server,
     create_project_file_or_directory_for_current_server,
     delete_project_path_for_current_server,

@@ -3,8 +3,8 @@
 Provides system inspection and settings management.
 """
 
-from system_inspect_service import get_system_inspect_service, SystemInspectService
-from system_settings_service import get_system_settings_service, SystemSettingsService
+from system.system_inspect_service import get_system_inspect_service, SystemInspectService
+from system.system_settings_service import get_system_settings_service, SystemSettingsService
 
 __all__ = [
     "SystemInspectService",

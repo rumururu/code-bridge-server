@@ -10,7 +10,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from remote_access_service import (
+from remote.remote_access_service import (
     RemoteAccessActionResult,
     RemoteAccessLoginResult,
     RemoteFirebaseStatus,
@@ -78,7 +78,6 @@ class SystemRemoteRoutesTest(unittest.TestCase):
                     user_id="u1",
                     server_id="s1",
                     server_name="dev",
-                    auth_mode="refresh_token",
                 )
             ),
         ) as mock_login:

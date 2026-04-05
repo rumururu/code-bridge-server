@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from build_preview import MIME_TYPES
+from preview.build_preview import MIME_TYPES
 
 # Path to Flutter web build output.
 FLUTTER_WEB_BUILD = Path(__file__).resolve().parents[1] / "build" / "web"

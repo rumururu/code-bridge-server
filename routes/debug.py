@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends
 
-from system_status_service import get_debug_port_snapshot_for_current_server
+from system.system_status_service import get_debug_port_snapshot_for_current_server
 
 from .deps import require_local_access
 

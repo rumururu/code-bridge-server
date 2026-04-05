@@ -10,7 +10,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from project_action_service import ProjectRegistryResult
+from projects.project_action_service import ProjectRegistryResult
 from routes.deps import verify_api_key
 from routes.projects import router as projects_router
 

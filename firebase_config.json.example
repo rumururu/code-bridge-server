@@ -7,7 +7,6 @@
     "1. Create a Firebase project at https://console.firebase.google.com",
     "2. Enable Authentication > Google Sign-In",
     "3. Enable Firestore Database",
-    "4. Copy this file to firebase_config.json and fill in your values",
-    "5. Set 'firebase_enabled: true' in config.yaml"
+    "4. Copy this file to firebase_config.json and fill in your values"
   ]
 }

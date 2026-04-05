@@ -8,7 +8,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from project_device_run_service import (
+from projects.project_device_run_service import (
     build_flutter_run_command,
     prepare_device_run_log,
     start_flutter_run_process,
@@ -52,7 +52,7 @@ class ProjectDeviceRunServiceTest(unittest.TestCase):
             log_path = Path(tmp_dir) / "run.log"
             fake_process = _FakeProcess()
             with patch(
-                "project_device_run_service.subprocess.Popen",
+                "projects.project_device_run_service.subprocess.Popen",
                 return_value=fake_process,
             ) as mock_popen:
                 result = start_flutter_run_process(
@@ -70,7 +70,7 @@ class ProjectDeviceRunServiceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             log_path = Path(tmp_dir) / "run.log"
             with patch(
-                "project_device_run_service.subprocess.Popen",
+                "projects.project_device_run_service.subprocess.Popen",
                 side_effect=FileNotFoundError(),
             ):
                 result = start_flutter_run_process(

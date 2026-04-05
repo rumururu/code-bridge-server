@@ -12,7 +12,7 @@ if str(SERVER_DIR) not in sys.path:
 
 from routes.deps import verify_api_key
 from routes.system_settings import router as system_settings_router
-from system_settings_service import SystemSettingsResult
+from system.system_settings_service import SystemSettingsResult
 
 
 class SystemSettingsRoutesTest(unittest.TestCase):

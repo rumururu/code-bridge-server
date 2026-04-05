@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from system_status_service import get_health_status_for_current_server
+from system.system_status_service import get_health_status_for_current_server
 
 router = APIRouter(tags=["health"])
 

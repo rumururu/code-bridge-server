@@ -7,12 +7,12 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-import system_settings_service
+from system import system_settings_service
 
 
 class SystemSettingsServiceTest(unittest.TestCase):
     def test_get_heartbeat_settings_for_current_server(self):
-        with patch("system_settings_service.get_heartbeat_interval", return_value=9):
+        with patch("system.system_settings_service.get_heartbeat_interval", return_value=9):
             result = system_settings_service.get_heartbeat_settings_for_current_server()
 
         self.assertTrue(result.success)
@@ -21,7 +21,7 @@ class SystemSettingsServiceTest(unittest.TestCase):
 
     def test_update_llm_selection_for_current_server_validation_error(self):
         with patch(
-            "system_settings_service.set_selected_llm",
+            "system.system_settings_service.set_selected_llm",
             side_effect=ValueError("provider unavailable"),
         ):
             result = system_settings_service.update_llm_selection_for_current_server("openai", "o3")
@@ -36,7 +36,7 @@ class SystemSettingsServiceTest(unittest.TestCase):
             "sandbox_modes": [{"id": "workspace-write"}],
         }
         with patch(
-            "system_settings_service.set_codex_sandbox_mode",
+            "system.system_settings_service.set_codex_sandbox_mode",
             return_value=expected_payload,
         ):
             result = system_settings_service.update_codex_settings_for_current_server("workspace-write")

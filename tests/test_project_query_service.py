@@ -7,12 +7,12 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from project_query_service import (
+from projects.project_query_service import (
     build_project_list_view,
     build_single_project_view,
     detect_project_running_server_port,
 )
-from project_models import ProjectType
+from projects.project_models import ProjectType
 
 
 class ProjectQueryServiceTest(unittest.TestCase):
@@ -73,7 +73,7 @@ class ProjectQueryServiceTest(unittest.TestCase):
             "dev_server": {"port": 5173},
         }
 
-        with patch("project_query_service.is_local_port_open", return_value=True):
+        with patch("projects.project_query_service.is_local_port_open", return_value=True):
             result = detect_project_running_server_port(
                 project,
                 detect_port_for_project=lambda _path, _ptype: None,
@@ -110,7 +110,7 @@ class ProjectQueryServiceTest(unittest.TestCase):
             "dev_server": {"port": 5173},
         }
 
-        with patch("project_query_service.is_local_port_open", return_value=False):
+        with patch("projects.project_query_service.is_local_port_open", return_value=False):
             result = detect_project_running_server_port(
                 project,
                 detect_port_for_project=detect_stub,

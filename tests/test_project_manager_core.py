@@ -7,7 +7,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from projects import ProjectManager
+from projects.projects import ProjectManager
 
 
 class ProjectManagerCoreTest(unittest.TestCase):
@@ -40,9 +40,9 @@ class ProjectManagerCoreTest(unittest.TestCase):
         fake_db.get.side_effect = lambda name: fake_db.get_all.return_value[0] if name == "a" else fake_db.get_all.return_value[1]
         manager = ProjectManager(_project_db_factory=lambda: fake_db)
 
-        with patch("project_manager.list_listening_processes", return_value={}), \
-             patch("project_manager.list_process_cwds", return_value={}), \
-             patch("project_manager.detect_port_for_project", side_effect=lambda p, t, **kw: 3000 if "a" in p else None):
+        with patch("projects.project_manager.list_listening_processes", return_value={}), \
+             patch("projects.project_manager.list_process_cwds", return_value={}), \
+             patch("projects.project_manager.detect_port_for_project", side_effect=lambda p, t, **kw: 3000 if "a" in p else None):
             result = manager.get_all_projects()
 
         fake_db.get_all.assert_called_once_with()
@@ -62,7 +62,7 @@ class ProjectManagerCoreTest(unittest.TestCase):
         }
         manager = ProjectManager(_project_db_factory=lambda: fake_db)
 
-        with patch("project_manager.detect_project_running_server_port", return_value=5173) as mock_detect:
+        with patch("projects.project_manager.detect_project_running_server_port", return_value=5173) as mock_detect:
             result = manager.detect_running_server_port("demo")
 
         fake_db.get.assert_called_once_with("demo")

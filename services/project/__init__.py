@@ -3,7 +3,7 @@
 Provides project CRUD operations, build management, and query services.
 """
 
-from project_manager import (
+from projects.project_manager import (
     ProjectManager,
     get_project_manager,
 )

@@ -79,9 +79,6 @@ server:
   # Remote access via Cloudflare Tunnel
   remote_access_enabled: true
 
-  # Firebase authentication (optional)
-  firebase_enabled: false
-
   # LLM usage tracking
   weekly_budget_usd: 100.0
   usage_window_days: 7

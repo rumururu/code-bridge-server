@@ -7,14 +7,14 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from project_runtime_helpers import (
+from projects.project_runtime_helpers import (
     extract_port,
     is_candidate_command,
     is_local_port_open,
     match_project_path_score,
     select_preferred_port,
 )
-from project_models import ProjectType
+from projects.project_models import ProjectType
 
 
 class ProjectRuntimeHelpersTest(unittest.TestCase):
@@ -53,7 +53,7 @@ class ProjectRuntimeHelpersTest(unittest.TestCase):
         fake_socket_cm.__enter__.return_value = fake_socket_instance
         fake_socket_instance.connect_ex.return_value = 0
 
-        with patch("project_runtime_helpers.socket.socket", fake_socket_factory):
+        with patch("projects.project_runtime_helpers.socket.socket", fake_socket_factory):
             self.assertTrue(is_local_port_open(3000))
 
     def test_is_local_port_open_returns_false_when_connect_fails(self):
@@ -64,7 +64,7 @@ class ProjectRuntimeHelpersTest(unittest.TestCase):
         fake_socket_cm.__enter__.return_value = fake_socket_instance
         fake_socket_instance.connect_ex.return_value = 1
 
-        with patch("project_runtime_helpers.socket.socket", fake_socket_factory):
+        with patch("projects.project_runtime_helpers.socket.socket", fake_socket_factory):
             self.assertFalse(is_local_port_open(3000))
 
 

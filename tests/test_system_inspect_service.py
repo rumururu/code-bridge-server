@@ -7,13 +7,13 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-import system_inspect_service
+from system import system_inspect_service
 
 
 class SystemInspectServiceTest(unittest.TestCase):
     def test_list_system_directories_for_current_server_requires_absolute_path(self):
         with patch(
-            "system_inspect_service.validate_accessible_path",
+            "system.system_inspect_service.validate_accessible_path",
             return_value=True,
         ):
             result = system_inspect_service.list_system_directories_for_current_server("relative/path")
@@ -24,7 +24,7 @@ class SystemInspectServiceTest(unittest.TestCase):
 
     def test_list_system_directories_returns_403_for_inaccessible_path(self):
         with patch(
-            "system_inspect_service.validate_accessible_path",
+            "system.system_inspect_service.validate_accessible_path",
             return_value=False,
         ):
             result = system_inspect_service.list_system_directories_for_current_server("/some/path")
@@ -39,7 +39,7 @@ class SystemInspectServiceTest(unittest.TestCase):
             {"name": "Documents", "path": "/home/user/Documents"},
         ]
         with patch(
-            "system_inspect_service.get_allowed_roots",
+            "system.system_inspect_service.get_allowed_roots",
             return_value=fake_roots,
         ):
             result = system_inspect_service.list_system_directories_for_current_server(None)
@@ -51,10 +51,10 @@ class SystemInspectServiceTest(unittest.TestCase):
 
     def test_list_project_candidates_for_current_server_invalid_depth(self):
         with patch(
-            "system_inspect_service.resolve_project_path",
+            "system.system_inspect_service.resolve_project_path",
             return_value=(Path("/tmp/root"), None, None),
         ), patch(
-            "system_inspect_service.validate_accessible_path",
+            "system.system_inspect_service.validate_accessible_path",
             return_value=True,
         ):
             result = system_inspect_service.list_project_candidates_for_current_server(
@@ -71,22 +71,22 @@ class SystemInspectServiceTest(unittest.TestCase):
         fake_db.get_all.return_value = [{"name": "alpha", "path": "/tmp/root/a"}]
 
         with patch(
-            "system_inspect_service.resolve_project_path",
+            "system.system_inspect_service.resolve_project_path",
             return_value=(Path("/tmp/root"), None, None),
         ), patch(
-            "system_inspect_service.validate_accessible_path",
+            "system.system_inspect_service.validate_accessible_path",
             return_value=True,
         ), patch(
-            "system_inspect_service.parse_excluded_dirs",
+            "system.system_inspect_service.parse_excluded_dirs",
             return_value={"build"},
         ), patch(
-            "system_inspect_service.scan_project_candidates",
+            "system.system_inspect_service.scan_project_candidates",
             return_value=[
                 {"name": "a", "path": "/tmp/root/a"},
                 {"name": "b", "path": "/tmp/root/b"},
             ],
         ), patch(
-            "system_inspect_service.collect_existing_project_state",
+            "system.system_inspect_service.collect_existing_project_state",
             return_value=(set(), {"/tmp/root/a": "alpha"}),
         ):
             result = system_inspect_service.list_project_candidates_for_current_server(
@@ -106,10 +106,10 @@ class SystemInspectServiceTest(unittest.TestCase):
 
     def test_list_project_candidates_returns_403_for_inaccessible_path(self):
         with patch(
-            "system_inspect_service.resolve_project_path",
+            "system.system_inspect_service.resolve_project_path",
             return_value=(Path("/tmp/root"), None, None),
         ), patch(
-            "system_inspect_service.validate_accessible_path",
+            "system.system_inspect_service.validate_accessible_path",
             return_value=False,
         ):
             result = system_inspect_service.list_project_candidates_for_current_server("/tmp/root")
@@ -126,10 +126,10 @@ class SystemInspectServiceAsyncTest(unittest.IsolatedAsyncioTestCase):
         fake_usage_db.get_weekly_summary.return_value = {"spent": 3.2}
 
         with patch(
-            "system_inspect_service.fetch_claude_usage_snapshot",
+            "system.system_inspect_service.fetch_claude_usage_snapshot",
             new=AsyncMock(return_value={"sessions": []}),
         ), patch(
-            "system_inspect_service.merge_usage_for_display",
+            "system.system_inspect_service.merge_usage_for_display",
             return_value={"total_spent": 3.2},
         ) as merge_mock:
             result = await system_inspect_service.get_system_usage_for_current_server(

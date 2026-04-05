@@ -10,10 +10,10 @@ from typing import Any
 from fastapi import WebSocket
 
 # WebSocket connection limits
-MAX_CONNECTIONS_PER_IP = 5  # Max concurrent connections per IP
-MAX_MESSAGES_PER_MINUTE = 30  # Max messages per minute per connection
+MAX_CONNECTIONS_PER_IP = 20  # Max concurrent connections per IP
+MAX_MESSAGES_PER_MINUTE = 60  # Max messages per minute per connection
 CONNECTION_RATE_LIMIT_WINDOW = 60  # Seconds
-CONNECTION_RATE_LIMIT_MAX = 10  # Max connection attempts per window
+CONNECTION_RATE_LIMIT_MAX = 100  # Max connection attempts per window (effectively unlimited)
 
 
 class WebSocketConnectionManager:

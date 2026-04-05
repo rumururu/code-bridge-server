@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 
-from device_action_service import (
+from devices.device_action_service import (
     get_scrcpy_status_for_current_server,
     list_connected_devices_for_current_server,
     start_scrcpy_for_current_server,

@@ -8,11 +8,11 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-import auth_service
+from auth import auth_service
 
 
 class AuthServiceTest(unittest.TestCase):
-    @patch("auth_service._check_allow_ip_login", return_value=False)
+    @patch("auth.auth_service._check_allow_ip_login", return_value=False)
     def test_validate_api_key_for_current_server_rejects_missing_key(
         self, mock_ip_login
     ):
@@ -23,7 +23,7 @@ class AuthServiceTest(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("IP_LOGIN_DISABLED", result.error)
 
-    @patch("auth_service._check_allow_ip_login", return_value=False)
+    @patch("auth.auth_service._check_allow_ip_login", return_value=False)
     def test_validate_api_key_for_current_server_rejects_invalid_key_when_auth_enabled(
         self, mock_ip_login
     ):
@@ -40,7 +40,7 @@ class AuthServiceTest(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error, "Invalid API key")
 
-    @patch("auth_service._check_allow_ip_login", return_value=False)
+    @patch("auth.auth_service._check_allow_ip_login", return_value=False)
     def test_validate_api_key_for_current_server_accepts_static_configured_key(
         self, mock_ip_login
     ):
@@ -57,7 +57,7 @@ class AuthServiceTest(unittest.TestCase):
         self.assertEqual(result.api_key, "server-static-key")
         fake_pairing.validate_api_key.assert_not_called()
 
-    @patch("auth_service._check_allow_ip_login", return_value=False)
+    @patch("auth.auth_service._check_allow_ip_login", return_value=False)
     def test_validate_api_key_for_current_server_accepts_valid_pairing_key_when_auth_enabled(
         self, mock_ip_login
     ):
@@ -74,7 +74,7 @@ class AuthServiceTest(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.api_key, "good-key")
 
-    @patch("auth_service._check_allow_ip_login", return_value=True)
+    @patch("auth.auth_service._check_allow_ip_login", return_value=True)
     def test_validate_api_key_for_current_server_allows_anonymous_when_ip_login_enabled(
         self, mock_ip_login
     ):
