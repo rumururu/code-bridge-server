@@ -105,6 +105,37 @@ check_cloudflared() {
     fi
 }
 
+# Check for Node.js and install mermaid-cli for diagram rendering
+check_mermaid_cli() {
+    echo -e "${CYAN}Checking mermaid-cli (for diagram rendering)...${NC}"
+
+    if command -v mmdc &> /dev/null; then
+        echo -e "${GREEN}✓ mermaid-cli is installed${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}! mermaid-cli not found${NC}"
+
+    # Check if npm is available
+    if ! command -v npm &> /dev/null; then
+        echo -e "${YELLOW}npm not found. Skipping mermaid-cli installation.${NC}"
+        echo "To enable diagram rendering, install Node.js and run: npm install -g @mermaid-js/mermaid-cli"
+        return 0
+    fi
+
+    read -p "Install mermaid-cli for diagram rendering? [y/N] " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo -e "${CYAN}Installing mermaid-cli...${NC}"
+        npm install -g @mermaid-js/mermaid-cli
+        if command -v mmdc &> /dev/null; then
+            echo -e "${GREEN}✓ mermaid-cli installed successfully${NC}"
+        else
+            echo -e "${YELLOW}mermaid-cli installation may have failed. You can install it manually later.${NC}"
+        fi
+    fi
+}
+
 # Clone or update repository
 setup_repository() {
     echo ""
@@ -182,6 +213,7 @@ main() {
     check_python
     check_git
     check_cloudflared
+    check_mermaid_cli
     setup_repository
     setup_venv
     create_start_script

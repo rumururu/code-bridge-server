@@ -99,6 +99,40 @@ function Test-Cloudflared {
     }
 }
 
+function Test-MermaidCli {
+    Write-Host "Checking mermaid-cli (for diagram rendering)..." -ForegroundColor Cyan
+
+    try {
+        $null = & mmdc --version 2>&1
+        Write-Host "[OK] mermaid-cli is installed" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Host "[!] mermaid-cli not found" -ForegroundColor Yellow
+
+        # Check if npm is available
+        try {
+            $null = & npm --version 2>&1
+        } catch {
+            Write-Host "npm not found. Skipping mermaid-cli installation." -ForegroundColor Yellow
+            Write-Host "To enable diagram rendering, install Node.js and run: npm install -g @mermaid-js/mermaid-cli" -ForegroundColor Yellow
+            return $false
+        }
+
+        $response = Read-Host "Install mermaid-cli for diagram rendering? [y/N]"
+        if ($response -eq "y" -or $response -eq "Y") {
+            Write-Host "Installing mermaid-cli..." -ForegroundColor Cyan
+
+            try {
+                & npm install -g @mermaid-js/mermaid-cli
+                Write-Host "[OK] mermaid-cli installed successfully" -ForegroundColor Green
+            } catch {
+                Write-Host "[!] mermaid-cli installation may have failed. You can install it manually later." -ForegroundColor Yellow
+            }
+        }
+        return $false
+    }
+}
+
 function Setup-Repository {
     Write-Host ""
     Write-Host "Setting up Code Bridge Server..." -ForegroundColor Cyan
@@ -181,6 +215,7 @@ function Start-Server {
 $PythonCmd = Test-PythonVersion
 Test-Git
 Test-Cloudflared
+Test-MermaidCli
 Setup-Repository
 Setup-Venv -PythonCmd $PythonCmd
 Create-StartScript
