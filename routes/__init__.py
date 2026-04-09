@@ -11,6 +11,7 @@ from .app_web import router as app_web_router
 from .dashboard import router as dashboard_router
 from .dashboard_auth import router as dashboard_auth_router
 from .filesystem import router as filesystem_router
+from .mermaid import router as mermaid_router
 
 # Migrated feature routers
 from .pairing import router as pairing_router
@@ -18,6 +19,7 @@ from .projects import router as projects_router
 from .files import router as files_router
 from .devices import router as devices_router
 from .scrcpy_proxy import router as scrcpy_proxy_router
+from .browser_stream import router as browser_stream_router
 
 
 def register_routers(app) -> None:
@@ -34,12 +36,14 @@ def register_routers(app) -> None:
     app.include_router(system_inspect_router)
     app.include_router(chat_ws_router)
     app.include_router(app_web_router)
+    app.include_router(mermaid_router)
     # Incremental migration
     app.include_router(pairing_router)
     app.include_router(projects_router)
     app.include_router(files_router)
     app.include_router(devices_router)
     app.include_router(scrcpy_proxy_router)
+    app.include_router(browser_stream_router)
     app.include_router(filesystem_router)
     # Dashboard auth router for login/password management
     app.include_router(dashboard_auth_router)
@@ -78,12 +82,14 @@ def register_api_routers(app) -> None:
     app.include_router(system_inspect_router)
     app.include_router(chat_ws_router)
     app.include_router(app_web_router)
+    app.include_router(mermaid_router)
     # Feature routers
     app.include_router(pairing_router)
     app.include_router(projects_router)
     app.include_router(files_router)
     app.include_router(devices_router)
     app.include_router(scrcpy_proxy_router)
+    app.include_router(browser_stream_router)
     app.include_router(filesystem_router)
     # Preview router last (has root-level catch-all)
     app.include_router(preview_router)
