@@ -413,6 +413,10 @@ async def stream_claude_turn(
     deny_from_permission_message: str | None = None,
 ) -> bool:
     """Stream one Claude turn and forward events to websocket client."""
+    logger.warning(
+        "[chat_stream] BEGIN stream_claude_turn project=%s session_type=%s",
+        project_name, type(session).__name__,
+    )
     logger.info(
         "[chat_stream] project=%s turn_start retry=%s deny=%s",
         project_name,

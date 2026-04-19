@@ -7,10 +7,10 @@ from typing import Any, Awaitable, Callable
 
 from llm.claude_session import get_session_manager
 from core.database import get_project_db
+from core.base_result import BaseRouteResult
 from files.filesystem_service import validate_accessible_path
 from .project_utils import collect_existing_project_state, prepare_project_payload
 from projects.projects import get_project_manager
-from routes.result_response import BaseRouteResult
 
 # Backwards-compatible alias
 ProjectRegistryResult = BaseRouteResult
@@ -111,6 +111,28 @@ async def run_project_on_device_for_current_server(
     return await resolved_manager.run_project_on_device(name, device_id)
 
 
+async def open_web_preview_on_device_for_current_server(
+    name: str,
+    device_id: str,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    density: int | None = None,
+    reset_to_default: bool = False,
+    manager: Any | None = None,
+) -> dict[str, Any]:
+    """Open a web project's dev server preview on an Android emulator."""
+    resolved_manager = _resolve_project_manager(manager)
+    return await resolved_manager.open_web_preview_on_device(
+        name,
+        device_id,
+        width=width,
+        height=height,
+        density=density,
+        reset_to_default=reset_to_default,
+    )
+
+
 async def stop_project_device_run_for_current_server(
     name: str,
     *,
@@ -130,26 +152,6 @@ def get_project_device_run_log_for_current_server(
     """Get project's device run log from active project manager."""
     resolved_manager = _resolve_project_manager(manager)
     return resolved_manager.get_device_run_log(name, lines=lines)
-
-
-async def build_project_flutter_web_for_current_server(
-    name: str,
-    *,
-    manager: Any | None = None,
-) -> dict[str, Any]:
-    """Build Flutter web app via active project manager."""
-    resolved_manager = _resolve_project_manager(manager)
-    return await resolved_manager.build_flutter_web(name)
-
-
-def get_project_build_status_for_current_server(
-    name: str,
-    *,
-    manager: Any | None = None,
-) -> dict[str, Any]:
-    """Get build status via active project manager."""
-    resolved_manager = _resolve_project_manager(manager)
-    return resolved_manager.get_build_status(name)
 
 
 def create_project_record_for_current_server(

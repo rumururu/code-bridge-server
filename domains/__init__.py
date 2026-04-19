@@ -37,14 +37,11 @@ Domain Structure
     - qr_display.py           # Terminal QR display
     - mdns_service.py         # mDNS discovery
 
-**projects/** - Project management and build services
+**projects/** - Project management services
     - project_manager.py          # Core project management
     - project_models.py           # Project data models
     - project_query_service.py    # Query operations
     - project_action_service.py   # Action operations
-    - project_build_service.py    # Build orchestration
-    - project_build_state.py      # Build state tracking
-    - project_build_helpers.py    # Build utilities
     - project_device_run_service.py  # Device run service
     - project_device_run_plan.py     # Run planning
     - project_device_logs.py         # Log management
@@ -76,7 +73,6 @@ Domain Structure
     - preview_service.py       # Preview management
     - preview_access.py        # Access control
     - preview_route_service.py # Route handling
-    - build_preview.py         # Build preview
     - preview.py               # Route definitions
 
 **devices/** - Device management

@@ -197,12 +197,14 @@ class ProjectDB:
             "name": row["name"],
             "path": row["path"],
             "type": row["type"],
-            "dev_server": {
-                "command": row["dev_server_command"],
-                "port": row["dev_server_port"],
-            }
-            if row["dev_server_port"]
-            else None,
+            "dev_server": (
+                {
+                    "command": row["dev_server_command"],
+                    "port": row["dev_server_port"],
+                }
+                if (row["dev_server_command"] or row["dev_server_port"])
+                else None
+            ),
             "enabled": bool(row["enabled"]) if row["enabled"] is not None else True,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],

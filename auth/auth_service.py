@@ -59,7 +59,7 @@ def validate_api_key_for_current_server(
     if not api_key:
         return ApiKeyValidationResult(
             success=False,
-            error="IP_LOGIN_DISABLED: 서버에서 IP 직접 연결을 허용하지 않습니다. QR 코드로 연결해주세요.",
+            error="IP_LOGIN_DISABLED: The server does not allow direct IP connections. Please connect via QR code.",
         )
 
     # Check paired client API keys

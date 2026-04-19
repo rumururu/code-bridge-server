@@ -19,6 +19,21 @@ from .llm_session import LlmSession
 logger = logging.getLogger(__name__)
 
 
+ASK_USER_SYSTEM_PROMPT = (
+    "When you need a yes/no or multiple-choice response from the human user, "
+    "DO NOT write the question as free-form prose. Instead, emit EXACTLY this "
+    'tag on its own line: <ask_user question="YOUR_QUESTION_HERE" '
+    'options="A|B|C"/>. Rules: (1) use double quotes; (2) separate options '
+    "with the pipe character; (3) the tag must be on its own line with no "
+    "leading or trailing prose on the same line; (4) keep the question in the "
+    "same language the user is conversing in; (5) do not also restate the "
+    "options as a numbered list — the tag is the only UI. Example: "
+    '<ask_user question="Proceed with the migration?" options="Yes|No"/>. '
+    "For purely informational messages that do not require a choice, write "
+    "prose as usual and do NOT emit the tag."
+)
+
+
 @dataclass
 class ClaudeSession(LlmSession):
     """Manage one long-lived Claude CLI process with real-time control responses."""
@@ -46,6 +61,13 @@ class ClaudeSession(LlmSession):
     _sdk_connected_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _sdk_send_queue: asyncio.Queue[str] = field(default_factory=asyncio.Queue, init=False)
     _sdk_send_task: asyncio.Task[None] | None = field(default=None, init=False)
+
+    # If the stored project path does not exist on disk we start the session
+    # in a safe fallback cwd and stash a short note so the LLM receives the
+    # context on its first user turn. Without this the CLI subprocess would
+    # die with ENOENT before any user message could be exchanged.
+    _fallback_note: str | None = field(default=None, init=False)
+    _fallback_note_delivered: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         """Locate Claude executable."""
@@ -75,10 +97,60 @@ class ClaudeSession(LlmSession):
         """Claude conversation session id."""
         return self._session_id
 
+    async def resume_session(self, session_id: str) -> None:
+        """Pin a past Claude session id so the next turn resumes that context.
+
+        Closes any running CLI process so the new `--resume <id>` flag takes
+        effect on the next send_message.
+        """
+        next_id = session_id.strip() if isinstance(session_id, str) else ""
+        if not next_id:
+            return
+        if self._session_id == next_id and self.is_running:
+            return
+        self._session_id = next_id
+        if self.is_running:
+            await self.close()
+
     @property
     def has_pending_permission_denials(self) -> bool:
         """Backward-compatible flag for pending permission request."""
         return self._pending_permission_request is not None
+
+    def _resolve_start_cwd(self) -> tuple[str, str | None]:
+        """Pick a safe working directory for the Claude subprocess.
+
+        Returns ``(cwd, fallback_note)``. ``fallback_note`` is a Korean system
+        message the caller should prepend to the first user message whenever
+        the stored path was unreachable, so the LLM can help the user fix the
+        project metadata via the Dashboard API instead of just failing.
+        """
+        if self.project_path and os.path.isdir(self.project_path):
+            return self.project_path, None
+
+        fallback = os.path.expanduser("~")
+        note = (
+            "[System notice] This Claude session started in the Mac home "
+            f"directory `{fallback}` because the project path "
+            f"`{self.project_path}` does not exist on this Mac.\n\n"
+            "Reason: The path stored in the Code Bridge server DB "
+            "(projects.path) does not match any real filesystem path on this "
+            "Mac. This happens when the DB was copied from another Mac or "
+            "when the project was moved.\n\n"
+            "Steps to resolve:\n"
+            "1. Use bash `ls ~/VSCodeProject ~/AndroidStudioProjects "
+            "~/Projects ~/code ~/Documents` etc. to locate the project folder.\n"
+            "2. Run `curl -s http://localhost:8766/api/projects` to inspect "
+            "the currently registered project list.\n"
+            "3. Send `{\"path\": \"/real/path\"}` JSON via "
+            "`curl -X PUT http://localhost:8766/api/projects/<PROJECT_NAME>` "
+            "to update the DB.\n"
+            "4. After the update, tell the user to tap \"Retry\".\n\n"
+            "The dashboard port (8766) is localhost-only and does not require "
+            "an API key. Before changing any value, show your proposal to "
+            "the user and get approval first."
+        )
+        return fallback, note
 
     def _build_command(self, permission_mode: str | None = None) -> list[str]:
         """Build Claude command in SDK mode."""
@@ -96,6 +168,8 @@ class ClaudeSession(LlmSession):
             "--include-partial-messages",
             "--sdk-url",
             self._sdk_url,
+            "--append-system-prompt",
+            ASK_USER_SYSTEM_PROMPT,
         ]
 
         if self._session_id:
@@ -203,9 +277,24 @@ class ClaudeSession(LlmSession):
             await self._ensure_sdk_server()
             cmd = self._build_command()
 
+            # Resolve a safe cwd. When the stored project path is missing we
+            # fall back to the user's home so Claude CLI can still spawn, and
+            # remember a note to pass along on the next user message.
+            cwd, fallback_note = self._resolve_start_cwd()
+            if fallback_note is not None:
+                self._fallback_note = fallback_note
+                self._fallback_note_delivered = False
+            import logging as _lg
+            _lg.getLogger("llm.claude_session").warning(
+                "[claude_session] start project_path=%r cwd=%r fallback=%s",
+                self.project_path,
+                cwd,
+                "yes" if fallback_note else "no",
+            )
+
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
-                cwd=self.project_path,
+                cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
@@ -329,11 +418,21 @@ class ClaudeSession(LlmSession):
                 await self.close()
                 self.default_permission_mode = permission_mode
 
+            with open("/tmp/cb_debug.log", "a") as f:
+                f.write(f"[claude_session] send_message enter path={self.project_path!r} running={self.is_running}\n")
             await self._ensure_process()
+            with open("/tmp/cb_debug.log", "a") as f:
+                f.write(f"[claude_session] _ensure_process returned running={self.is_running}\n")
 
             if self._turn_in_progress:
                 yield {"type": "error", "error": {"message": "Another Claude turn is already in progress"}}
                 return
+
+            # Inject the fallback-cwd note on the very first turn so the LLM
+            # has context about the missing project path and can drive a fix.
+            if self._fallback_note and not self._fallback_note_delivered:
+                message = f"{self._fallback_note}\n\n---\n\n{message}"
+                self._fallback_note_delivered = True
 
             # Build content - may be string or multimodal list
             content = self._build_message_content(message)
@@ -558,6 +657,11 @@ class SessionManager:
             self._sessions.pop(project_name, None)
 
         if existing is None:
+            import logging as _lg
+            _lg.getLogger("llm.session_manager").warning(
+                "[session_manager] creating session provider=%s project=%s path=%r model=%s",
+                provider_id, project_name, project_path, model,
+            )
             session = LlmSessionFactory.create_session(
                 provider_id=provider_id,
                 project_path=project_path,
@@ -569,6 +673,10 @@ class SessionManager:
 
         await session.set_model(model)
         return session
+
+    def get_session_if_exists(self, project_name: str) -> LlmSession | None:
+        """Return the cached session for this project, or None."""
+        return self._sessions.get(project_name)
 
     async def close_session(self, project_name: str) -> None:
         """Close and remove one project session."""

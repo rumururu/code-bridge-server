@@ -1,7 +1,8 @@
+import asyncio
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
@@ -70,6 +71,57 @@ class ProjectManagerCoreTest(unittest.TestCase):
         _, kwargs = mock_detect.call_args
         self.assertTrue(callable(kwargs.get("detect_port_for_project")))
         self.assertEqual(result, 5173)
+
+    def test_open_web_preview_on_device_starts_server_and_opens_chrome(self):
+        fake_db = MagicMock()
+        fake_db.get.return_value = {
+            "name": "demo",
+            "path": "/tmp/demo",
+            "type": "nextjs",
+            "dev_server": {"command": "npm run dev", "port": 5173},
+        }
+        manager = ProjectManager(_project_db_factory=lambda: fake_db)
+        fake_scrcpy = MagicMock()
+        fake_scrcpy.ensure_emulator_ready = AsyncMock(
+            return_value=("emulator-5554", None)
+        )
+        fake_scrcpy.configure_emulator_display = AsyncMock(return_value=None)
+        fake_scrcpy.open_url_in_browser = AsyncMock(return_value=None)
+
+        with patch.object(manager, "get_server_port", return_value=None), \
+             patch.object(
+                 manager,
+                 "start_dev_server",
+                 new=AsyncMock(return_value={"success": True, "port": 5173}),
+             ), \
+             patch("projects.project_manager.get_scrcpy_manager", return_value=fake_scrcpy):
+            result = asyncio.run(
+                manager.open_web_preview_on_device(
+                    "demo",
+                    "avd:Pixel_8_API_35",
+                    width=390,
+                    height=844,
+                    density=420,
+                )
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["device_id"], "emulator-5554")
+        self.assertEqual(result["preview_url"], "http://10.0.2.2:5173")
+        fake_scrcpy.ensure_emulator_ready.assert_awaited_once_with(
+            "avd:Pixel_8_API_35"
+        )
+        fake_scrcpy.configure_emulator_display.assert_awaited_once_with(
+            "emulator-5554",
+            width=390,
+            height=844,
+            density=420,
+            reset_to_default=False,
+        )
+        fake_scrcpy.open_url_in_browser.assert_awaited_once_with(
+            "emulator-5554",
+            "http://10.0.2.2:5173",
+        )
 
 
 if __name__ == "__main__":

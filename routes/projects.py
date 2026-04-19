@@ -5,16 +5,21 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 
-from models import DeviceRunRequest, ProjectCreate, ProjectImport, ProjectUpdate
+from models import (
+    DeviceRunRequest,
+    ProjectCreate,
+    ProjectImport,
+    ProjectUpdate,
+    WebPreviewLaunchRequest,
+)
 from projects.project_action_service import (
-    build_project_flutter_web_for_current_server,
     close_project_session_for_current_server,
     create_project_record_for_current_server,
     delete_project_record_for_current_server,
-    get_project_build_status_for_current_server,
     get_project_device_run_log_for_current_server,
     get_project_for_current_server,
     import_project_records_for_current_server,
+    open_web_preview_on_device_for_current_server,
     list_projects_for_current_server,
     restart_project_dev_server_for_current_server,
     run_project_on_device_for_current_server,
@@ -119,6 +124,23 @@ async def run_project_on_device(name: str, request: DeviceRunRequest) -> dict[st
     return _project_action_response(result)
 
 
+@router.post("/api/projects/{name}/open-web-preview", dependencies=[Depends(verify_api_key)], response_model=None)
+async def open_web_preview_on_device(
+    name: str,
+    request: WebPreviewLaunchRequest,
+) -> dict[str, Any] | JSONResponse:
+    """Open web project preview on selected Android emulator."""
+    result = await open_web_preview_on_device_for_current_server(
+        name,
+        request.device_id,
+        width=request.width,
+        height=request.height,
+        density=request.density,
+        reset_to_default=request.reset_to_default,
+    )
+    return _project_action_response(result)
+
+
 @router.post("/api/projects/{name}/stop-device-run", dependencies=[Depends(verify_api_key)], response_model=None)
 async def stop_project_on_device(name: str) -> dict[str, Any] | JSONResponse:
     """Stop running Flutter device process for project."""
@@ -130,19 +152,6 @@ async def stop_project_on_device(name: str) -> dict[str, Any] | JSONResponse:
 async def get_project_device_run_log(name: str, lines: int = 120) -> dict[str, Any]:
     """Get captured log tail for the project's latest Flutter device run."""
     return get_project_device_run_log_for_current_server(name, lines=lines)
-
-
-@router.post("/api/projects/{name}/build", dependencies=[Depends(verify_api_key)], response_model=None)
-async def build_flutter_web(name: str) -> dict[str, Any] | JSONResponse:
-    """Build Flutter web app."""
-    result = await build_project_flutter_web_for_current_server(name)
-    return _project_action_response(result)
-
-
-@router.get("/api/projects/{name}/build-status", dependencies=[Depends(verify_api_key)])
-async def get_build_status(name: str) -> dict[str, Any]:
-    """Get Flutter web build status."""
-    return get_project_build_status_for_current_server(name)
 
 
 @router.post("/api/sessions/{project_name}/close", dependencies=[Depends(verify_api_key)])

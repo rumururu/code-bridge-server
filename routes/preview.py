@@ -3,7 +3,7 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response
 
 from preview.preview_route_service import (
     authorize_project_preview_request_for_current_server,
@@ -12,7 +12,6 @@ from preview.preview_route_service import (
     proxy_preview_request_for_current_server,
     resolve_last_preview_project_target_for_current_server,
     resolve_project_preview_target_for_current_server,
-    serve_build_preview_for_current_server,
     set_last_previewed_project_for_current_server,
 )
 from .deps import verify_api_key
@@ -115,9 +114,3 @@ async def root_file_proxy(request: Request, filename: str) -> Response | JSONRes
         return JSONResponse(status_code=404, content={"error": "Not found"})
 
     return await _proxy_from_last_preview_project(request, proxy_path)
-
-
-@router.get("/build-preview/{name}/{path:path}", response_model=None)
-async def build_preview(name: str, path: str = "") -> FileResponse | JSONResponse:
-    """Serve static files from web build (Flutter or Next.js)."""
-    return serve_build_preview_for_current_server(name, path)

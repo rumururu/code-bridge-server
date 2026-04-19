@@ -48,15 +48,29 @@ class ProjectsRoutesTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json().get("error"), "device offline")
 
-    def test_build_flutter_web_success_returns_payload(self):
+    def test_open_web_preview_failure_returns_400(self):
+        mock_open = AsyncMock(return_value={"success": False, "message": "emulator missing"})
         with patch(
-            "routes.projects.build_project_flutter_web_for_current_server",
-            new=AsyncMock(return_value={"success": True, "output_dir": "build/web"}),
+            "routes.projects.open_web_preview_on_device_for_current_server",
+            new=mock_open,
         ):
-            response = self.client.post("/api/projects/demo/build")
+            response = self.client.post(
+                "/api/projects/demo/open-web-preview",
+                json={
+                    "device_id": "avd:Pixel_8_API_35",
+                    "width": 390,
+                    "height": 844,
+                    "density": 420,
+                },
+            )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"success": True, "output_dir": "build/web"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json().get("message"), "emulator missing")
+        mock_open.assert_awaited_once()
+        self.assertEqual(mock_open.await_args.kwargs["width"], 390)
+        self.assertEqual(mock_open.await_args.kwargs["height"], 844)
+        self.assertEqual(mock_open.await_args.kwargs["density"], 420)
+        self.assertFalse(mock_open.await_args.kwargs["reset_to_default"])
 
     def test_create_project_validation_error_returns_status(self):
         with patch(

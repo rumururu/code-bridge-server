@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DevServerConfig(BaseModel):
@@ -40,6 +40,16 @@ class DeviceRunRequest(BaseModel):
     """Request body for running a Flutter project on a connected device."""
 
     device_id: str
+
+
+class WebPreviewLaunchRequest(BaseModel):
+    """Request body for opening a web project's dev server on an Android emulator."""
+
+    device_id: str
+    width: Optional[int] = Field(default=None, gt=0)
+    height: Optional[int] = Field(default=None, gt=0)
+    density: Optional[int] = Field(default=None, gt=0)
+    reset_to_default: bool = False
 
 
 class ProjectResponse(BaseModel):

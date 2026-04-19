@@ -20,3 +20,4 @@ config.yaml
 .initialized
 scrcpy/
 server_info.json
+DS_Store

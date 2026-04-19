@@ -2,18 +2,10 @@
 
 import asyncio
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable
 
 from core.database import get_project_db
-from .project_build_service import build_flutter_web_project, build_nextjs_project
-from .project_build_state import (
-    build_status_payload,
-    mark_build_error,
-    mark_build_ready,
-    mark_building,
-    ready_build_path,
-)
+from devices.scrcpy_manager import get_scrcpy_manager
 from .project_dev_server_start import resolve_dev_server_start_plan, spawn_dev_server_process
 from .project_device_logs import device_run_log_path, read_log_tail
 from .project_device_run_plan import resolve_device_run_plan
@@ -22,7 +14,7 @@ from .project_device_run_service import (
     start_flutter_run_process,
     summarize_flutter_run_exit,
 )
-from .project_models import BuildInfo, DevServerProcess, DeviceRunProcess, ProjectType
+from .project_models import DevServerProcess, DeviceRunProcess, ProjectType
 from .project_process_utils import is_process_running, terminate_process_safely
 from .project_query_service import (
     build_project_list_view,
@@ -45,7 +37,6 @@ class ProjectManager:
     _running_servers: dict[str, DevServerProcess] = field(default_factory=dict)
     _running_device_runs: dict[str, DeviceRunProcess] = field(default_factory=dict)
     _last_device_run_logs: dict[str, str] = field(default_factory=dict)
-    _build_info: dict[str, BuildInfo] = field(default_factory=dict)
 
     def _project_db(self) -> Any:
         return self._project_db_factory()
@@ -265,6 +256,99 @@ class ProjectManager:
             "vm_service_uri": vm_service_uri,
         }
 
+    async def open_web_preview_on_device(
+        self,
+        name: str,
+        device_id: str,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        density: int | None = None,
+        reset_to_default: bool = False,
+    ) -> dict[str, Any]:
+        """Open a web project's running dev server in Chrome on an Android emulator."""
+        project = self.get_project(name)
+        if not project:
+            return {"success": False, "message": f"Project {name} not found"}
+
+        project_type = ProjectType.from_string(project.get("type", ""))
+        if project_type == ProjectType.FLUTTER:
+            return {
+                "success": False,
+                "message": "Flutter projects already use direct device mirroring",
+            }
+
+        port = self.get_server_port(name)
+        if port is None:
+            start_result = await self.start_dev_server(name)
+            if not start_result.get("success"):
+                return start_result
+            port = start_result.get("port")
+
+        if port is None:
+            return {
+                "success": False,
+                "message": f"Dev server is not running for {name}",
+            }
+
+        scrcpy_manager = get_scrcpy_manager()
+        resolved_device_id, ensure_error = await scrcpy_manager.ensure_emulator_ready(
+            device_id,
+        )
+        if ensure_error:
+            return {"success": False, "message": ensure_error}
+        if not resolved_device_id:
+            return {
+                "success": False,
+                "message": "Could not resolve Android emulator device",
+            }
+
+        display_override_applied = (
+            reset_to_default
+            or width is not None
+            or height is not None
+            or density is not None
+        )
+        if display_override_applied:
+            display_error = await scrcpy_manager.configure_emulator_display(
+                resolved_device_id,
+                width=width,
+                height=height,
+                density=density,
+                reset_to_default=reset_to_default,
+            )
+            if display_error:
+                return {"success": False, "message": display_error}
+            await asyncio.sleep(1.0)
+
+        # Use localhost + adb reverse instead of 10.0.2.2. Firebase Auth and
+        # other OAuth providers auto-authorize "localhost" but refuse arbitrary
+        # hosts like 10.0.2.2, so this lets the dev server's auth flow run in
+        # real Chrome on the emulator without touching the project config.
+        preview_url = f"http://localhost:{port}"
+        await scrcpy_manager.setup_reverse_port(resolved_device_id, port)
+        open_error = await scrcpy_manager.open_url_in_browser(
+            resolved_device_id,
+            preview_url,
+        )
+        if open_error:
+            return {"success": False, "message": open_error}
+
+        return {
+            "success": True,
+            "message": f"Opened {name} preview on {resolved_device_id}",
+            "device_id": resolved_device_id,
+            "preview_url": preview_url,
+            "port": port,
+            "display_override_applied": display_override_applied,
+            "display_config": {
+                "width": width,
+                "height": height,
+                "density": density,
+                "reset_to_default": reset_to_default,
+            },
+        }
+
     async def stop_project_on_device(self, name: str) -> dict[str, Any]:
         """Stop a running Flutter device process for the project."""
         info = self._active_device_run(name)
@@ -380,109 +464,6 @@ class ProjectManager:
 
     def _detect_port_for_project(self, project_path: str, project_type: ProjectType) -> int | None:
         return detect_port_for_project(project_path, project_type)
-
-    async def build_flutter_web(self, name: str) -> dict[str, Any]:
-        """Build web app (Flutter or Next.js).
-
-        Supports:
-        - Flutter: `flutter build web --release` → build/web/
-        - Next.js: `npm run build` → .next/standalone/ or out/
-        """
-        project = self.get_project(name)
-        if not project:
-            return {"success": False, "message": f"Project {name} not found"}
-
-        project_type = ProjectType.from_string(project.get("type", ""))
-        project_path = project.get("path")
-
-        if not project_path or not Path(project_path).exists():
-            return {"success": False, "message": f"Project path does not exist: {project_path}"}
-
-        # Mark as building
-        mark_building(self._build_info, name, project_type.value)
-
-        try:
-            if project_type == ProjectType.FLUTTER:
-                return await self._build_flutter(name, project_path)
-            elif project_type == ProjectType.NEXTJS:
-                return await self._build_nextjs(name, project_path)
-            else:
-                mark_build_error(
-                    self._build_info,
-                    name,
-                    error_message=f"Unsupported project type: {project.get('type')}",
-                )
-                return {"success": False, "message": f"Unsupported project type: {project.get('type')}"}
-
-        except OSError as e:
-            error_msg = str(e)
-            mark_build_error(self._build_info, name, error_message=error_msg)
-            return {"success": False, "message": f"Build failed: {error_msg}"}
-
-    async def _build_flutter(self, name: str, project_path: str) -> dict[str, Any]:
-        """Build Flutter web app."""
-        result = await build_flutter_web_project(project_path)
-        if not result.success:
-            error_msg = result.message or "Build failed"
-            mark_build_error(
-                self._build_info,
-                name,
-                error_message=error_msg,
-                project_type=ProjectType.FLUTTER.value,
-            )
-            return {"success": False, "message": error_msg}
-
-        mark_build_ready(
-            self._build_info,
-            name,
-            build_path=result.build_path,
-            project_type=ProjectType.FLUTTER.value,
-        )
-        return {
-            "success": True,
-            "message": result.message,
-            "build_path": result.build_path,
-        }
-
-    async def _build_nextjs(self, name: str, project_path: str) -> dict[str, Any]:
-        """Build Next.js app.
-
-        Runs `npm run build`. Output depends on next.config.js:
-        - Static export (output: 'export'): out/
-        - Standalone (output: 'standalone'): .next/standalone/
-        - Default: .next/ (requires next start)
-        """
-        result = await build_nextjs_project(project_path)
-        if not result.success:
-            error_msg = result.message or "Build failed"
-            mark_build_error(
-                self._build_info,
-                name,
-                error_message=error_msg,
-                project_type=ProjectType.NEXTJS.value,
-            )
-            return {"success": False, "message": error_msg}
-
-        mark_build_ready(
-            self._build_info,
-            name,
-            build_path=result.build_path,
-            project_type=ProjectType.NEXTJS.value,
-        )
-        return {
-            "success": True,
-            "message": result.message,
-            "build_path": result.build_path,
-        }
-
-    def get_build_status(self, name: str) -> dict[str, Any]:
-        """Get build status for a project."""
-        return build_status_payload(self._build_info.get(name))
-
-    def get_build_path(self, name: str) -> str | None:
-        """Get build path for a project if ready."""
-        return ready_build_path(self._build_info.get(name))
-
 
 # Global project manager instance
 _project_manager: ProjectManager | None = None

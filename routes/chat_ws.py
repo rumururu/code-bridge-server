@@ -247,11 +247,13 @@ async def chat_websocket(
         provider_name = selection_result.provider_name or "LLM"
         await websocket.send_json({"type": "status", "message": f"Connecting to {provider_name}..."})
 
+        logger.warning("[chat_ws] creating session project=%s path=%r", project_name, project_path)
         session_result = await create_chat_session_for_current_server(
             project_name,
             project_path,
             selection_result.selection,
         )
+        logger.warning("[chat_ws] session create result success=%s error=%s", session_result.success, session_result.error_message)
         if not session_result.success or session_result.session is None:
             await websocket.send_json(
                 {

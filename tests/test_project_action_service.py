@@ -29,15 +29,6 @@ class ProjectActionServiceSyncTest(unittest.TestCase):
         self.assertEqual(result, {"name": "demo"})
         fake_manager.get_project.assert_called_once_with("demo")
 
-    def test_get_project_build_status_for_current_server_delegates(self):
-        fake_manager = MagicMock()
-        fake_manager.get_build_status.return_value = {"status": "ready"}
-
-        result = project_action_service.get_project_build_status_for_current_server("demo", manager=fake_manager)
-
-        self.assertEqual(result, {"status": "ready"})
-        fake_manager.get_build_status.assert_called_once_with("demo")
-
 
 class ProjectActionServiceAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_start_project_dev_server_for_current_server_delegates(self):
@@ -65,14 +56,27 @@ class ProjectActionServiceAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"success": True})
         fake_manager.run_project_on_device.assert_awaited_once_with("demo", "emulator-5554")
 
-    async def test_build_project_flutter_web_for_current_server_delegates(self):
+    async def test_open_web_preview_on_device_for_current_server_delegates(self):
         fake_manager = MagicMock()
-        fake_manager.build_flutter_web = AsyncMock(return_value={"success": True})
+        fake_manager.open_web_preview_on_device = AsyncMock(
+            return_value={"success": True}
+        )
 
-        result = await project_action_service.build_project_flutter_web_for_current_server(
+        result = await project_action_service.open_web_preview_on_device_for_current_server(
             "demo",
+            "avd:Pixel_8_API_35",
+            width=390,
+            height=844,
+            density=420,
             manager=fake_manager,
         )
 
         self.assertEqual(result, {"success": True})
-        fake_manager.build_flutter_web.assert_awaited_once_with("demo")
+        fake_manager.open_web_preview_on_device.assert_awaited_once_with(
+            "demo",
+            "avd:Pixel_8_API_35",
+            width=390,
+            height=844,
+            density=420,
+            reset_to_default=False,
+        )

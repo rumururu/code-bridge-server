@@ -1,1 +1,0 @@
-"""system domain package."""

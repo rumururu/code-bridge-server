@@ -6,7 +6,6 @@ from typing import Any
 
 from fastapi import Request
 
-from .build_preview import serve_build_preview
 from pairing.pairing import get_pairing_service
 from preview.preview import get_preview_proxy
 from .preview_access import get_preview_access_manager
@@ -155,14 +154,3 @@ def get_allowed_root_preview_proxy_path(filename: str) -> str | None:
     if filename not in ALLOWED_ROOT_PREVIEW_FILES:
         return None
     return filename
-
-
-def serve_build_preview_for_current_server(
-    project_name: str,
-    path: str,
-    *,
-    manager: Any | None = None,
-):
-    """Serve static files from built output for project."""
-    resolved_manager = manager or get_project_manager()
-    return serve_build_preview(project_name, path, resolved_manager)
