@@ -21,6 +21,21 @@ echo -e "${CYAN}║   Code Bridge Server - Installation    ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
+prompt_yes_no() {
+    local prompt="$1"
+    local reply=""
+
+    if [[ -r /dev/tty ]]; then
+        read -r -n 1 -p "$prompt" reply < /dev/tty || reply=""
+        echo
+    else
+        echo "No interactive terminal available; skipping optional install."
+        return 1
+    fi
+
+    [[ $reply =~ ^[Yy]$ ]]
+}
+
 # Function to compare version numbers
 version_ge() {
     local IFS=.
@@ -97,9 +112,7 @@ check_cloudflared() {
 
     echo -e "${YELLOW}! cloudflared not found (optional for remote access)${NC}"
 
-    read -p "Install cloudflared for remote access? [y/N] " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if prompt_yes_no "Install cloudflared for remote access? [y/N] "; then
         echo -e "${CYAN}Installing cloudflared...${NC}"
 
         if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -140,9 +153,7 @@ check_mermaid_cli() {
         return 0
     fi
 
-    read -p "Install mermaid-cli for diagram rendering? [y/N] " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if prompt_yes_no "Install mermaid-cli for diagram rendering? [y/N] "; then
         echo -e "${CYAN}Installing mermaid-cli...${NC}"
         npm install -g @mermaid-js/mermaid-cli
         if command -v mmdc &> /dev/null; then
