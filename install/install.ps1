@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$INSTALL_DIR = "$env:USERPROFILE\.code-bridge"
+$INSTALL_DIR = if ($env:CODE_BRIDGE_INSTALL_DIR) { $env:CODE_BRIDGE_INSTALL_DIR } else { "$env:USERPROFILE\.code-bridge" }
 $REPO_URL = "https://github.com/rumururu/code-bridge-server.git"
 $MIN_PYTHON_VERSION = [version]"3.10"
 
@@ -17,7 +17,19 @@ function Test-PythonVersion {
     Write-Host "Checking Python installation..." -ForegroundColor Cyan
 
     # Try different Python commands
-    $pythonCommands = @("python", "python3", "py -3")
+    $pythonCommands = @(
+        "python3.13",
+        "python3.12",
+        "python3.11",
+        "python3.10",
+        "python3",
+        "python",
+        "py -3.13",
+        "py -3.12",
+        "py -3.11",
+        "py -3.10",
+        "py -3"
+    )
 
     foreach ($cmd in $pythonCommands) {
         try {
@@ -79,11 +91,11 @@ function Test-Cloudflared {
 
             # Download cloudflared
             $cloudflaredUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-            $cloudflaredPath = "$env:USERPROFILE\.code-bridge\cloudflared.exe"
+            $cloudflaredPath = "$INSTALL_DIR\cloudflared.exe"
 
             # Create directory if it doesn't exist
-            if (-not (Test-Path "$env:USERPROFILE\.code-bridge")) {
-                New-Item -ItemType Directory -Path "$env:USERPROFILE\.code-bridge" -Force | Out-Null
+            if (-not (Test-Path $INSTALL_DIR)) {
+                New-Item -ItemType Directory -Path $INSTALL_DIR -Force | Out-Null
             }
 
             try {
@@ -198,6 +210,16 @@ python main.py --show-qr @args
     Write-Host "[OK] Start scripts created" -ForegroundColor Green
 }
 
+function Show-InstallComplete {
+    Write-Host ""
+    Write-Host "=======================================" -ForegroundColor Green
+    Write-Host "   Installation Complete!             " -ForegroundColor Green
+    Write-Host "=======================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Start Code Bridge Server with:"
+    Write-Host "  $INSTALL_DIR\start.bat"
+}
+
 function Start-Server {
     Write-Host ""
     Write-Host "=======================================" -ForegroundColor Green
@@ -219,4 +241,9 @@ Test-MermaidCli
 Setup-Repository
 Setup-Venv -PythonCmd $PythonCmd
 Create-StartScript
-Start-Server
+
+if ($env:CODE_BRIDGE_AUTO_START -eq "0") {
+    Show-InstallComplete
+} else {
+    Start-Server
+}
