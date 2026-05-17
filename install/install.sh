@@ -11,7 +11,7 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-INSTALL_DIR="$HOME/.code-bridge"
+INSTALL_DIR="${CODE_BRIDGE_INSTALL_DIR:-$HOME/.code-bridge}"
 REPO_URL="https://github.com/rumururu/code-bridge-server.git"
 MIN_PYTHON_VERSION="3.10"
 
@@ -23,7 +23,24 @@ echo ""
 
 # Function to compare version numbers
 version_ge() {
-    [ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ]
+    local IFS=.
+    local i
+    local left=($1)
+    local right=($2)
+
+    for ((i=${#left[@]}; i<3; i++)); do left[i]=0; done
+    for ((i=${#right[@]}; i<3; i++)); do right[i]=0; done
+
+    for ((i=0; i<3; i++)); do
+        if ((10#${left[i]} > 10#${right[i]})); then
+            return 0
+        fi
+        if ((10#${left[i]} < 10#${right[i]})); then
+            return 1
+        fi
+    done
+
+    return 0
 }
 
 # Check for Python 3.10+
@@ -31,7 +48,7 @@ check_python() {
     echo -e "${CYAN}Checking Python installation...${NC}"
 
     # Try different Python commands
-    for cmd in python3 python; do
+    for cmd in python3.13 python3.12 python3.11 python3.10 python3 python; do
         if command -v "$cmd" &> /dev/null; then
             version=$($cmd --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
             if version_ge "$version" "$MIN_PYTHON_VERSION"; then
@@ -217,7 +234,18 @@ main() {
     setup_repository
     setup_venv
     create_start_script
-    run_server
+
+    if [[ "${CODE_BRIDGE_AUTO_START:-1}" == "1" ]]; then
+        run_server
+    else
+        echo ""
+        echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
+        echo -e "${GREEN}║   Installation Complete!               ║${NC}"
+        echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
+        echo ""
+        echo "Start Code Bridge Server with:"
+        echo "  $INSTALL_DIR/start.sh"
+    fi
 }
 
 main "$@"
