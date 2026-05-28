@@ -368,7 +368,7 @@ class AgentRoutesTest(unittest.TestCase):
         )
 
         with patch(
-            "agent.task_orchestrator.execute_terminal_command_for_current_server",
+            "agent.task_orchestrator.execute_terminal_command_streaming_for_current_server",
             new=AsyncMock(return_value=BaseRouteResult.ok({"stdout": "ok", "exit_code": 0})),
         ):
             response = self.client.post(

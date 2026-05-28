@@ -269,10 +269,23 @@ def _build_output_metadata(path: Path) -> dict[str, Any]:
             size_bytes = path.stat().st_size
         except OSError:
             size_bytes = None
-        return {
+        metadata: dict[str, Any] = {
             "size_bytes": size_bytes,
             "suffix": path.suffix.lower(),
         }
+        # APK / IPA get their manifest unpacked so the Cockpit shows package
+        # id, version, signing block, provisioning profile, etc. instead of
+        # just file size. inspect_build_artifact returns None for everything
+        # else and never raises on a malformed archive.
+        try:
+            from build_inspection import inspect_build_artifact
+
+            inspection = inspect_build_artifact(path)
+        except Exception:  # noqa: BLE001 — must never break artifact recording
+            inspection = None
+        if inspection:
+            metadata.update(inspection)
+        return metadata
     if path.is_dir():
         try:
             entries = sorted(item.name for item in path.iterdir())[:50]

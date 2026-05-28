@@ -1,6 +1,6 @@
 """Service wrappers for project terminal operations."""
 
-from typing import Any
+from typing import Any, Awaitable, Callable, Optional, Union
 
 from core.base_result import BaseRouteResult
 from projects.project_manager import get_project_manager
@@ -40,6 +40,31 @@ async def execute_terminal_command_for_current_server(
         return _missing_project(name)
     session = get_terminal_manager().get_session(name, project_path)
     result = await session.execute(command, timeout=timeout)
+    return TerminalActionResult.ok(_command_result_payload(result))
+
+
+async def execute_terminal_command_streaming_for_current_server(
+    name: str,
+    *,
+    command: str,
+    timeout: int = 300,
+    on_chunk: Optional[Callable[[dict], Union[None, Awaitable[None]]]] = None,
+) -> TerminalActionResult:
+    """Run ``command`` while pushing live stdout/stderr chunks to ``on_chunk``.
+
+    Used by the task step adapter so a long-running build emits ``step.log``
+    events over ``/ws/agent/runs/{run_id}`` while it executes, instead of
+    only producing a single completion event at the end.
+    """
+    project_path = _project_path(name)
+    if project_path is None:
+        return _missing_project(name)
+    session = get_terminal_manager().get_session(name, project_path)
+    result = await session.execute_with_emitter(
+        command,
+        on_chunk=on_chunk,
+        timeout=timeout,
+    )
     return TerminalActionResult.ok(_command_result_payload(result))
 
 

@@ -12,7 +12,10 @@ from chat.chat_stream_service import stream_claude_turn
 from core.config import get_config
 from core.runtime_paths import runtime_dir
 from policy.policy_gate import evaluate_direct_action_gate
-from terminal_action_service import execute_terminal_command_for_current_server
+from terminal_action_service import (
+    execute_terminal_command_for_current_server,
+    execute_terminal_command_streaming_for_current_server,
+)
 from workspaces.workspace_store import get_workspace_store
 
 from .agent_store import get_agent_store
@@ -303,10 +306,21 @@ async def execute_task_step_adapter(
         results: list[dict[str, Any]] = []
         success = True
         for command in commands:
-            result = await execute_terminal_command_for_current_server(
+            # Stream stdout/stderr chunks as step.log events so the Cockpit can
+            # show a build's progress in near-real-time over /ws/agent/runs/.
+            # The agent run WS poll interval is 1 second, so the user sees
+            # logs within ~1 s of them being printed.
+            emitter = _make_step_log_emitter(
+                run_id=run_id if isinstance(run_id, str) else None,
+                task_id=task_id,
+                step_id=step_id,
+                command=command,
+            )
+            result = await execute_terminal_command_streaming_for_current_server(
                 project_name,
                 command=command,
                 timeout=timeout,
+                on_chunk=emitter,
             )
             record_api_action(
                 operation="process.terminal",
@@ -610,6 +624,80 @@ def complete_connector_request(
         "connector_request": updated,
         "step": step,
     }
+
+
+def _make_step_log_emitter(
+    *,
+    run_id: str | None,
+    task_id: str,
+    step_id: str,
+    command: str,
+):
+    """Build an ``on_chunk`` callback that appends ``step.log`` events.
+
+    Chunks are coalesced per stream (stdout / stderr) so we emit one event
+    per line, not one event per 4 KB read. This keeps the agent_events table
+    tidy while still giving the Cockpit near-real-time progress.
+
+    When ``run_id`` is missing (e.g. ad-hoc step run without a run binding)
+    the emitter returns a no-op so the caller doesn't have to branch.
+    """
+    if not run_id:
+        return None
+
+    store = get_agent_store()
+    buffers: dict[str, str] = {"stdout": "", "stderr": ""}
+
+    def _flush(stream: str) -> None:
+        line = buffers[stream]
+        if not line:
+            return
+        buffers[stream] = ""
+        try:
+            store.append_event(
+                run_id=run_id,
+                event_type="step.log",
+                app_event={
+                    "task_id": task_id,
+                    "step_id": step_id,
+                    "command": command,
+                    "stream": stream,
+                    "data": line,
+                },
+            )
+        except Exception:  # noqa: BLE001 — never break terminal execution
+            logger.exception("failed to append step.log event")
+
+    def emit(chunk: dict[str, Any]) -> None:
+        stream = chunk.get("stream") if isinstance(chunk, dict) else None
+        data = chunk.get("data") if isinstance(chunk, dict) else None
+        if stream not in {"stdout", "stderr"} or not isinstance(data, str):
+            return
+        buffers[stream] += data
+        while "\n" in buffers[stream]:
+            line, _, rest = buffers[stream].partition("\n")
+            buffers[stream] = rest
+            try:
+                store.append_event(
+                    run_id=run_id,
+                    event_type="step.log",
+                    app_event={
+                        "task_id": task_id,
+                        "step_id": step_id,
+                        "command": command,
+                        "stream": stream,
+                        "data": line,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("failed to append step.log event")
+        # Flush a trailing partial line if it grows large enough — typical
+        # progress bars (`\r`-overwritten lines) never see `\n`, so without
+        # this they would be invisible until completion.
+        if len(buffers[stream]) >= 256:
+            _flush(stream)
+
+    return emit
 
 
 def _step_adapter(step_input: dict[str, Any]) -> dict[str, Any]:

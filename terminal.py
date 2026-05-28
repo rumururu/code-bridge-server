@@ -1,9 +1,10 @@
 """Terminal management for running commands in project directories."""
 
 import asyncio
+import inspect
 import os
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Awaitable, Callable, Optional, Union
 
 # Dangerous commands to block
 BLOCKED_COMMANDS = {
@@ -139,6 +140,123 @@ class TerminalSession:
                 error=str(e),
                 exit_code=1,
             )
+        finally:
+            self.current_process = None
+
+    async def execute_with_emitter(
+        self,
+        command: str,
+        *,
+        on_chunk: Optional[Callable[[dict], Union[None, Awaitable[None]]]] = None,
+        timeout: int = MAX_EXECUTION_TIME,
+    ) -> CommandResult:
+        """Run ``command`` and push stdout/stderr chunks to ``on_chunk`` as they arrive.
+
+        Returns the same buffered :class:`CommandResult` as :meth:`execute`
+        so callers that want the final captured output still get it. Use this
+        method when the caller needs both real-time log streaming **and** a
+        final result object.
+
+        ``on_chunk`` receives dicts shaped like::
+
+            {"stream": "stdout"|"stderr", "data": "<text>"}
+
+        Optionally async; both sync and async callbacks are supported.
+        Exceptions in the callback are logged and swallowed so a broken
+        listener never corrupts the underlying command execution.
+        """
+        if self._is_blocked(command):
+            return CommandResult(
+                error="This command is blocked for security reasons",
+                exit_code=1,
+            )
+
+        async def _emit(payload: dict) -> None:
+            if on_chunk is None:
+                return
+            try:
+                result = on_chunk(payload)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # noqa: BLE001 — listener errors are non-fatal
+                # Intentionally swallowed: emitter problems must not affect
+                # the underlying terminal command. We pick up the buffered
+                # result regardless.
+                pass
+
+        self.command_history.append(command)
+        if len(self.command_history) > 100:
+            self.command_history = self.command_history[-100:]
+
+        stdout_buf: list[str] = []
+        stderr_buf: list[str] = []
+        stdout_size = 0
+        stderr_size = 0
+        truncated = False
+
+        try:
+            self.current_process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.project_path,
+                env={**os.environ, "TERM": "xterm-256color"},
+            )
+
+            async def pump(stream: asyncio.StreamReader, stream_type: str) -> None:
+                nonlocal stdout_size, stderr_size, truncated
+                while True:
+                    chunk = await stream.read(4096)
+                    if not chunk:
+                        return
+                    decoded = chunk.decode("utf-8", errors="replace")
+                    if stream_type == "stdout":
+                        if stdout_size >= MAX_OUTPUT_SIZE:
+                            if not truncated:
+                                truncated = True
+                                stdout_buf.append("\n... (output truncated)")
+                                await _emit({"stream": "stdout", "data": "\n... (output truncated)"})
+                            continue
+                        stdout_size += len(decoded)
+                        stdout_buf.append(decoded)
+                    else:
+                        if stderr_size >= MAX_OUTPUT_SIZE:
+                            if not truncated:
+                                truncated = True
+                                stderr_buf.append("\n... (output truncated)")
+                                await _emit({"stream": "stderr", "data": "\n... (output truncated)"})
+                            continue
+                        stderr_size += len(decoded)
+                        stderr_buf.append(decoded)
+                    await _emit({"stream": stream_type, "data": decoded})
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        pump(self.current_process.stdout, "stdout"),
+                        pump(self.current_process.stderr, "stderr"),
+                    ),
+                    timeout=timeout,
+                )
+                await self.current_process.wait()
+            except asyncio.TimeoutError:
+                self.current_process.kill()
+                await self.current_process.wait()
+                return CommandResult(
+                    stdout="".join(stdout_buf),
+                    stderr="".join(stderr_buf),
+                    exit_code=124,
+                    error=f"Command timed out after {timeout} seconds",
+                    timed_out=True,
+                )
+
+            return CommandResult(
+                stdout="".join(stdout_buf),
+                stderr="".join(stderr_buf),
+                exit_code=self.current_process.returncode or 0,
+            )
+        except OSError as e:
+            return CommandResult(error=str(e), exit_code=1)
         finally:
             self.current_process = None
 
