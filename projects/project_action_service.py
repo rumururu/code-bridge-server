@@ -10,6 +10,7 @@ from core.database import get_project_db
 from core.base_result import BaseRouteResult
 from files.filesystem_service import validate_accessible_path
 from .project_utils import collect_existing_project_state, prepare_project_payload
+from .project_utils import resolve_project_path, sanitize_project_name
 from projects.projects import get_project_manager
 
 # Backwards-compatible alias
@@ -187,6 +188,79 @@ def create_project_record_for_current_server(
 
     created = resolved_project_db.create(payload)
     return ProjectRegistryResult.ok(created)
+
+
+def create_project_folder_for_current_server(
+    *,
+    root_path: str,
+    folder_name: str,
+    requested_name: str | None = None,
+    requested_type: str | None = None,
+    dev_server: dict[str, Any] | None = None,
+    project_db: Any | None = None,
+) -> ProjectRegistryResult:
+    """Create a folder inside a root path and register it as a project."""
+    resolved_root, error, status_code = resolve_project_path(root_path)
+    if resolved_root is None:
+        return ProjectRegistryResult.error(status_code or 400, error or "Invalid root path")
+
+    if not validate_accessible_path(str(resolved_root)):
+        return ProjectRegistryResult.error(
+            403,
+            f"Root path '{resolved_root}' is outside accessible folders. "
+            "Add the parent folder to Accessible Folders first.",
+        )
+
+    sanitized_folder_name = sanitize_project_name(folder_name)
+    if sanitized_folder_name in {"", ".", ".."}:
+        return ProjectRegistryResult.error(400, "Project folder name is required")
+
+    project_path = (resolved_root / sanitized_folder_name).resolve()
+    try:
+        project_path.relative_to(resolved_root)
+    except ValueError:
+        return ProjectRegistryResult.error(400, "Invalid project folder name")
+
+    if project_path.exists():
+        return ProjectRegistryResult.error(409, f"Project folder already exists: {project_path}")
+
+    resolved_project_db = _resolve_project_db(project_db)
+    existing_names, existing_paths = _load_existing_project_state(resolved_project_db)
+
+    try:
+        project_path.mkdir()
+    except OSError as exc:
+        return ProjectRegistryResult.error(500, f"Failed to create project folder: {exc}")
+
+    payload, payload_error, payload_status_code = prepare_project_payload(
+        path_value=str(project_path),
+        existing_names=existing_names,
+        existing_paths=existing_paths,
+        requested_name=requested_name or sanitized_folder_name,
+        requested_type=requested_type,
+        dev_server=dev_server,
+        skip_accessible_check=True,
+    )
+    if payload is None:
+        try:
+            project_path.rmdir()
+        except OSError:
+            pass
+        return ProjectRegistryResult.error(
+            payload_status_code or 400,
+            payload_error or "Invalid project",
+        )
+
+    try:
+        created = resolved_project_db.create(payload)
+    except (sqlite3.Error, KeyError, TypeError) as exc:
+        try:
+            project_path.rmdir()
+        except OSError:
+            pass
+        return ProjectRegistryResult.error(500, f"Failed to register project: {exc}")
+
+    return ProjectRegistryResult.ok(created, status_code=201)
 
 
 def import_project_records_for_current_server(

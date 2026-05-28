@@ -21,6 +21,16 @@ class ProjectCreate(BaseModel):
     dev_server: Optional[DevServerConfig] = None
 
 
+class ProjectFolderCreate(BaseModel):
+    """Request body for creating a project folder under a root path."""
+
+    root_path: str
+    folder_name: str
+    name: Optional[str] = None
+    type: Optional[str] = None
+    dev_server: Optional[DevServerConfig] = None
+
+
 class ProjectUpdate(BaseModel):
     """Request body for updating a project."""
 
@@ -40,6 +50,8 @@ class DeviceRunRequest(BaseModel):
     """Request body for running a Flutter project on a connected device."""
 
     device_id: str
+    run_id: Optional[str] = None
+    approval_id: Optional[str] = None
 
 
 class WebPreviewLaunchRequest(BaseModel):
@@ -50,6 +62,8 @@ class WebPreviewLaunchRequest(BaseModel):
     height: Optional[int] = Field(default=None, gt=0)
     density: Optional[int] = Field(default=None, gt=0)
     reset_to_default: bool = False
+    run_id: Optional[str] = None
+    approval_id: Optional[str] = None
 
 
 class ProjectResponse(BaseModel):
@@ -69,6 +83,8 @@ class FileWrite(BaseModel):
     path: str
     content: str
     create_dirs: bool = False
+    run_id: Optional[str] = None
+    approval_id: Optional[str] = None
 
 
 class FileCreate(BaseModel):
@@ -77,6 +93,8 @@ class FileCreate(BaseModel):
     path: str
     content: Optional[str] = None  # None for directory creation
     is_directory: bool = False
+    run_id: Optional[str] = None
+    approval_id: Optional[str] = None
 
 
 class TerminalCommand(BaseModel):
@@ -84,12 +102,16 @@ class TerminalCommand(BaseModel):
 
     command: str
     timeout: int = 300  # Default 5 minutes
+    run_id: Optional[str] = None
+    approval_id: Optional[str] = None
 
 
 class GitCommit(BaseModel):
     """Request body for git commit."""
 
     message: str
+    run_id: Optional[str] = None
+    approval_id: Optional[str] = None
 
 
 class GitBranch(BaseModel):
@@ -104,6 +126,8 @@ class GitPush(BaseModel):
 
     remote: str = "origin"
     branch: Optional[str] = None
+    run_id: Optional[str] = None
+    approval_id: Optional[str] = None
 
 
 class GitPull(BaseModel):
@@ -111,6 +135,8 @@ class GitPull(BaseModel):
 
     remote: str = "origin"
     branch: Optional[str] = None
+    run_id: Optional[str] = None
+    approval_id: Optional[str] = None
 
 
 class LlmSelectionUpdate(BaseModel):
@@ -124,6 +150,29 @@ class CodexSettingsUpdate(BaseModel):
     """Request body for updating Codex-specific settings."""
 
     sandbox_mode: str
+
+
+class LlmProviderInstallRequest(BaseModel):
+    """Request body for installing a supported LLM CLI provider."""
+
+    method: str = "brew"
+
+
+class LlmProviderInstallJobStatus(BaseModel):
+    """Status payload for an async LLM CLI provider install job."""
+
+    job_id: str
+    provider_id: str
+    method: str
+    status: str
+    finished: bool
+    returncode: Optional[int] = None
+    installed: Optional[bool] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    output: str = ""
 
 
 class IpLoginUpdate(BaseModel):

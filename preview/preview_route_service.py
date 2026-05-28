@@ -10,7 +10,7 @@ from pairing.pairing import get_pairing_service
 from preview.preview import get_preview_proxy
 from .preview_access import get_preview_access_manager
 from projects.projects import get_project_manager
-from routes.result_response import BaseRouteResult
+from core.base_result import BaseRouteResult
 
 ALLOWED_ROOT_PREVIEW_FILES = {
     "favicon.ico",
@@ -70,7 +70,7 @@ def authorize_project_preview_request_for_current_server(
 
         # Update client last_used when using preview (shows as connected)
         token_api_key = resolved_preview_access.get_token_api_key(preview_token)
-        if token_api_key:
+        if isinstance(token_api_key, str) and token_api_key:
             resolved_pairing.touch_api_key(token_api_key)
 
         resolved_preview_access.bind_remote_session(request, project_name)

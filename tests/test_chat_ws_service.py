@@ -2,42 +2,94 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 from chat import chat_ws_service
+from auth.auth_service import ApiKeyValidationResult
 from remote.remote_access_service import RemoteAccessLoginPayload
 
 
 class ChatWsServiceTest(unittest.TestCase):
-    def test_validate_chat_websocket_access_for_current_server_allows_missing_key_when_auth_disabled(self):
+    def test_validate_chat_websocket_access_for_current_server_rejects_missing_key(self):
         fake_config = MagicMock()
         fake_config.api_key = ""
         fake_config.port = 8080
         fake_config.get_project.return_value = {"path": "/tmp/demo"}
 
-        result = chat_ws_service.validate_chat_websocket_access_for_current_server(
-            None,
-            "demo",
-            config=fake_config,
-        )
+        with patch(
+            "chat.chat_ws_service.validate_api_key_for_current_server",
+            return_value=ApiKeyValidationResult(success=False, error="IP_LOGIN_DISABLED"),
+        ):
+            result = chat_ws_service.validate_chat_websocket_access_for_current_server(
+                None,
+                "demo",
+                config=fake_config,
+            )
 
-        self.assertTrue(result.success)
-        self.assertEqual(result.project_path, "/tmp/demo")
+        self.assertFalse(result.success)
+        self.assertEqual(result.close_code, 4001)
+        self.assertEqual(result.close_reason, "API key required")
 
     def test_validate_chat_websocket_access_for_current_server_requires_api_key_when_auth_enabled(self):
         fake_config = MagicMock()
         fake_config.api_key = "server-static-key"
         fake_config.get_project.return_value = {"path": "/tmp/demo"}
 
-        result = chat_ws_service.validate_chat_websocket_access_for_current_server(
-            None,
-            "demo",
-            config=fake_config,
-        )
+        with patch(
+            "chat.chat_ws_service.validate_api_key_for_current_server",
+            return_value=ApiKeyValidationResult(success=False, error="IP_LOGIN_DISABLED"),
+        ):
+            result = chat_ws_service.validate_chat_websocket_access_for_current_server(
+                None,
+                "demo",
+                config=fake_config,
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.close_code, 4001)
+        self.assertEqual(result.close_reason, "API key required")
+
+    def test_validate_chat_websocket_access_for_current_server_allows_valid_key(self):
+        fake_config = MagicMock()
+        fake_config.port = 8080
+        fake_config.get_project.return_value = {"path": "/tmp/demo"}
+
+        with patch(
+            "chat.chat_ws_service.validate_api_key_for_current_server",
+            return_value=ApiKeyValidationResult(success=True, api_key="good-key"),
+        ):
+            result = chat_ws_service.validate_chat_websocket_access_for_current_server(
+                "good-key",
+                "demo",
+                config=fake_config,
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.project_path, "/tmp/demo")
+
+    def test_validate_chat_websocket_access_for_current_server_blocks_tunnel_ip_login(self):
+        fake_config = MagicMock()
+        fake_config.port = 8080
+        fake_config.get_project.return_value = {"path": "/tmp/demo"}
+
+        with patch(
+            "chat.chat_ws_service.validate_api_key_for_current_server",
+            return_value=ApiKeyValidationResult(
+                success=True,
+                api_key="__ip_login__",
+                is_ip_login=True,
+            ),
+        ):
+            result = chat_ws_service.validate_chat_websocket_access_for_current_server(
+                None,
+                "demo",
+                from_tunnel=True,
+                config=fake_config,
+            )
 
         self.assertFalse(result.success)
         self.assertEqual(result.close_code, 4001)
@@ -50,12 +102,16 @@ class ChatWsServiceTest(unittest.TestCase):
         fake_config = MagicMock()
         fake_config.get_project.return_value = None
 
-        result = chat_ws_service.validate_chat_websocket_access_for_current_server(
-            "apikey",
-            "missing",
-            pairing_service=fake_pairing,
-            config=fake_config,
-        )
+        with patch(
+            "chat.chat_ws_service.validate_api_key_for_current_server",
+            return_value=ApiKeyValidationResult(success=True, api_key="apikey"),
+        ):
+            result = chat_ws_service.validate_chat_websocket_access_for_current_server(
+                "apikey",
+                "missing",
+                pairing_service=fake_pairing,
+                config=fake_config,
+            )
 
         self.assertFalse(result.success)
         self.assertEqual(result.error_message, "Project missing not found")

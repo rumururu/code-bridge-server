@@ -14,6 +14,7 @@ from websockets.exceptions import ConnectionClosed
 
 from devices.scrcpy_manager import get_scrcpy_manager
 from auth.auth_service import validate_api_key_for_current_server
+from .deps import is_websocket_from_tunnel
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +39,13 @@ async def scrcpy_stream_proxy(
     await websocket.accept()
 
     # Verify API key
+    if is_websocket_from_tunnel(websocket) and not api_key:
+        await websocket.close(code=4001, reason="API key required")
+        return
+
     validation = validate_api_key_for_current_server(api_key)
     if not validation.success:
-        logger.warning(f"[ScrcpyProxy] Invalid API key: {api_key[:20] if api_key else 'None'}...")
+        logger.warning("[ScrcpyProxy] Unauthorized websocket connection rejected")
         await websocket.close(code=4001, reason="Invalid API key")
         return
 

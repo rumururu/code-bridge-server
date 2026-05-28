@@ -45,11 +45,11 @@ _verify_limiter = RateLimiter(
 )
 
 
-@router.get("/api/pair/qr", dependencies=[Depends(require_local_access)])
+@router.get("/api/pair/qr", dependencies=[Depends(require_localhost_only)])
 async def get_pair_qr() -> JSONResponse:
     """Get QR code pairing data.
 
-    Only accessible from local network for security.
+    Only accessible from the server machine for security.
     """
     from fastapi.responses import JSONResponse
     result = build_current_pairing_qr_result()
@@ -64,11 +64,11 @@ async def get_pair_qr() -> JSONResponse:
     )
 
 
-@router.get("/api/pair/qr-image", dependencies=[Depends(require_local_access)])
+@router.get("/api/pair/qr-image", dependencies=[Depends(require_localhost_only)])
 async def get_pair_qr_image() -> Response:
     """Get QR code as PNG image for dashboard display.
 
-    Only accessible from local network for security.
+    Only accessible from the server machine for security.
     """
     result = build_current_pairing_qr_result()
     if not result.success or not result.qr_url:
@@ -252,19 +252,19 @@ async def get_pair_status() -> dict[str, Any]:
 
 @router.delete(
     "/api/pair/clients/{client_id}",
-    dependencies=[Depends(require_local_access)],
+    dependencies=[Depends(require_localhost_only)],
     response_model=None,
 )
 async def revoke_paired_client(client_id: str) -> dict[str, Any] | Response:
     """Revoke a paired client's API key.
 
-    This is a dashboard management endpoint - only accessible locally.
+    This is a dashboard management endpoint - only accessible on the server PC.
     """
     result = revoke_paired_client_for_current_server(client_id)
     return as_route_response(result)
 
 
-@router.post("/api/pair/show-qr")
+@router.post("/api/pair/show-qr", dependencies=[Depends(require_local_access)])
 async def show_qr_on_server() -> dict[str, Any]:
     """Open QR code page in browser on the SERVER PC.
 

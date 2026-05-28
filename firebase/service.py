@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from core.runtime_paths import SERVER_DIR, runtime_path
+
 from .state import AuthState, LegacyDeviceInfo, PersistedState
 from .token_manager import TokenManager, TokenInfo, TOKEN_REFRESH_THRESHOLD_SECONDS
 from . import device_registration
@@ -26,9 +28,9 @@ from . import device_registration
 logger = logging.getLogger(__name__)
 
 # Default paths
-FIREBASE_CONFIG_PATH = Path(__file__).parent.parent / "firebase_config.json"
-SERVER_INFO_PATH = Path(__file__).parent.parent / "server_info.json"
-LEGACY_DEVICE_INFO_PATH = Path(__file__).parent.parent / "device_info.json"
+FIREBASE_CONFIG_PATH = runtime_path("firebase_config.json", SERVER_DIR / "firebase_config.json")
+SERVER_INFO_PATH = runtime_path("server_info.json", SERVER_DIR / "server_info.json")
+LEGACY_DEVICE_INFO_PATH = runtime_path("device_info.json", SERVER_DIR / "device_info.json")
 
 
 class FirebaseAuthServiceError(Exception):

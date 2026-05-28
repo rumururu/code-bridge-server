@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,17 @@ def _find_git_root() -> Path | None:
 
 GIT_ROOT = _find_git_root()
 SERVER_DIR = Path(__file__).parent.parent
+DESKTOP_ARTIFACTS_DIR = GIT_ROOT / "dist" / "desktop_server_app" if GIT_ROOT else None
+DESKTOP_INSTALLERS = {
+    "macos": {
+        "filename": "Code Bridge Server.dmg",
+        "media_type": "application/x-apple-diskimage",
+    },
+    "windows": {
+        "filename": "Code Bridge Server.msi",
+        "media_type": "application/x-msi",
+    },
+}
 
 
 async def _restart_server_delayed(delay: float = 1.0) -> None:
@@ -95,6 +106,34 @@ async def get_dashboard() -> HTMLResponse:
     External access via Cloudflare Tunnel is blocked for security.
     """
     return HTMLResponse(content=render_dashboard_html())
+
+
+@router.get(
+    "/downloads/desktop-server/{platform}",
+    include_in_schema=False,
+    dependencies=[Depends(require_local_access)],
+)
+async def download_desktop_server_installer(platform: str) -> FileResponse:
+    """Download packaged desktop server installers from local artifacts."""
+    installer = DESKTOP_INSTALLERS.get(platform.lower())
+    if installer is None:
+        raise HTTPException(status_code=404, detail="Unsupported desktop installer platform")
+    if DESKTOP_ARTIFACTS_DIR is None:
+        raise HTTPException(status_code=404, detail="Desktop installer artifacts are not available")
+
+    filename = installer["filename"]
+    artifact_path = DESKTOP_ARTIFACTS_DIR / filename
+    if not artifact_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Desktop installer artifact not found: {filename}",
+        )
+
+    return FileResponse(
+        artifact_path,
+        media_type=installer["media_type"],
+        filename=filename,
+    )
 
 
 @router.get(

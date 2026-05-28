@@ -129,6 +129,7 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_start_tunnel_for_current_server_uses_config_port(self):
         with (
             patch.object(remote_access_service, "get_config", return_value=SimpleNamespace(api_port=9191)),
+            patch("system.system_settings_service.get_allow_ip_login", return_value=False),
             patch.object(
                 remote_access_service,
                 "start_tunnel_for_remote_access",
@@ -155,15 +156,38 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.message, "No tunnel running")
 
-    async def test_register_pairing_remote_access_returns_empty_when_disabled(self):
+    async def test_register_pairing_remote_access_returns_error_when_disabled(self):
         with patch.object(remote_access_service, "FIREBASE_AVAILABLE", False):
             result = await remote_access_service.register_pairing_remote_access(
                 firebase_id_token="token",
-                firebase_refresh_token=None,
+                firebase_refresh_token="refresh-token",
                 local_port=8080,
             )
 
-        self.assertEqual(result.as_response_fields(), {})
+        self.assertEqual(result.status_code, 503)
+        self.assertEqual(
+            result.as_response_fields(),
+            {
+                "firebase_registered": False,
+                "firebase_error": "Firebase is not available",
+            },
+        )
+
+    async def test_register_pairing_remote_access_requires_refresh_token(self):
+        result = await remote_access_service.register_pairing_remote_access(
+            firebase_id_token="token",
+            firebase_refresh_token=None,
+            local_port=8080,
+        )
+
+        self.assertEqual(result.status_code, 400)
+        self.assertEqual(
+            result.as_response_fields(),
+            {
+                "firebase_registered": False,
+                "firebase_error": "Firebase refresh token is required",
+            },
+        )
 
     async def test_register_pairing_remote_access_returns_error_on_auth_failure(self):
         fake_firebase_auth = MagicMock()
@@ -176,10 +200,11 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
         ):
             result = await remote_access_service.register_pairing_remote_access(
                 firebase_id_token="token",
-                firebase_refresh_token=None,
+                firebase_refresh_token="refresh-token",
                 local_port=8080,
             )
 
+        self.assertEqual(result.status_code, 401)
         self.assertEqual(
             result.as_response_fields(),
             {
@@ -187,6 +212,37 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
                 "firebase_error": "Token verification failed",
             },
         )
+
+    async def test_register_pairing_remote_access_does_not_persist_when_registration_fails(self):
+        fake_firebase_auth = MagicMock()
+        fake_firebase_auth.is_initialized = True
+        fake_firebase_auth.user_id = None
+        fake_firebase_auth.email = None
+        fake_firebase_auth.verify_id_token = AsyncMock(
+            return_value={"user_id": "user-1", "email": "user@example.com"}
+        )
+        fake_firebase_auth.authenticate_with_token = AsyncMock(return_value=True)
+
+        with (
+            patch.object(remote_access_service, "FIREBASE_AVAILABLE", True),
+            patch.object(remote_access_service, "get_firebase_auth", return_value=fake_firebase_auth),
+            patch.object(
+                remote_access_service,
+                "register_device_for_remote_access_with_token",
+                new=AsyncMock(return_value=False),
+            ) as mock_register,
+        ):
+            result = await remote_access_service.register_pairing_remote_access(
+                firebase_id_token="token",
+                firebase_refresh_token="refresh-token",
+                local_port=8080,
+            )
+
+        self.assertEqual(result.status_code, 502)
+        self.assertEqual(result.firebase_registered, False)
+        self.assertEqual(result.firebase_error, "Firebase registration failed")
+        mock_register.assert_awaited_once()
+        fake_firebase_auth.authenticate_with_token.assert_not_awaited()
 
     async def test_login_for_remote_access_returns_400_when_firebase_unavailable(self):
         payload = remote_access_service.RemoteAccessLoginPayload(
@@ -342,6 +398,11 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_verify_pairing_flow_merges_remote_registration_fields(self):
         fake_pairing = MagicMock()
+        fake_pairing.validate_pair_token.return_value = PairingVerifyTokenResult(
+            success=True,
+            status_code=200,
+            server_id="server-1",
+        )
         fake_pairing.verify_pair_token.return_value = PairingVerifyTokenResult(
             success=True,
             status_code=200,
@@ -388,6 +449,47 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
             local_port=9090,
             force_replace=True,
         )
+
+    async def test_verify_pairing_flow_fails_before_consuming_token_when_firebase_registration_fails(self):
+        fake_pairing = MagicMock()
+        fake_pairing.validate_pair_token.return_value = PairingVerifyTokenResult(
+            success=True,
+            status_code=200,
+            server_id="server-1",
+        )
+
+        with (
+            patch.object(
+                remote_access_service,
+                "check_ownership_conflict",
+                new=AsyncMock(return_value=(False, None)),
+            ),
+            patch.object(
+                remote_access_service,
+                "register_pairing_remote_access",
+                new=AsyncMock(
+                    return_value=remote_access_service.PairingRemoteAccessResult(
+                        firebase_registered=False,
+                        firebase_error="Firebase registration failed",
+                        status_code=502,
+                    )
+                ),
+            ),
+        ):
+            result = await remote_access_service.verify_pairing_flow(
+                pairing_service=fake_pairing,
+                pair_token="valid",
+                client_id="c1",
+                device_name="phone",
+                firebase_id_token="id-token",
+                firebase_refresh_token="refresh-token",
+                local_port=9090,
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.status_code, 502)
+        self.assertEqual(result.error, "Firebase registration failed")
+        fake_pairing.verify_pair_token.assert_not_called()
 
     async def test_verify_pairing_flow_for_current_server_uses_config_port(self):
         fake_pairing = MagicMock()

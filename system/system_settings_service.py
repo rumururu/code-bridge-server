@@ -14,6 +14,11 @@ from llm.llm_settings import (
     set_selected_llm,
 )
 from core.base_result import BaseRouteResult
+from system.llm_provider_install_jobs import (
+    INVALID_INSTALL_METHOD,
+    UNKNOWN_PROVIDER,
+    get_llm_provider_install_job_manager,
+)
 
 # Setting keys
 SETTING_ALLOW_IP_LOGIN = "allow_ip_login"
@@ -57,6 +62,45 @@ def update_llm_selection_for_current_server(company_id: str, model: str) -> Syst
         return SystemSettingsResult.error(400, str(exc))
 
     return SystemSettingsResult.ok(payload)
+
+
+def _parse_install_validation_error(message: str) -> tuple[str | None, str]:
+    if ": " not in message:
+        return None, message
+    code, detail = message.split(": ", 1)
+    if code in {UNKNOWN_PROVIDER, INVALID_INSTALL_METHOD}:
+        return code, detail
+    return None, message
+
+
+async def install_llm_provider_for_current_server(provider_id: str, method: str) -> SystemSettingsResult:
+    """Start an async job to install a supported LLM provider CLI."""
+    manager = get_llm_provider_install_job_manager()
+    try:
+        job = await manager.start_install(provider_id, method)
+    except ValueError as exc:
+        error_code, detail = _parse_install_validation_error(str(exc))
+        return SystemSettingsResult.error(400, detail, error_code=error_code)
+
+    return SystemSettingsResult.ok(manager.serialize(job), status_code=202)
+
+
+def get_llm_provider_install_job_for_current_server(job_id: str) -> SystemSettingsResult:
+    """Return an async provider install job status."""
+    manager = get_llm_provider_install_job_manager()
+    job = manager.get_job(job_id)
+    if job is None:
+        return SystemSettingsResult.error(404, "Install job not found")
+    return SystemSettingsResult.ok(manager.serialize(job))
+
+
+async def cancel_llm_provider_install_job_for_current_server(job_id: str) -> SystemSettingsResult:
+    """Cancel a queued/running provider install job."""
+    manager = get_llm_provider_install_job_manager()
+    job = await manager.cancel_job(job_id)
+    if job is None:
+        return SystemSettingsResult.error(404, "Install job not found")
+    return SystemSettingsResult.ok(manager.serialize(job))
 
 
 def get_codex_settings_for_current_server() -> SystemSettingsResult:

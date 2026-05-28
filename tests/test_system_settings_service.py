@@ -45,6 +45,24 @@ class SystemSettingsServiceTest(unittest.TestCase):
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.payload, expected_payload)
 
+    def test_get_llm_provider_install_job_missing(self):
+        with patch("system.system_settings_service.get_llm_provider_install_job_manager") as manager_factory:
+            manager_factory.return_value.get_job.return_value = None
+            result = system_settings_service.get_llm_provider_install_job_for_current_server("missing")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.status_code, 404)
+        self.assertEqual(result.payload.get("error"), "Install job not found")
+
+
+class SystemSettingsServiceAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_install_llm_provider_for_current_server_invalid_method(self):
+        result = await system_settings_service.install_llm_provider_for_current_server("openai", "brew")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.status_code, 400)
+        self.assertEqual(result.payload.get("error_code"), "invalid_install_method")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,5 @@
 # Code Bridge Server - Installation Script for Windows
-# Usage: iwr -useb https://raw.githubusercontent.com/rumururu/code-bridge-server/main/install/install.ps1 | iex
+# Usage: iwr -useb https://raw.githubusercontent.com/rumururu/code-bridge-server/8817ce8/install/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 

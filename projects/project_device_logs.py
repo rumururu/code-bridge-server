@@ -19,6 +19,13 @@ def device_run_log_path(project_name: str, device_id: str) -> Path:
     return Path("/tmp") / f"code_bridge_device_run_{safe_project}_{safe_device}.log"
 
 
+def device_preview_screenshot_path(project_name: str, device_id: str) -> Path:
+    """Build canonical screenshot path for a project/device preview."""
+    safe_project = sanitize_log_name(project_name)
+    safe_device = sanitize_log_name(device_id)
+    return Path("/tmp") / f"code_bridge_preview_{safe_project}_{safe_device}.png"
+
+
 def read_log_tail(
     log_path: str | Path,
     max_lines: int = 120,

@@ -5,6 +5,9 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
+from agent.tool_artifacts import record_tool_action_result
+from audit.route_audit import record_api_action
+from core.base_result import BaseRouteResult
 from preview.preview_route_service import (
     authorize_project_preview_request_for_current_server,
     create_preview_token_for_current_server,
@@ -22,10 +25,37 @@ router = APIRouter(tags=["preview"])
 @router.post("/api/preview/token")
 async def create_preview_token(
     project_name: str = Query(..., alias="project"),
+    run_id: str | None = None,
     api_key: str = Depends(verify_api_key),
 ) -> dict[str, Any]:
     """Generate a preview token for accessing dev server preview."""
     result = create_preview_token_for_current_server(project_name, api_key=api_key)
+    details = {"project_name": project_name}
+    safe_payload = {
+        "success": result.success,
+        "project": project_name,
+        "expires_in_minutes": result.payload.get("expires_in_minutes"),
+        "preview_path": f"/preview/{project_name}/",
+    }
+    record_api_action(
+        operation="preview.token",
+        project_name=project_name,
+        run_id=run_id,
+        details=details,
+        success=result.success,
+        status_code=result.status_code,
+    )
+    record_tool_action_result(
+        run_id=run_id,
+        operation="preview.token",
+        project_name=project_name,
+        details=details,
+        result=BaseRouteResult(
+            success=result.success,
+            status_code=result.status_code,
+            payload=safe_payload if result.success else result.payload,
+        ),
+    )
     if not result.success:
         raise HTTPException(status_code=result.status_code, detail=result.payload.get("error"))
     return result.payload

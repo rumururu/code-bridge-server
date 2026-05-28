@@ -2,15 +2,19 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
-from fastapi.responses import Response
+from fastapi import APIRouter, Body, Depends, Query
+from fastapi.responses import JSONResponse, Response
 from auth.firebase_auth import get_firebase_auth
-from models import CodexSettingsUpdate, IpLoginUpdate, LlmSelectionUpdate
+from llm.llm_commands import execute_llm_command, get_llm_command_snapshot
+from models import CodexSettingsUpdate, IpLoginUpdate, LlmProviderInstallRequest, LlmSelectionUpdate
 from system.system_settings_service import (
+    cancel_llm_provider_install_job_for_current_server,
     get_codex_settings_for_current_server,
     get_heartbeat_settings_for_current_server,
     get_ip_login_settings_for_current_server,
+    get_llm_provider_install_job_for_current_server,
     get_llm_options_for_current_server,
+    install_llm_provider_for_current_server,
     update_codex_settings_for_current_server,
     update_heartbeat_settings_for_current_server,
     update_ip_login_settings_for_current_server,
@@ -43,6 +47,34 @@ async def get_llm_options() -> dict[str, Any] | Response:
     return as_route_response(result)
 
 
+@router.get("/llm/commands", dependencies=[Depends(verify_api_key)], response_model=None)
+async def get_llm_commands(
+    provider_id: str | None = None,
+    model: str | None = None,
+    scope: str = Query("project", pattern="^(global|project)$"),
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """Return Code Bridge and discovered provider slash commands."""
+    return get_llm_command_snapshot(
+        provider_id=provider_id,
+        model=model,
+        scope=scope,
+        refresh=refresh,
+    )
+
+
+@router.post("/llm/commands/execute", dependencies=[Depends(verify_api_key)], response_model=None)
+async def execute_llm_command_route(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Execute a Code Bridge slash command."""
+    return execute_llm_command(
+        name=str(payload.get("name") or payload.get("command") or ""),
+        provider_id=payload.get("provider_id"),
+        model=payload.get("model"),
+        scope=str(payload.get("scope") or "project"),
+        project_name=payload.get("project_name"),
+    )
+
+
 @router.put("/llm/selection", dependencies=[Depends(verify_api_key)], response_model=None)
 async def update_llm_selection(payload: LlmSelectionUpdate) -> dict[str, Any] | Response:
     """Select active LLM provider and model for chat."""
@@ -50,7 +82,31 @@ async def update_llm_selection(payload: LlmSelectionUpdate) -> dict[str, Any] | 
     return as_route_response(result)
 
 
+@router.post("/llm/providers/{provider_id}/install", dependencies=[Depends(verify_api_key)], response_model=None)
+async def install_llm_provider(provider_id: str, payload: LlmProviderInstallRequest) -> dict[str, Any] | Response:
+    """Start an async job to install one supported LLM provider CLI."""
+    result = await install_llm_provider_for_current_server(provider_id, payload.method)
+    if result.success:
+        return JSONResponse(status_code=result.status_code, content=result.payload)
+    return as_route_response(result)
+
+
+@router.get("/llm/providers/install/jobs/{job_id}", dependencies=[Depends(verify_api_key)], response_model=None)
+async def get_llm_provider_install_job(job_id: str) -> dict[str, Any] | Response:
+    """Return provider CLI install job status."""
+    result = get_llm_provider_install_job_for_current_server(job_id)
+    return as_route_response(result)
+
+
+@router.post("/llm/providers/install/jobs/{job_id}/cancel", dependencies=[Depends(verify_api_key)], response_model=None)
+async def cancel_llm_provider_install_job(job_id: str) -> dict[str, Any] | Response:
+    """Cancel a queued/running provider CLI install job."""
+    result = await cancel_llm_provider_install_job_for_current_server(job_id)
+    return as_route_response(result)
+
+
 @router.get("/llm/codex/settings", dependencies=[Depends(verify_api_key)], response_model=None)
+@router.get("/llm/agent/settings", dependencies=[Depends(verify_api_key)], response_model=None)
 async def get_codex_settings() -> dict[str, Any] | Response:
     """Get Codex-specific settings."""
     result = get_codex_settings_for_current_server()
@@ -58,6 +114,7 @@ async def get_codex_settings() -> dict[str, Any] | Response:
 
 
 @router.put("/llm/codex/settings", dependencies=[Depends(verify_api_key)], response_model=None)
+@router.put("/llm/agent/settings", dependencies=[Depends(verify_api_key)], response_model=None)
 async def update_codex_settings(payload: CodexSettingsUpdate) -> dict[str, Any] | Response:
     """Update Codex-specific settings."""
     result = update_codex_settings_for_current_server(payload.sandbox_mode)

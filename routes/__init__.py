@@ -8,6 +8,16 @@ from .system_inspect import router as system_inspect_router
 from .preview import router as preview_router
 from .chat_ws import router as chat_ws_router
 from .chat_sessions import router as chat_sessions_router
+from .agents import router as agents_router
+from .agent_ws import router as agent_ws_router
+from .app_builder import router as app_builder_router
+from .workspaces import router as workspaces_router
+from .approvals import router as approvals_router
+from .audit import router as audit_router
+from .policies import router as policies_router
+from .usage import router as usage_router
+from .git import router as git_router
+from .terminal import router as terminal_router
 from .dashboard import router as dashboard_router
 from .dashboard_auth import router as dashboard_auth_router
 from .filesystem import router as filesystem_router
@@ -35,11 +45,21 @@ def register_routers(app) -> None:
     app.include_router(system_inspect_router)
     app.include_router(chat_ws_router)
     app.include_router(chat_sessions_router)
+    app.include_router(workspaces_router)
+    app.include_router(agents_router)
+    app.include_router(agent_ws_router)
+    app.include_router(app_builder_router)
+    app.include_router(approvals_router)
+    app.include_router(audit_router)
+    app.include_router(policies_router)
+    app.include_router(usage_router)
     app.include_router(mermaid_router)
     # Incremental migration
     app.include_router(pairing_router)
     app.include_router(projects_router)
     app.include_router(files_router)
+    app.include_router(git_router)
+    app.include_router(terminal_router)
     app.include_router(devices_router)
     app.include_router(scrcpy_proxy_router)
     app.include_router(filesystem_router)
@@ -80,11 +100,21 @@ def register_api_routers(app) -> None:
     app.include_router(system_inspect_router)
     app.include_router(chat_ws_router)
     app.include_router(chat_sessions_router)
+    app.include_router(workspaces_router)
+    app.include_router(agents_router)
+    app.include_router(agent_ws_router)
+    app.include_router(app_builder_router)
+    app.include_router(approvals_router)
+    app.include_router(audit_router)
+    app.include_router(policies_router)
+    app.include_router(usage_router)
     app.include_router(mermaid_router)
     # Feature routers
     app.include_router(pairing_router)
     app.include_router(projects_router)
     app.include_router(files_router)
+    app.include_router(git_router)
+    app.include_router(terminal_router)
     app.include_router(devices_router)
     app.include_router(scrcpy_proxy_router)
     app.include_router(filesystem_router)

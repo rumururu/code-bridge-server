@@ -1,6 +1,6 @@
 #!/bin/bash
 # Code Bridge Server - Installation Script for macOS/Linux
-# Usage: curl -fsSL https://raw.githubusercontent.com/rumururu/code-bridge-server/main/install/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/rumururu/code-bridge-server/8817ce8/install/install.sh | bash
 
 set -e
 

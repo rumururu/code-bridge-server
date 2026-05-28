@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -58,6 +59,52 @@ class ProjectRegistryServiceSyncTest(unittest.TestCase):
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.payload.get("name"), "demo")
         fake_db.create.assert_called_once()
+
+    def test_create_project_folder_for_current_server_creates_directory_and_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fake_db = MagicMock()
+            fake_db.get_all.return_value = []
+            fake_db.create.return_value = {
+                "name": "demo_app",
+                "path": str(root / "demo_app"),
+                "type": "other",
+            }
+
+            with patch(
+                "projects.project_action_service.validate_accessible_path",
+                return_value=True,
+            ):
+                result = project_action_service.create_project_folder_for_current_server(
+                    root_path=str(root),
+                    folder_name="demo app",
+                    project_db=fake_db,
+                )
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.status_code, 201)
+            self.assertTrue((root / "demo_app").is_dir())
+            fake_db.create.assert_called_once()
+            self.assertEqual(fake_db.create.call_args.args[0]["name"], "demo_app")
+
+    def test_create_project_folder_for_current_server_rejects_existing_folder(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "demo").mkdir()
+
+            with patch(
+                "projects.project_action_service.validate_accessible_path",
+                return_value=True,
+            ):
+                result = project_action_service.create_project_folder_for_current_server(
+                    root_path=str(root),
+                    folder_name="demo",
+                    project_db=MagicMock(),
+                )
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.status_code, 409)
+            self.assertIn("already exists", result.payload.get("error", ""))
 
     def test_import_project_records_for_current_server_empty_paths(self):
         result = project_action_service.import_project_records_for_current_server([])

@@ -12,11 +12,11 @@ from pathlib import Path
 import uvicorn
 
 from core.config import get_config
+from core.runtime_paths import SERVER_DIR, runtime_path
 
 logger = logging.getLogger(__name__)
 
-# PID file path (same directory as server_info.json)
-PID_FILE = Path(__file__).parent / ".server.pid"
+PID_FILE = runtime_path(".server.pid", SERVER_DIR / ".server.pid")
 
 
 def _get_running_server_pid() -> int | None:
@@ -249,6 +249,7 @@ async def run_dual_servers() -> None:
         host=config.dashboard_host,  # localhost only, not tunnel-exposed
         port=dashboard_port,
         log_level=config.log_level,
+        access_log=False,
         # No reload in dual-server mode (not supported with programmatic run)
     )
 
@@ -257,6 +258,7 @@ async def run_dual_servers() -> None:
         host=config.api_host,  # External access via tunnel
         port=api_port,
         log_level=config.log_level,
+        access_log=False,
     )
 
     dashboard_server = uvicorn.Server(dashboard_config)
@@ -430,6 +432,7 @@ def main() -> None:
                 port=port,
                 reload=config.debug,
                 log_level=config.log_level,
+                access_log=False,
             )
         finally:
             _remove_pid_file()

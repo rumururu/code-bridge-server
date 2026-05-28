@@ -50,6 +50,18 @@ def _firebase_unavailable_action_result() -> RemoteAccessActionResult:
     )
 
 
+def _pairing_remote_access_failure(
+    error: str,
+    *,
+    status_code: int,
+) -> PairingRemoteAccessResult:
+    return PairingRemoteAccessResult(
+        firebase_registered=False,
+        firebase_error=error,
+        status_code=status_code,
+    )
+
+
 def parse_remote_access_login_payload(body: Any) -> tuple[RemoteAccessLoginPayload | None, str | None]:
     """Validate and normalize remote access login body."""
     if not isinstance(body, dict):
@@ -110,6 +122,45 @@ async def register_device_for_remote_access(
     pairing = get_pairing_service()
     local_url = f"http://{pairing.get_local_ip()}:{local_port}"
     return await firebase_auth.register_device(tunnel_url, local_url)
+
+
+async def register_device_for_remote_access_with_token(
+    firebase_auth: Any,
+    *,
+    user_id: str,
+    id_token: str,
+    local_port: int,
+    autostart_tunnel: bool,
+) -> bool:
+    """Register the current server device before persisting server credentials."""
+    from firebase import device_registration
+
+    project_id = firebase_auth.project_id
+    if not project_id:
+        logger.warning("Cannot register Firebase device: missing project_id")
+        return False
+
+    try:
+        server_id = firebase_auth.server_id
+    except Exception as exc:
+        logger.warning("Cannot register Firebase device: missing server_id: %s", exc)
+        return False
+
+    tunnel_url = await _resolve_tunnel_url_for_registration(
+        local_port=local_port,
+        autostart_tunnel=autostart_tunnel,
+    )
+    pairing = get_pairing_service()
+    local_url = f"http://{pairing.get_local_ip()}:{local_port}"
+
+    return await device_registration.register_device(
+        project_id=project_id,
+        user_id=user_id,
+        server_id=server_id,
+        id_token=id_token,
+        tunnel_url=tunnel_url,
+        local_url=local_url,
+    )
 
 
 async def check_ownership_conflict(
@@ -176,54 +227,112 @@ async def register_pairing_remote_access(
         PairingRemoteAccessResult with ownership_conflict=True if server
         is already paired with a different account and force_replace is False
     """
-    if not firebase_id_token or not FIREBASE_AVAILABLE:
-        return PairingRemoteAccessResult()
+    if not isinstance(firebase_id_token, str) or not firebase_id_token.strip():
+        return _pairing_remote_access_failure(
+            "Missing Firebase ID token",
+            status_code=400,
+        )
+    firebase_id_token = firebase_id_token.strip()
+
+    if not isinstance(firebase_refresh_token, str) or not firebase_refresh_token.strip():
+        return _pairing_remote_access_failure(
+            "Firebase refresh token is required",
+            status_code=400,
+        )
+    firebase_refresh_token = firebase_refresh_token.strip()
+
+    if not FIREBASE_AVAILABLE:
+        return _pairing_remote_access_failure(
+            "Firebase is not available",
+            status_code=503,
+        )
 
     firebase_auth = get_firebase_auth()
     if not firebase_auth:
-        return PairingRemoteAccessResult()
+        return _pairing_remote_access_failure(
+            "Firebase auth not initialized",
+            status_code=503,
+        )
 
-    # Check for ownership conflict before authenticating
+    if not firebase_auth.is_initialized:
+        try:
+            await firebase_auth.initialize()
+        except Exception as exc:
+            logger.warning("Firebase initialization failed during pairing: %s", exc)
+            return _pairing_remote_access_failure(
+                "Firebase initialization failed",
+                status_code=503,
+            )
+
+    try:
+        token_info = await firebase_auth.verify_id_token(firebase_id_token)
+    except Exception as exc:
+        logger.warning("Firebase token verification failed during pairing: %s", exc)
+        return _pairing_remote_access_failure(
+            "Token verification failed",
+            status_code=401,
+        )
+
+    if not token_info:
+        return _pairing_remote_access_failure(
+            "Token verification failed",
+            status_code=401,
+        )
+
+    new_user_id = token_info.get("user_id")
+    if not isinstance(new_user_id, str) or not new_user_id:
+        return _pairing_remote_access_failure(
+            "Token verification failed",
+            status_code=401,
+        )
+
+    # Check for ownership conflict before persisting authentication.
     if not force_replace:
-        # Check if Firebase is initialized before verifying token
-        if not firebase_auth.is_initialized:
-            try:
-                await firebase_auth.initialize()
-            except Exception:
-                # If initialization fails, skip ownership check and proceed
-                pass
+        current_owner_id = firebase_auth.user_id
+        current_owner_email = firebase_auth.email
 
-        # Verify the incoming token to get new user's info (without storing)
-        if firebase_auth.is_initialized:
-            token_info = await firebase_auth.verify_id_token(firebase_id_token)
-        else:
-            token_info = None
+        if current_owner_id and current_owner_id != new_user_id:
+            logger.info(
+                "Ownership conflict: current=%s, new=%s",
+                current_owner_email or current_owner_id,
+                token_info.get("email") or new_user_id,
+            )
+            return PairingRemoteAccessResult(
+                ownership_conflict=True,
+                current_owner_email=current_owner_email,
+            )
 
-        if token_info:
-            new_user_id = token_info.get("user_id")
-            current_owner_id = firebase_auth.user_id
-            current_owner_email = firebase_auth.email
+    try:
+        registered = await register_device_for_remote_access_with_token(
+            firebase_auth,
+            user_id=new_user_id,
+            id_token=firebase_id_token,
+            local_port=local_port,
+            autostart_tunnel=True,
+        )
+    except Exception as exc:
+        logger.warning("Firebase device registration failed during pairing: %s", exc)
+        registered = False
 
-            # If there's a different owner, return conflict
-            if current_owner_id and new_user_id and current_owner_id != new_user_id:
-                logger.info(
-                    "Ownership conflict: current=%s, new=%s",
-                    current_owner_email or current_owner_id,
-                    token_info.get("email") or new_user_id,
-                )
-                return PairingRemoteAccessResult(
-                    ownership_conflict=True,
-                    current_owner_email=current_owner_email,
-                )
+    if not registered:
+        return _pairing_remote_access_failure(
+            "Firebase registration failed",
+            status_code=502,
+        )
 
-    auth_success = await firebase_auth.authenticate_with_token(
-        firebase_id_token,
-        refresh_token=firebase_refresh_token,
-    )
+    try:
+        auth_success = await firebase_auth.authenticate_with_token(
+            firebase_id_token,
+            refresh_token=firebase_refresh_token,
+        )
+    except Exception as exc:
+        logger.warning("Firebase token persistence failed during pairing: %s", exc)
+        auth_success = False
+
     if not auth_success:
-        return PairingRemoteAccessResult(
-            firebase_registered=False,
-            firebase_error="Token verification failed",
+        return _pairing_remote_access_failure(
+            "Token verification failed",
+            status_code=401,
         )
 
     # Add to paired accounts for multi-account support
@@ -244,15 +353,9 @@ async def register_pairing_remote_access(
     except Exception as exc:
         logger.warning("Failed to add to paired accounts: %s", exc)
 
-    registered = await register_device_for_remote_access(
-        firebase_auth,
-        local_port=local_port,
-        autostart_tunnel=True,
-    )
-    if registered:
-        logger.info("Server registered to Firebase for user: %s", firebase_auth.get_status().get('user_id'))
+    logger.info("Server registered to Firebase for user: %s", firebase_auth.get_status().get('user_id'))
 
-    return PairingRemoteAccessResult(firebase_registered=registered)
+    return PairingRemoteAccessResult(firebase_registered=True)
 
 
 async def login_for_remote_access(
@@ -391,8 +494,18 @@ async def verify_pairing_flow(
     Args:
         force_replace: If True, replace existing server owner without confirmation
     """
-    # IMPORTANT: Check ownership conflict BEFORE consuming the pair token
-    # This prevents the token from being marked "used" when there's a conflict
+    if firebase_id_token:
+        validate_result = pairing_service.validate_pair_token(pair_token)
+        if not validate_result.success:
+            error_message = validate_result.error or "Pairing failed"
+            return PairVerifyFlowResult(
+                success=False,
+                status_code=validate_result.status_code,
+                error=error_message,
+            )
+
+    # IMPORTANT: Check ownership conflict BEFORE consuming the pair token.
+    # This prevents the token from being marked "used" when there's a conflict.
     if firebase_id_token and not force_replace:
         has_conflict, current_owner_email = await check_ownership_conflict(
             firebase_id_token
@@ -409,21 +522,6 @@ async def verify_pairing_flow(
                 ownership_conflict=True,
                 current_owner_email=current_owner_email,
             )
-
-    # Now safe to consume the pair token
-    verify_result = pairing_service.verify_pair_token(
-        pair_token=pair_token,
-        client_id=client_id,
-        device_name=device_name,
-    )
-
-    if not verify_result.success:
-        error_message = verify_result.error or "Pairing failed"
-        return PairVerifyFlowResult(
-            success=False,
-            status_code=verify_result.status_code,
-            error=error_message,
-        )
 
     firebase_registered: Optional[bool] = None
     firebase_error: Optional[str] = None
@@ -446,26 +544,49 @@ async def verify_pairing_flow(
             return PairVerifyFlowResult(
                 success=True,
                 status_code=200,
-                api_key=verify_result.api_key,
-                server_id=verify_result.server_id,
-                client_id=verify_result.client_id,
+                api_key=None,
+                server_id=pairing_service.server_id,
+                client_id=None,
                 ownership_conflict=True,
                 current_owner_email=remote_result.current_owner_email,
             )
 
-        # Update paired client with Firebase user info
-        if firebase_registered and FIREBASE_AVAILABLE:
-            firebase_auth = get_firebase_auth()
-            if firebase_auth:
-                status = firebase_auth.get_status()
-                firebase_user_id = status.get("user_id")
-                firebase_email = status.get("email")
-                if firebase_user_id or firebase_email:
-                    pairing_service.update_client_firebase_user(
-                        verify_result.client_id,
-                        firebase_user_id=firebase_user_id,
-                        firebase_email=firebase_email,
-                    )
+        if not firebase_registered:
+            return PairVerifyFlowResult(
+                success=False,
+                status_code=remote_result.status_code,
+                error=firebase_error or "Firebase registration failed",
+            )
+
+    # Now safe to consume the pair token and store the API key.
+    verify_result = pairing_service.verify_pair_token(
+        pair_token=pair_token,
+        client_id=client_id,
+        device_name=device_name,
+    )
+
+    if not verify_result.success:
+        error_message = verify_result.error or "Pairing failed"
+        return PairVerifyFlowResult(
+            success=False,
+            status_code=verify_result.status_code,
+            error=error_message,
+        )
+
+    # Update paired client with Firebase user info only after Firestore registration
+    # and API key issuance have both succeeded.
+    if firebase_registered and FIREBASE_AVAILABLE:
+        firebase_auth = get_firebase_auth()
+        if firebase_auth:
+            status = firebase_auth.get_status()
+            firebase_user_id = status.get("user_id")
+            firebase_email = status.get("email")
+            if firebase_user_id or firebase_email:
+                pairing_service.update_client_firebase_user(
+                    verify_result.client_id,
+                    firebase_user_id=firebase_user_id,
+                    firebase_email=firebase_email,
+                )
 
     return PairVerifyFlowResult(
         success=True,

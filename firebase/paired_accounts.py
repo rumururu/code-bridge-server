@@ -3,7 +3,8 @@
 This module manages multiple Firebase accounts paired with a single server.
 Each paired account has its own credentials and can receive server URL updates.
 
-Storage: ~/.code-bridge/paired_accounts.json
+Storage: CODEBRIDGE_APP_SUPPORT_DIR/paired_accounts.json in packaged desktop
+mode, otherwise ~/.code-bridge/paired_accounts.json.
 """
 
 from __future__ import annotations
@@ -18,12 +19,14 @@ from typing import Any, Optional
 
 import httpx
 
+from core.runtime_paths import runtime_path
+
 from . import device_registration
 
 logger = logging.getLogger(__name__)
 
 # Default storage path
-PAIRED_ACCOUNTS_PATH = Path.home() / ".code-bridge" / "paired_accounts.json"
+PAIRED_ACCOUNTS_PATH = runtime_path("paired_accounts.json", Path.home() / ".code-bridge" / "paired_accounts.json")
 
 
 @dataclass

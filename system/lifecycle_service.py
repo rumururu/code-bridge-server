@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
+from core.runtime_paths import SERVER_DIR, runtime_path
 from llm.claude_session import get_session_manager
 from remote.heartbeat_settings import get_heartbeat_interval, set_heartbeat_interval
 from .optional_services import (
@@ -88,15 +89,13 @@ async def initialize_firebase_for_current_server(
 
 def _is_first_run() -> bool:
     """Check if this is the first server run (no .initialized marker file)."""
-    from pathlib import Path
-    marker_file = Path(__file__).parent / ".initialized"
+    marker_file = runtime_path(".initialized", SERVER_DIR / "system" / ".initialized")
     return not marker_file.exists()
 
 
 def _mark_initialized() -> None:
     """Create .initialized marker file to indicate server has been run before."""
-    from pathlib import Path
-    marker_file = Path(__file__).parent / ".initialized"
+    marker_file = runtime_path(".initialized", SERVER_DIR / "system" / ".initialized")
     marker_file.touch()
 
 

@@ -1,10 +1,13 @@
 """Configuration loader for Code Bridge server."""
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from core.runtime_paths import SERVER_DIR, runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -12,13 +15,16 @@ logger = logging.getLogger(__name__)
 VERSION = "1.2.2"
 
 
+def _is_desktop_app() -> bool:
+    return os.environ.get("CODEBRIDGE_DESKTOP_APP") == "1"
+
+
 class Config:
     """Server configuration from config.yaml."""
 
     def __init__(self, config_path: str | None = None):
         if config_path is None:
-            # Look for config.yaml in parent directory
-            config_path = Path(__file__).parent.parent / "config.yaml"
+            config_path = runtime_path("config.yaml", SERVER_DIR / "config.yaml")
 
         self._config = self._load_config(config_path)
         self._migration_done = False
@@ -36,14 +42,22 @@ class Config:
 
     def _create_default_config(self, path: Path) -> None:
         """Create default config.yaml with sensible defaults."""
+        debug_default = "false" if _is_desktop_app() else "true"
+        cors_origins = (
+            '["http://localhost:8766", "http://127.0.0.1:8766"]'
+            if _is_desktop_app()
+            else '["*"]'
+        )
         default_config = """\
 server:
   host: "0.0.0.0"
+  api_host: "0.0.0.0"
+  dashboard_host: "127.0.0.1"
   port: 8766
   server_name: "Code Bridge"
-  debug: true
+  debug: {debug_default}
   log_level: "info"
-  cors_origins: ["*"]
+  cors_origins: {cors_origins}
 
   # LLM usage tracking
   weekly_budget_usd: 100.0
@@ -51,7 +65,7 @@ server:
 
   # Heartbeat interval for presence updates (minutes)
   heartbeat_interval_minutes: 15
-"""
+""".format(debug_default=debug_default, cors_origins=cors_origins)
         path.write_text(default_config)
 
     def _get_server_value(self, key: str, default: Any) -> Any:
@@ -144,13 +158,18 @@ server:
 
     @property
     def cors_origins(self) -> list[str]:
-        """Get CORS allowed origins. Defaults to ["*"] for development."""
-        return self._get_server_value("cors_origins", ["*"])
+        """Get CORS allowed origins."""
+        default = (
+            ["http://localhost:8766", "http://127.0.0.1:8766"]
+            if _is_desktop_app()
+            else ["*"]
+        )
+        return self._get_server_value("cors_origins", default)
 
     @property
     def debug(self) -> bool:
-        """Get debug mode. Defaults to True."""
-        return self._get_server_value("debug", True)
+        """Get debug mode. Defaults to False in packaged desktop mode."""
+        return self._get_server_value("debug", not _is_desktop_app())
 
     @property
     def log_level(self) -> str:

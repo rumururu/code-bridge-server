@@ -35,6 +35,35 @@ CODEX_SANDBOX_MODES = [
 ]
 DEFAULT_CODEX_SANDBOX_MODE = "workspace-write"
 
+LLM_PROVIDER_INSTALL_METHODS: dict[str, list[dict[str, Any]]] = {
+    "anthropic": [
+        {
+            "id": "npm",
+            "label": "Install with npm",
+            "command": ["npm", "install", "-g", "@anthropic-ai/claude-code"],
+        },
+    ],
+    "openai": [
+        {
+            "id": "npm",
+            "label": "Install with npm",
+            "command": ["npm", "install", "-g", "@openai/codex"],
+        },
+    ],
+    "google": [
+        {
+            "id": "brew",
+            "label": "Install with Homebrew",
+            "command": ["brew", "install", "gemini-cli"],
+        },
+        {
+            "id": "npm",
+            "label": "Install with npm",
+            "command": ["npm", "install", "-g", "@google/gemini-cli"],
+        },
+    ],
+}
+
 
 @dataclass
 class LlmProvider:
@@ -70,6 +99,16 @@ BUILTIN_PROVIDERS: list[LlmProvider] = [
             "o3",
             "o4-mini",
             "gpt-4.1",
+        ],
+    ),
+    LlmProvider(
+        id="google",
+        name="Google (Gemini)",
+        command="gemini",
+        chat_supported=True,
+        models=[
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
         ],
     ),
 ]
@@ -153,6 +192,36 @@ def _detect_claude_models_from_config() -> list[dict[str, str]]:
     return detected
 
 
+def _detect_gemini_models_from_config() -> list[dict[str, str]]:
+    """Read Gemini CLI settings/env to detect configured model preferences."""
+    detected = []
+
+    env_model = os.environ.get("GEMINI_MODEL")
+    if env_model and env_model.strip():
+        detected.append({
+            "id": env_model.strip(),
+            "source": "env",
+            "config_path": "GEMINI_MODEL",
+        })
+
+    settings_path = Path.home() / ".gemini" / "settings.json"
+    if settings_path.exists():
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+            model = settings.get("model") or settings.get("defaultModel")
+            if isinstance(model, str) and model.strip():
+                detected.append({
+                    "id": model.strip(),
+                    "source": "config",
+                    "config_path": str(settings_path),
+                })
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    return detected
+
+
 def _get_codex_models() -> list[dict[str, Any]]:
     """Get Codex models: detected from config + base list.
 
@@ -199,6 +268,30 @@ def _get_claude_models() -> list[dict[str, Any]]:
     detected = _detect_claude_models_from_config()
 
     # Combine: detected models first, then base models
+    all_models = []
+    seen_ids = set()
+
+    for m in detected:
+        if m["id"] not in seen_ids:
+            all_models.append({"id": m["id"], "label": m["id"], "source": m["source"]})
+            seen_ids.add(m["id"])
+
+    for m in base_models:
+        if m["id"] not in seen_ids:
+            all_models.append(m)
+            seen_ids.add(m["id"])
+
+    return all_models
+
+
+def _get_gemini_models() -> list[dict[str, Any]]:
+    """Get Gemini models: detected from config/env + base aliases."""
+    base_models = [
+        {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro", "source": "builtin"},
+        {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash", "source": "builtin"},
+    ]
+    detected = _detect_gemini_models_from_config()
+
     all_models = []
     seen_ids = set()
 
@@ -308,12 +401,32 @@ def _build_provider_snapshot(provider: LlmProvider) -> dict[str, Any]:
         models = _get_codex_models()
     elif provider.id == "anthropic":
         models = _get_claude_models()
+    elif provider.id == "google":
+        models = _get_gemini_models()
     else:
         # Fallback - use defined models
         models = [{"id": m, "label": m, "source": "builtin"} for m in provider.models]
 
     # Extract just IDs for validation
     model_ids = [m["id"] for m in models]
+    capabilities = {
+        "chat": provider.chat_supported,
+        "chat_supported": provider.chat_supported,
+        "sessions": provider.id in ("anthropic", "openai"),
+        "session_history": provider.id in ("anthropic", "openai"),
+        "resumable_sessions": provider.id in ("anthropic", "openai"),
+        "resume": provider.id in ("anthropic", "openai"),
+        "project_scoped_history": provider.id in ("anthropic", "openai"),
+        "raw_activity_details": True,
+        "raw_events": True,
+        "tool_events": True,
+        "permissions": provider.id == "anthropic",
+        "live_permission_prompts": provider.id == "anthropic",
+        "async_install": True,
+        "install_jobs": True,
+        "sandbox_mode": provider.id == "openai",
+        "abort": True,
+    }
 
     snapshot = {
         "id": provider.id,
@@ -325,6 +438,8 @@ def _build_provider_snapshot(provider: LlmProvider) -> dict[str, Any]:
         "status_message": error_msg,
         "models": models,
         "all_model_ids": model_ids,
+        "install_methods": LLM_PROVIDER_INSTALL_METHODS.get(provider.id, []),
+        "capabilities": capabilities,
     }
 
     # Add provider-specific settings
@@ -385,6 +500,8 @@ def get_llm_options_snapshot() -> dict[str, Any]:
             "selectable": s["selectable"],
             "status_message": s["status_message"],
             "models": s["models"],
+            "install_methods": s.get("install_methods", []),
+            "capabilities": s.get("capabilities", {}),
         }
         # Include provider-specific settings if present
         if "settings" in s:
@@ -432,6 +549,50 @@ def set_selected_llm(company_id: str, model: str) -> dict[str, Any]:
     db.set(SELECTED_MODEL_KEY, normalized_model)
 
     return get_llm_options_snapshot()
+
+
+def resolve_llm_provider_install(provider_id: str, method: str = "brew") -> dict[str, Any]:
+    """Resolve a supported provider CLI install command without running it."""
+    provider = _get_provider(provider_id)
+    if not provider:
+        raise ValueError("unknown_provider: Unknown LLM provider")
+
+    normalized_method = method.strip().lower() if isinstance(method, str) else ""
+    methods = LLM_PROVIDER_INSTALL_METHODS.get(provider.id, [])
+    install_method = next((m for m in methods if m.get("id") == normalized_method), None)
+    if install_method is None:
+        available = ", ".join(str(m.get("id")) for m in methods) or "none"
+        raise ValueError(
+            f"invalid_install_method: Install method '{method}' not available for "
+            f"{provider.name}. Available: {available}"
+        )
+
+    command = install_method.get("command")
+    if not isinstance(command, list) or not command:
+        raise ValueError("invalid_install_method: Install command is not configured")
+
+    return {
+        "provider_id": provider.id,
+        "provider_name": provider.name,
+        "provider_command": provider.command,
+        "method": normalized_method,
+        "command": [str(part) for part in command],
+    }
+
+
+def clear_llm_provider_cli_cache(provider_id: str) -> None:
+    """Clear cached CLI availability for a provider after install attempts."""
+    provider = _get_provider(provider_id)
+    if provider:
+        _cli_cache.pop(provider.command, None)
+
+
+def check_llm_provider_cli_available(provider_id: str) -> tuple[bool, str | None]:
+    """Check whether a provider's runtime CLI is currently available."""
+    provider = _get_provider(provider_id)
+    if not provider:
+        raise ValueError("unknown_provider: Unknown LLM provider")
+    return _check_cli_available(provider.command, use_cache=False)
 
 
 def get_codex_sandbox_mode() -> str:

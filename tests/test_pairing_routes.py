@@ -15,6 +15,7 @@ from pairing.pairing import (
     PairingQrResult,
     PairingRevokeResult,
     PairingStatus,
+    SSOPairingResult,
 )
 from pairing.pairing_page_service import PairingPageRenderResult
 from remote.remote_access_service import PairVerifyFlowResult
@@ -116,17 +117,14 @@ class PairingRoutesTest(unittest.TestCase):
             force_replace=False,
         )
 
-    def test_verify_pair_token_success_with_firebase_merges_remote_fields(self):
+    def test_verify_pair_token_firebase_registration_failure_returns_error(self):
         with patch(
             "routes.pairing.verify_pair_token_for_current_server",
             new=AsyncMock(
                 return_value=PairVerifyFlowResult(
-                    success=True,
-                    status_code=200,
-                    api_key="key-2",
-                    client_id="client-2",
-                    firebase_registered=False,
-                    firebase_error="Token verification failed",
+                    success=False,
+                    status_code=502,
+                    error="Firebase registration failed",
                 )
             ),
         ) as mock_verify_flow:
@@ -139,17 +137,44 @@ class PairingRoutesTest(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 502)
         body = response.json()
-        self.assertTrue(body.get("success"))
-        self.assertFalse(body.get("firebase_registered"))
-        self.assertEqual(body.get("firebase_error"), "Token verification failed")
+        self.assertEqual(body.get("error"), "Firebase registration failed")
         mock_verify_flow.assert_awaited_once_with(
             pair_token="valid",
             client_id=None,
             device_name=None,
             firebase_id_token="id-token",
             firebase_refresh_token="refresh-token",
+            force_replace=False,
+        )
+
+    def test_verify_sso_pairing_registration_failure_returns_error(self):
+        with patch(
+            "routes.pairing.verify_sso_pairing_for_current_server",
+            new=AsyncMock(
+                return_value=SSOPairingResult(
+                    success=False,
+                    status_code=502,
+                    error="Firebase registration failed",
+                )
+            ),
+        ) as mock_sso:
+            response = self.client.post(
+                "/api/pair/sso",
+                json={
+                    "firebase_id_token": "id-token",
+                    "firebase_refresh_token": "refresh-token",
+                },
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json().get("error"), "Firebase registration failed")
+        mock_sso.assert_awaited_once_with(
+            firebase_id_token="id-token",
+            firebase_refresh_token="refresh-token",
+            client_id=None,
+            device_name=None,
             force_replace=False,
         )
 

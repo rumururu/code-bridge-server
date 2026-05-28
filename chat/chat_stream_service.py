@@ -1,12 +1,16 @@
 """Streaming service for websocket chat turns."""
 
 import logging
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket
 
 from .chat_event_utils import extract_assistant_text, format_tool_result_content
+from approvals.approval_service import request_approval_for_operation
+from agent.agent_store import get_agent_store
 from llm.llm_session import LlmSession
 from llm.claude_usage import fetch_claude_usage_snapshot, merge_usage_for_display
 from core.config import get_config
@@ -14,6 +18,8 @@ from core.database import get_usage_db
 from projects.project_manager import get_project_manager
 
 logger = logging.getLogger(__name__)
+APP_EVENT_SCHEMA_VERSION = 1
+PROVIDER_EVENT_SCHEMA_VERSION = 1
 
 
 def _build_marionette_context(project_name: str) -> str | None:
@@ -83,10 +89,172 @@ A Flutter app is currently running and you can interact with it using Marionette
 class TurnState:
     """Mutable state for a single chat turn."""
 
+    provider_id: str = "unknown"
+    provider: str = "unknown"
+    session_id: str | None = None
+    turn_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    sequence: int = 0
+    provider_sequence: int = 0
     full_response_chunks: list[str] = field(default_factory=list)
     fallback_response: str = ""
     seen_tool_use_ids: set[str] = field(default_factory=set)
     turn_completed: bool = False
+
+    def next_sequence(self) -> int:
+        self.sequence += 1
+        return self.sequence
+
+    def next_provider_sequence(self) -> int:
+        self.provider_sequence += 1
+        return self.provider_sequence
+
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _provider_id_for_session(session: LlmSession) -> str:
+    provider_id = getattr(session, "provider_id", None)
+    return provider_id if isinstance(provider_id, str) and provider_id else "unknown"
+
+
+def _session_id_from_event(event: dict[str, Any]) -> str | None:
+    session_id = event.get("session_id")
+    if isinstance(session_id, str) and session_id.strip():
+        return session_id
+
+    raw_event = event.get("raw_event")
+    if isinstance(raw_event, dict):
+        raw_session_id = raw_event.get("session_id")
+        if isinstance(raw_session_id, str) and raw_session_id.strip():
+            return raw_session_id
+
+    return None
+
+
+def _raw_event_from(event: dict[str, Any]) -> dict[str, Any]:
+    raw_event = event.get("raw_event")
+    if isinstance(raw_event, dict):
+        return raw_event
+
+    nested_event = event.get("event")
+    if event.get("type") in {"provider_event", "codex_event", "gemini_event"} and isinstance(
+        nested_event,
+        dict,
+    ):
+        return nested_event
+
+    return event
+
+
+def _normalized_event_from(event: dict[str, Any]) -> dict[str, Any]:
+    normalized = {key: value for key, value in event.items() if key != "raw_event"}
+    if normalized.get("type") == "provider_event" and isinstance(
+        normalized.get("normalized"),
+        dict,
+    ):
+        nested = normalized["normalized"]
+        return {key: value for key, value in nested.items() if key != "raw_event"}
+    return normalized
+
+
+def _approval_operation_for_tool(tool_name: Any) -> str:
+    """Map provider-native tool names to Code Bridge policy operations."""
+    normalized = str(tool_name or "").strip().lower()
+    if normalized in {"bash", "shell", "terminal", "run_command"}:
+        return "process.terminal"
+    if normalized in {"edit", "multiedit", "write", "notebookedit"}:
+        return "file.write"
+    if normalized in {"git", "git_commit", "git_push"}:
+        return "git.commit"
+    return "provider.tool"
+
+
+async def _emit_app_event(
+    websocket: WebSocket,
+    state: TurnState,
+    name: str,
+    *,
+    title: str,
+    detail: str | None = None,
+    level: str = "info",
+    data: dict[str, Any] | None = None,
+    raw_event: dict[str, Any] | None = None,
+) -> None:
+    """Emit a compact, app-oriented event while keeping legacy events intact."""
+    payload: dict[str, Any] = {
+        "type": "app_event",
+        "schema_version": APP_EVENT_SCHEMA_VERSION,
+        "event": name,
+        "provider_id": state.provider_id,
+        "provider": state.provider,
+        "session_id": state.session_id,
+        "turn_id": state.turn_id,
+        "sequence": state.next_sequence(),
+        "timestamp": _timestamp(),
+        "title": title,
+        "level": level,
+    }
+    if detail:
+        payload["detail"] = detail
+    if data:
+        payload["data"] = data
+    if raw_event is not None:
+        payload["raw_event"] = raw_event
+    await websocket.send_json(payload)
+
+
+async def _emit_provider_event(
+    websocket: WebSocket,
+    state: TurnState,
+    event: dict[str, Any],
+) -> None:
+    """Emit a provider-neutral raw provider event envelope."""
+    provider_id = event.get("provider_id")
+    if isinstance(provider_id, str) and provider_id.strip():
+        state.provider_id = provider_id
+    provider = event.get("provider")
+    if isinstance(provider, str) and provider.strip():
+        state.provider = provider
+    elif isinstance(provider_id, str) and provider_id.strip():
+        state.provider = provider_id
+
+    session_id = _session_id_from_event(event)
+    if session_id is not None:
+        state.session_id = session_id
+
+    await websocket.send_json(
+        {
+            "type": "provider_event",
+            "schema_version": PROVIDER_EVENT_SCHEMA_VERSION,
+            "provider_id": state.provider_id,
+            "provider": state.provider,
+            "session_id": state.session_id,
+            "turn_id": state.turn_id,
+            "sequence": state.next_provider_sequence(),
+            "timestamp": _timestamp(),
+            "event": _raw_event_from(event),
+            "normalized": _normalized_event_from(event),
+        }
+    )
+
+
+async def _emit_legacy_provider_event(
+    websocket: WebSocket,
+    state: TurnState,
+    event: dict[str, Any],
+) -> None:
+    """Emit legacy provider passthrough for clients still listening to claude_event."""
+    await websocket.send_json(
+        {
+            "type": "claude_event",
+            "provider_id": state.provider_id,
+            "provider": state.provider,
+            "session_id": state.session_id,
+            "turn_id": state.turn_id,
+            "event": _raw_event_from(event),
+        }
+    )
 
 
 async def _emit_tool_use(
@@ -95,6 +263,7 @@ async def _emit_tool_use(
     tool_id: Any,
     tool_name: Any,
     tool_input: Any,
+    raw_event: dict[str, Any] | None = None,
 ) -> None:
     """Emit tool_use event to websocket, deduplicating by tool_id."""
     resolved_id = tool_id if isinstance(tool_id, str) else None
@@ -103,13 +272,28 @@ async def _emit_tool_use(
             return
         state.seen_tool_use_ids.add(resolved_id)
 
-    await websocket.send_json(
-        {
-            "type": "tool_use",
-            "id": resolved_id,
-            "name": tool_name,
+    payload: dict[str, Any] = {
+        "type": "tool_use",
+        "id": resolved_id,
+        "name": tool_name,
+        "input": tool_input if isinstance(tool_input, dict) else {},
+    }
+    if raw_event is not None:
+        payload["raw_event"] = raw_event
+    await websocket.send_json(payload)
+    tool_label = str(tool_name).strip() if tool_name else "tool"
+    await _emit_app_event(
+        websocket,
+        state,
+        "tool.started",
+        title=f"$ {tool_label}",
+        detail=None,
+        data={
+            "tool_id": resolved_id,
+            "tool_name": tool_name,
             "input": tool_input if isinstance(tool_input, dict) else {},
-        }
+        },
+        raw_event=raw_event,
     )
 
 
@@ -134,6 +318,7 @@ async def _handle_stream_event(
                 content_block.get("id"),
                 content_block.get("name"),
                 content_block.get("input"),
+                raw_event=_raw_event_from(event),
             )
         return
 
@@ -165,7 +350,7 @@ async def _handle_assistant_event(
     state: TurnState,
     event: dict[str, Any],
 ) -> None:
-    """Handle assistant event - extract tool uses and fallback response."""
+    """Handle assistant event - extract tool events and fallback response."""
     message_payload = event.get("message", {})
     if not isinstance(message_payload, dict):
         return
@@ -175,7 +360,16 @@ async def _handle_assistant_event(
         for block in blocks:
             if not isinstance(block, dict):
                 continue
-            if block.get("type") != "tool_use":
+            block_type = block.get("type")
+            if block_type == "tool_result":
+                await _emit_tool_result(
+                    websocket,
+                    state,
+                    block,
+                    raw_event=_raw_event_from(event),
+                )
+                continue
+            if block_type != "tool_use":
                 continue
             await _emit_tool_use(
                 websocket,
@@ -183,6 +377,7 @@ async def _handle_assistant_event(
                 block.get("id"),
                 block.get("name"),
                 block.get("input"),
+                raw_event=_raw_event_from(event),
             )
 
     if not state.full_response_chunks and not state.fallback_response:
@@ -191,6 +386,7 @@ async def _handle_assistant_event(
 
 async def _handle_user_event(
     websocket: WebSocket,
+    state: TurnState,
     event: dict[str, Any],
 ) -> None:
     """Handle user event - forward tool results."""
@@ -207,15 +403,41 @@ async def _handle_user_event(
             continue
         if block.get("type") != "tool_result":
             continue
+        await _emit_tool_result(websocket, state, block, raw_event=_raw_event_from(event))
 
-        await websocket.send_json(
-            {
-                "type": "tool_result",
-                "tool_use_id": block.get("tool_use_id"),
-                "is_error": bool(block.get("is_error", False)),
-                "content": format_tool_result_content(block.get("content")),
-            }
-        )
+
+async def _emit_tool_result(
+    websocket: WebSocket,
+    state: TurnState,
+    block: dict[str, Any],
+    *,
+    raw_event: dict[str, Any] | None = None,
+) -> None:
+    """Emit a normalized tool result regardless of provider event role."""
+    is_error = bool(block.get("is_error", False))
+    content = format_tool_result_content(block.get("content"))
+    payload: dict[str, Any] = {
+        "type": "tool_result",
+        "tool_use_id": block.get("tool_use_id"),
+        "is_error": is_error,
+        "content": content,
+    }
+    if raw_event is not None:
+        payload["raw_event"] = raw_event
+    await websocket.send_json(payload)
+    await _emit_app_event(
+        websocket,
+        state,
+        "tool.completed",
+        title="tool failed" if is_error else "tool done",
+        detail=content,
+        level="error" if is_error else "info",
+        data={
+            "tool_use_id": block.get("tool_use_id"),
+            "is_error": is_error,
+        },
+        raw_event=raw_event,
+    )
 
 
 def _extract_usage_from_result(event: dict[str, Any]) -> dict[str, Any]:
@@ -274,6 +496,7 @@ async def _handle_result_event(
 
     usage_info = _extract_usage_from_result(event)
 
+    raw_event = _raw_event_from(event)
     await websocket.send_json(
         {
             "type": "turn_metrics",
@@ -283,7 +506,24 @@ async def _handle_result_event(
             "total_cost_usd": usage_info["total_cost_usd"],
             "usage": usage_info["usage_dict"],
             "model_usage": usage_info["model_usage_dict"],
+            "raw_event": raw_event,
         }
+    )
+    await _emit_app_event(
+        websocket,
+        state,
+        "turn.metrics",
+        title="usage",
+        detail=(
+            f"in {usage_info['input_tokens']} · out {usage_info['output_tokens']} · "
+            f"${usage_info['total_cost_usd']:.4f}"
+        ),
+        data={
+            "input_tokens": usage_info["input_tokens"],
+            "output_tokens": usage_info["output_tokens"],
+            "total_cost_usd": usage_info["total_cost_usd"],
+        },
+        raw_event=raw_event,
     )
 
     try:
@@ -293,6 +533,36 @@ async def _handle_result_event(
             cost_usd=usage_info["total_cost_usd"],
             input_tokens=usage_info["input_tokens"],
             output_tokens=usage_info["output_tokens"],
+        )
+        agent_run_id = getattr(websocket, "agent_run_id", None)
+        run = (
+            get_agent_store().get_run(agent_run_id)
+            if isinstance(agent_run_id, str) and agent_run_id
+            else None
+        )
+        usage_db.record_event(
+            source="chat",
+            project_name=None if project_name == "__global__" else project_name,
+            workspace_id=run.get("workspace_id") if run else None,
+            task_id=run.get("task_id") if run else None,
+            run_id=agent_run_id if isinstance(agent_run_id, str) else None,
+            provider_id=state.provider_id,
+            model=getattr(state, "model", None),
+            native_session_id=state.session_id,
+            turn_id=state.turn_id,
+            duration_ms=(
+                int(event.get("duration_ms"))
+                if isinstance(event.get("duration_ms"), (int, float))
+                else None
+            ),
+            input_tokens=usage_info["input_tokens"],
+            output_tokens=usage_info["output_tokens"],
+            cost_usd=usage_info["total_cost_usd"],
+            raw_usage={
+                "usage": usage_info["usage_dict"],
+                "model_usage": usage_info["model_usage_dict"],
+                "raw_event": raw_event,
+            },
         )
         config = get_config()
         weekly_summary = usage_db.get_weekly_summary(
@@ -306,6 +576,10 @@ async def _handle_result_event(
         await websocket.send_json(
             {
                 "type": "claude_event",
+                "provider_id": state.provider_id,
+                "provider": state.provider,
+                "session_id": state.session_id,
+                "turn_id": state.turn_id,
                 "event": {
                     "type": "system",
                     "subtype": "status",
@@ -317,6 +591,8 @@ async def _handle_result_event(
 
 async def _handle_control_request(
     websocket: WebSocket,
+    session: LlmSession,
+    state: TurnState,
     event: dict[str, Any],
     project_name: str,
 ) -> bool | None:
@@ -328,7 +604,7 @@ async def _handle_control_request(
     """
     request = event.get("request", {})
     if not isinstance(request, dict):
-        await websocket.send_json({"type": "claude_event", "event": event})
+        await _emit_legacy_provider_event(websocket, state, event)
         return None
 
     if request.get("subtype") == "can_use_tool":
@@ -341,20 +617,101 @@ async def _handle_control_request(
         tool_input = request.get("input")
         request_id = event.get("request_id")
         tool_use_id = request.get("tool_use_id")
+        approval_id = None
+        approval_result: dict[str, Any] | None = None
+        agent_run_id = getattr(websocket, "agent_run_id", None)
+        if isinstance(agent_run_id, str) and agent_run_id.strip():
+            approval_result = request_approval_for_operation(
+                operation=_approval_operation_for_tool(tool_name),
+                run_id=agent_run_id,
+                actor={"type": "agent_session"},
+                details={
+                    "project_name": project_name,
+                    "provider_id": state.provider_id,
+                    "session_id": state.session_id,
+                    "tool_name": tool_name,
+                    "tool_use_id": tool_use_id,
+                    "input": tool_input if isinstance(tool_input, dict) else {},
+                    "provider_request_id": request_id,
+                },
+            )
+            approval = (
+                approval_result.get("approval") if isinstance(approval_result, dict) else None
+            )
+            approval_id = approval.get("id") if isinstance(approval, dict) else None
+
+        if isinstance(approval_result, dict) and approval_result.get("allowed") is True:
+            await _emit_app_event(
+                websocket,
+                state,
+                "permission.auto_approved",
+                title="permission auto-approved",
+                detail=str(tool_name) if tool_name else None,
+                data={
+                    "request_id": request_id,
+                    "policy": approval_result.get("policy"),
+                },
+                raw_event=_raw_event_from(event),
+            )
+            return await stream_claude_turn(
+                websocket,
+                session,
+                project_name=project_name,
+                retry_from_permission=True,
+            )
+
+        if isinstance(approval_result, dict) and approval_result.get("error"):
+            policy = approval_result.get("policy")
+            reason = (
+                policy.get("reason")
+                if isinstance(policy, dict) and isinstance(policy.get("reason"), str)
+                else "Permission denied by policy."
+            )
+            await _emit_app_event(
+                websocket,
+                state,
+                "permission.policy_denied",
+                title="permission denied by policy",
+                detail=str(tool_name) if tool_name else None,
+                level="warning",
+                data={
+                    "request_id": request_id,
+                    "policy": policy,
+                    "reason": reason,
+                },
+                raw_event=_raw_event_from(event),
+            )
+            return await stream_claude_turn(
+                websocket,
+                session,
+                project_name=project_name,
+                deny_from_permission_message=reason,
+            )
 
         denials = [
             {
                 "request_id": request_id,
+                "approval_id": approval_id,
                 "tool_name": tool_name,
                 "tool_use_id": tool_use_id,
                 "input": tool_input if isinstance(tool_input, dict) else {},
+                "policy": approval_result.get("policy") if isinstance(approval_result, dict) else None,
+                "desktop_only": bool(
+                    approval_result.get("policy", {}).get("desktop_only")
+                    if isinstance(approval_result, dict) and isinstance(approval_result.get("policy"), dict)
+                    else False
+                ),
             }
         ]
+        policy = approval_result.get("policy") if isinstance(approval_result, dict) else None
         await websocket.send_json(
             {
                 "type": "permission_required",
                 "denials": denials,
                 "request_id": request_id,
+                "approval_id": approval_id,
+                "policy": policy,
+                "desktop_only": bool(policy.get("desktop_only")) if isinstance(policy, dict) else False,
                 "message": (
                     f"Tool '{tool_name}' requires approval to continue."
                     if isinstance(tool_name, str) and tool_name
@@ -362,14 +719,25 @@ async def _handle_control_request(
                 ),
             }
         )
+        await _emit_app_event(
+            websocket,
+            state,
+            "permission.requested",
+            title="permission required",
+            detail=str(tool_name) if tool_name else None,
+            level="warning",
+            data={"denials": denials, "request_id": request_id},
+            raw_event=_raw_event_from(event),
+        )
         return False
 
-    await websocket.send_json({"type": "claude_event", "event": event})
+    await _emit_legacy_provider_event(websocket, state, event)
     return None
 
 
 async def _handle_error_event(
     websocket: WebSocket,
+    state: TurnState,
     event: dict[str, Any],
     project_name: str,
 ) -> None:
@@ -385,11 +753,24 @@ async def _handle_error_event(
         project_name,
         error_message[:200],
     )
-    await websocket.send_json({"type": "error", "message": error_message})
+    raw_event = _raw_event_from(event)
+    await websocket.send_json(
+        {"type": "error", "message": error_message, "raw_event": raw_event}
+    )
+    await _emit_app_event(
+        websocket,
+        state,
+        "turn.failed",
+        title="error",
+        detail=error_message,
+        level="error",
+        raw_event=raw_event,
+    )
 
 
 async def _handle_output_event(
     websocket: WebSocket,
+    state: TurnState,
     event: dict[str, Any],
     project_name: str,
 ) -> None:
@@ -402,6 +783,13 @@ async def _handle_output_event(
             text[:200],
         )
         await websocket.send_json({"type": "status", "message": text})
+        await _emit_app_event(
+            websocket,
+            state,
+            "turn.status",
+            title=text,
+            raw_event=_raw_event_from(event),
+        )
 
 
 async def stream_claude_turn(
@@ -424,7 +812,19 @@ async def stream_claude_turn(
         deny_from_permission_message is not None,
     )
 
-    state = TurnState()
+    provider_id = _provider_id_for_session(session)
+    session_id = getattr(session, "session_id", None)
+    state = TurnState(
+        provider_id=provider_id,
+        provider=provider_id,
+        session_id=session_id if isinstance(session_id, str) and session_id else None,
+    )
+    await _emit_app_event(
+        websocket,
+        state,
+        "turn.started",
+        title="turn started",
+    )
 
     # Select event stream based on mode
     if deny_from_permission_message is not None:
@@ -444,6 +844,9 @@ async def stream_claude_turn(
 
     # Process events
     async for event in event_stream:
+        if not isinstance(event, dict):
+            continue
+        await _emit_provider_event(websocket, state, event)
         event_type = event.get("type")
 
         if event_type == "stream_event":
@@ -455,7 +858,7 @@ async def stream_claude_turn(
             continue
 
         if event_type == "user":
-            await _handle_user_event(websocket, event)
+            await _handle_user_event(websocket, state, event)
             continue
 
         if event_type == "result":
@@ -463,21 +866,27 @@ async def stream_claude_turn(
             continue
 
         if event_type == "control_request":
-            result = await _handle_control_request(websocket, event, project_name)
+            result = await _handle_control_request(websocket, session, state, event, project_name)
             if result is False:
                 return False
+            if result is True:
+                return True
             continue
 
         if event_type == "error":
-            await _handle_error_event(websocket, event, project_name)
+            await _handle_error_event(websocket, state, event, project_name)
             continue
 
         if event_type == "output":
-            await _handle_output_event(websocket, event, project_name)
+            await _handle_output_event(websocket, state, event, project_name)
+            continue
+
+        if event_type == "provider_event":
+            await _emit_legacy_provider_event(websocket, state, event)
             continue
 
         # Pass through unknown events
-        await websocket.send_json({"type": "claude_event", "event": event})
+        await _emit_legacy_provider_event(websocket, state, event)
 
     # Finalize turn
     if not state.turn_completed:
@@ -494,4 +903,11 @@ async def stream_claude_turn(
         len(final_response),
     )
     await websocket.send_json({"type": "complete", "content": final_response})
+    await _emit_app_event(
+        websocket,
+        state,
+        "turn.completed",
+        title="done",
+        detail=f"{len(final_response)} chars",
+    )
     return True

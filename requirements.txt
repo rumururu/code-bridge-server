@@ -4,6 +4,7 @@ websockets==12.0
 pyyaml==6.0.1
 httpx==0.26.0
 python-multipart==0.0.6
+tomli>=2.0.1; python_version < "3.11"
 
 # QR code generation for pairing
 qrcode[pil]>=7.4
@@ -17,3 +18,8 @@ cryptography>=41.0.0
 
 # mDNS/Bonjour for local network discovery
 zeroconf>=0.131.0
+
+# Desktop tray/menu-bar launcher
+pystray>=0.19.5
+pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10.0; sys_platform == "darwin"

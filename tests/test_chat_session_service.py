@@ -28,6 +28,18 @@ class ChatSessionServiceTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(chat_session_service.ChatSessionInitError):
                 chat_session_service.get_chat_provider_selection()
 
+    def test_get_chat_provider_selection_accepts_google(self):
+        with patch.object(
+            chat_session_service,
+            "get_llm_options_snapshot",
+            return_value={"selected": {"company_id": "google", "model": "gemini-2.5-pro"}},
+        ):
+            selection = chat_session_service.get_chat_provider_selection()
+
+        self.assertEqual(selection.provider_id, "google")
+        self.assertEqual(selection.provider_name, "Gemini")
+        self.assertEqual(selection.model, "gemini-2.5-pro")
+
     async def test_create_chat_session_passes_selection_to_manager(self):
         selection = chat_session_service.ChatProviderSelection(
             provider_id="openai",

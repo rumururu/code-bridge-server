@@ -1,5 +1,6 @@
 """WebSocket chat routes for LLM streaming."""
 
+import asyncio
 import json
 import logging
 from typing import Any, Awaitable, Callable, Optional
@@ -8,8 +9,11 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
 
+from agent.agent_store import get_agent_store
 from chat.chat_stream_service import stream_claude_turn
 from chat.chat_ws_service import (
+    GLOBAL_CHAT_DISPLAY_NAME,
+    GLOBAL_CHAT_PROJECT_NAME,
     create_chat_session_for_current_server,
     process_disconnect_server_message_for_current_server,
     process_firebase_auth_message_for_current_server,
@@ -18,6 +22,8 @@ from chat.chat_ws_service import (
 )
 from pairing.pairing import get_pairing_service
 from services.chat.ws_manager import get_ws_manager
+from workspaces.workspace_store import get_workspace_store
+from .deps import is_websocket_from_tunnel
 
 router = APIRouter(tags=["chat"])
 
@@ -25,11 +31,118 @@ router = APIRouter(tags=["chat"])
 _ws_manager = get_ws_manager()
 
 
+GLOBAL_CHAT_USAGE_CONTEXT = """You are the Code Bridge in-app assistant shown inside the main app after the mobile app is already connected to a desktop Code Bridge Server.
+
+Current screen state:
+- The server is already registered and connected.
+- No project is selected yet.
+- The user is on the main split screen, with preview on the left and chat on the right.
+- Global help chat is for app guidance only. It cannot inspect files, edit code, run project commands, view git changes, or resume a native CLI session until a project is selected.
+
+What users here are usually trying to understand:
+- what to do next after pairing,
+- why the center/left preview says no project selected,
+- how to select an existing project or add a desktop folder as a project,
+- what becomes available after project selection,
+- how the model selector affects the right-side chat,
+- what the right-side CLI-style chat can do once a project is active,
+- where run/preview/log/device controls appear,
+- why permissions, abort, history, and native CLI resume matter.
+
+Answer in the user's language from the current app state. Do not start with server installation or pairing steps unless the user explicitly says the server is not connected or asks how to pair another device. If the user asks "what should I do now?", make the next action project selection/addition. Keep the answer short and concrete."""
+
+
+def _is_global_chat(project_name: str) -> bool:
+    return project_name == GLOBAL_CHAT_PROJECT_NAME
+
+
+def _with_global_chat_context(project_name: str, user_message: str) -> str:
+    if not _is_global_chat(project_name):
+        return user_message
+    return f"{GLOBAL_CHAT_USAGE_CONTEXT}\n\nUser question:\n{user_message}"
+
+
+class _SerializedWebSocket:
+    """Serialize concurrent sends while a turn task and receive loop coexist."""
+
+    def __init__(self, websocket: WebSocket):
+        self._websocket = websocket
+        self._send_lock = asyncio.Lock()
+
+    async def send_json(self, data: Any) -> None:
+        async with self._send_lock:
+            await self._websocket.send_json(data)
+
+    async def receive_text(self) -> str:
+        return await self._websocket.receive_text()
+
+    async def accept(self) -> None:
+        await self._websocket.accept()
+
+    async def close(self, *args: Any, **kwargs: Any) -> None:
+        await self._websocket.close(*args, **kwargs)
+
+    @property
+    def url(self):
+        return self._websocket.url
+
+
+class _AgentRecordingWebSocket:
+    """Forward websocket sends while recording them as durable agent events."""
+
+    def __init__(
+        self,
+        websocket: WebSocket | _SerializedWebSocket,
+        *,
+        run_id: str,
+        agent_store: Any,
+    ) -> None:
+        self._websocket = websocket
+        self._run_id = run_id
+        self._agent_store = agent_store
+
+    @property
+    def agent_run_id(self) -> str:
+        return self._run_id
+
+    async def send_json(self, data: Any) -> None:
+        await self._websocket.send_json(data)
+        if not isinstance(data, dict):
+            return
+        try:
+            event_type = str(data.get("type") or "websocket")
+            provider_id = data.get("provider_id")
+            self._agent_store.append_event(
+                run_id=self._run_id,
+                event_type=event_type,
+                provider_id=provider_id if isinstance(provider_id, str) else None,
+                provider_event=data if event_type == "provider_event" else None,
+                app_event=data if event_type != "provider_event" else data.get("normalized"),
+            )
+        except Exception:
+            logger.exception("failed to record agent event run_id=%s", self._run_id)
+
+    async def receive_text(self) -> str:
+        return await self._websocket.receive_text()
+
+    async def accept(self) -> None:
+        await self._websocket.accept()
+
+    async def close(self, *args: Any, **kwargs: Any) -> None:
+        await self._websocket.close(*args, **kwargs)
+
+    @property
+    def url(self):
+        return self._websocket.url
+
+
 async def _handle_user_message(
-    websocket: WebSocket,
+    websocket: WebSocket | _SerializedWebSocket,
     session,
     project_name: str,
     message: dict[str, Any],
+    *,
+    agent_store: Any | None = None,
 ) -> None:
     user_message_raw = message.get("content", "")
     user_message = str(user_message_raw).strip()
@@ -38,17 +151,55 @@ async def _handle_user_message(
         await websocket.send_json({"type": "error", "message": "Message content is empty"})
         return
 
-    await websocket.send_json({"type": "user_message", "content": user_message})
-    await stream_claude_turn(
-        websocket,
-        session,
-        project_name=project_name,
-        user_message=user_message,
+    stream_message = _with_global_chat_context(project_name, user_message)
+    store = agent_store or get_agent_store()
+    raw_task_id = message.get("task_id")
+    task_id = raw_task_id if isinstance(raw_task_id, str) and raw_task_id.strip() else None
+    raw_cwd = getattr(session, "project_path", None)
+    cwd = raw_cwd if isinstance(raw_cwd, str) else str(raw_cwd) if raw_cwd else None
+    workspace_id = None
+    if cwd and not _is_global_chat(project_name):
+        workspace = get_workspace_store().get_or_create_project_workspace(
+            project_name=project_name,
+            root_path=cwd,
+            display_name=project_name,
+        )
+        workspace_id = workspace.get("id")
+    run = store.create_run(
+        project_name=None if _is_global_chat(project_name) else project_name,
+        workspace_id=workspace_id if isinstance(workspace_id, str) else None,
+        provider_id=getattr(session, "provider_id", None),
+        model=getattr(session, "model", None),
+        title=user_message[:80],
+        goal=user_message,
+        cwd=cwd,
+        native_session_id=getattr(session, "session_id", None),
+        task_id=task_id,
     )
+    run_id = run["id"]
+    store.add_message(run_id=run_id, role="user", content=user_message)
+
+    recording_ws = _AgentRecordingWebSocket(
+        websocket,
+        run_id=run_id,
+        agent_store=store,
+    )
+    await recording_ws.send_json({"type": "user_message", "content": user_message})
+    try:
+        completed = await stream_claude_turn(
+            recording_ws,
+            session,
+            project_name=project_name,
+            user_message=stream_message,
+        )
+    except Exception:
+        store.update_run_status(run_id, "failed")
+        raise
+    store.update_run_status(run_id, "completed" if completed else "failed")
 
 
 async def _handle_approve_permissions(
-    websocket: WebSocket,
+    websocket: WebSocket | _SerializedWebSocket,
     session,
     project_name: str,
 ) -> None:
@@ -71,7 +222,7 @@ async def _handle_approve_permissions(
 
 
 async def _handle_deny_permissions(
-    websocket: WebSocket,
+    websocket: WebSocket | _SerializedWebSocket,
     session,
     project_name: str,
     message: dict[str, Any],
@@ -104,7 +255,7 @@ async def _handle_deny_permissions(
 
 
 async def _handle_abort_turn(
-    websocket: WebSocket,
+    websocket: WebSocket | _SerializedWebSocket,
     session,
     project_name: str,
 ) -> None:
@@ -130,7 +281,7 @@ async def _handle_abort_turn(
 
 
 async def _handle_firebase_auth_message(
-    websocket: WebSocket,
+    websocket: WebSocket | _SerializedWebSocket,
     message: dict[str, Any],
     *,
     local_port: int,
@@ -144,14 +295,14 @@ async def _handle_firebase_auth_message(
         logger.info("%s", result.log_message)
 
 
-async def _handle_disconnect_server_message(websocket: WebSocket) -> None:
+async def _handle_disconnect_server_message(websocket: WebSocket | _SerializedWebSocket) -> None:
     result = await process_disconnect_server_message_for_current_server()
     await websocket.send_json(result.payload)
     if result.log_message:
         logger.info("%s", result.log_message)
 
 
-async def _handle_ping(websocket: WebSocket, api_key: Optional[str]) -> None:
+async def _handle_ping(websocket: WebSocket | _SerializedWebSocket, api_key: Optional[str]) -> None:
     """Handle ping message and update client last_used timestamp."""
     if api_key:
         get_pairing_service().touch_api_key(api_key)
@@ -159,7 +310,7 @@ async def _handle_ping(websocket: WebSocket, api_key: Optional[str]) -> None:
 
 
 async def _dispatch_chat_message(
-    websocket: WebSocket,
+    websocket: WebSocket | _SerializedWebSocket,
     session,
     project_name: str,
     message: dict[str, Any],
@@ -191,12 +342,42 @@ async def _dispatch_chat_message(
     await handler()
 
 
+def _is_turn_message(message_type: Any) -> bool:
+    return message_type in {"message", "approve_permissions", "deny_permissions"}
+
+
+def _consume_turn_task_result(task: asyncio.Task[None], project_name: str) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        logger.info("project=%s active turn task cancelled", project_name)
+    except Exception:
+        logger.exception("project=%s active turn task failed", project_name)
+
+
+@router.websocket("/ws/chat")
+@router.websocket("/ws/claude")
+async def global_chat_websocket(
+    websocket: WebSocket,
+    api_key: Optional[str] = Query(None),
+) -> None:
+    await _chat_websocket_impl(websocket, GLOBAL_CHAT_PROJECT_NAME, api_key)
+
+
 @router.websocket("/ws/chat/{project_name}")
 @router.websocket("/ws/claude/{project_name}")  # Backwards compatibility alias
-async def chat_websocket(
+async def project_chat_websocket(
     websocket: WebSocket,
     project_name: str,
     api_key: Optional[str] = Query(None),
+) -> None:
+    await _chat_websocket_impl(websocket, project_name, api_key)
+
+
+async def _chat_websocket_impl(
+    websocket: WebSocket,
+    project_name: str,
+    api_key: Optional[str],
 ) -> None:
     """WebSocket endpoint for LLM chat communication.
 
@@ -209,7 +390,11 @@ async def chat_websocket(
         logger.warning("rejected connection: %s", reject_reason)
         return
 
-    access = validate_chat_websocket_access_for_current_server(api_key, project_name)
+    access = validate_chat_websocket_access_for_current_server(
+        api_key,
+        project_name,
+        from_tunnel=is_websocket_from_tunnel(websocket),
+    )
     if not access.success:
         if access.close_code is not None:
             await websocket.close(code=access.close_code, reason=access.close_reason or "")
@@ -227,8 +412,10 @@ async def chat_websocket(
 
     await websocket.accept()
     _ws_manager.register_connection(websocket)
+    ws = _SerializedWebSocket(websocket)
     logger.info("accepted project=%s path=%s", project_name, websocket.url.path)
 
+    active_turn_task: asyncio.Task[None] | None = None
     try:
         project_path = access.project_path or ""
         local_port = access.local_port or 0
@@ -246,6 +433,16 @@ async def chat_websocket(
 
         provider_name = selection_result.provider_name or "LLM"
         await websocket.send_json({"type": "status", "message": f"Connecting to {provider_name}..."})
+        if _is_global_chat(project_name):
+            await websocket.send_json(
+                {
+                    "type": "status",
+                    "message": (
+                        f"{GLOBAL_CHAT_DISPLAY_NAME}: project-specific file work "
+                        "and resume are available after selecting a project."
+                    ),
+                }
+            )
 
         logger.warning("[chat_ws] creating session project=%s path=%r", project_name, project_path)
         session_result = await create_chat_session_for_current_server(
@@ -265,20 +462,37 @@ async def chat_websocket(
             return
 
         session = session_result.session
-        await websocket.send_json({"type": "status", "message": f"Connected to {provider_name}"})
+        await ws.send_json({"type": "status", "message": f"Connected to {provider_name}"})
         logger.info("project=%s connected provider=%s", project_name, provider_name)
         while True:
             try:
-                data = await websocket.receive_text()
+                if active_turn_task is not None and active_turn_task.done():
+                    _consume_turn_task_result(active_turn_task, project_name)
+                    active_turn_task = None
+
+                data = await ws.receive_text()
                 message = json.loads(data)
 
                 # Check message rate limit and re-resolve provider for user messages
                 message_type = message.get("type")
+                if (
+                    _is_turn_message(message_type)
+                    and active_turn_task is not None
+                    and not active_turn_task.done()
+                ):
+                    await ws.send_json(
+                        {
+                            "type": "error",
+                            "message": "A turn is already in progress.",
+                        }
+                    )
+                    continue
+
                 if message_type == "message":
                     # Rate limit check
                     can_send, rate_reason = _ws_manager.can_send_message(websocket)
                     if not can_send:
-                        await websocket.send_json({
+                        await ws.send_json({
                             "type": "error",
                             "message": rate_reason,
                         })
@@ -288,7 +502,7 @@ async def chat_websocket(
                     # take effect without requiring websocket reconnect.
                     latest_selection = resolve_chat_provider_selection_for_current_server()
                     if not latest_selection.success or latest_selection.selection is None:
-                        await websocket.send_json(
+                        await ws.send_json(
                             {
                                 "type": "error",
                                 "message": latest_selection.error_message
@@ -304,7 +518,7 @@ async def chat_websocket(
                         latest_selection.selection,
                     )
                     if not latest_session_result.success or latest_session_result.session is None:
-                        await websocket.send_json(
+                        await ws.send_json(
                             {
                                 "type": "error",
                                 "message": latest_session_result.error_message
@@ -316,7 +530,7 @@ async def chat_websocket(
                     session = latest_session_result.session
                     if latest_provider_name != provider_name:
                         provider_name = latest_provider_name
-                        await websocket.send_json(
+                        await ws.send_json(
                             {
                                 "type": "status",
                                 "message": f"Switched to {provider_name}",
@@ -326,8 +540,24 @@ async def chat_websocket(
                             "project=%s provider_switched=%s", project_name, provider_name
                         )
 
+                if _is_turn_message(message_type):
+                    active_turn_task = asyncio.create_task(
+                        _dispatch_chat_message(
+                            ws,
+                            session,
+                            project_name,
+                            message,
+                            local_port=local_port,
+                            api_key=api_key,
+                        )
+                    )
+                    active_turn_task.add_done_callback(
+                        lambda task: _consume_turn_task_result(task, project_name)
+                    )
+                    continue
+
                 await _dispatch_chat_message(
-                    websocket,
+                    ws,
                     session,
                     project_name,
                     message,
@@ -340,7 +570,9 @@ async def chat_websocket(
                 break
             except json.JSONDecodeError:
                 logger.warning("project=%s invalid_json", project_name)
-                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+                await ws.send_json({"type": "error", "message": "Invalid JSON"})
     finally:
+        if active_turn_task is not None and not active_turn_task.done():
+            active_turn_task.cancel()
         # Always unregister connection when done
         _ws_manager.unregister_connection(websocket)

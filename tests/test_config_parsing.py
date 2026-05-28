@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
@@ -71,6 +72,33 @@ server:
 
         self.assertEqual(os.environ.get("CODEBRIDGE_DASHBOARD_PORT"), "7777")
         self.assertEqual(cfg.dashboard_port, 7777)
+
+    def test_default_config_path_uses_app_support_dir_when_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.environ.get("CODEBRIDGE_APP_SUPPORT_DIR")
+            os.environ["CODEBRIDGE_APP_SUPPORT_DIR"] = tmp
+            self.addCleanup(
+                lambda: os.environ.__setitem__("CODEBRIDGE_APP_SUPPORT_DIR", previous)
+                if previous is not None
+                else os.environ.pop("CODEBRIDGE_APP_SUPPORT_DIR", None)
+            )
+
+            Config()
+
+            self.assertTrue((Path(tmp) / "config.yaml").exists())
+
+    def test_desktop_default_config_uses_production_safe_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            with patch.dict(os.environ, {"CODEBRIDGE_DESKTOP_APP": "1"}):
+                cfg = Config(config_path=str(config_path))
+
+            self.assertFalse(cfg.debug)
+            self.assertEqual(
+                cfg.cors_origins,
+                ["http://localhost:8766", "http://127.0.0.1:8766"],
+            )
+            self.assertIn("debug: false", config_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

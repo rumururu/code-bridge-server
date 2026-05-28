@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from .chat_session_service import (
@@ -10,13 +11,18 @@ from .chat_session_service import (
     create_chat_session,
     get_chat_provider_selection,
 )
+from auth.auth_service import validate_api_key_for_current_server
 from core.config import get_config
 from system.optional_services import get_firebase_auth
-from pairing.pairing import get_pairing_service
 from remote.remote_access_service import (
     parse_remote_access_login_payload,
     register_device_for_remote_access,
 )
+from core.runtime_paths import runtime_dir
+
+
+GLOBAL_CHAT_PROJECT_NAME = "__global__"
+GLOBAL_CHAT_DISPLAY_NAME = "Code Bridge Help"
 
 
 @dataclass(frozen=True)
@@ -62,32 +68,37 @@ def validate_chat_websocket_access_for_current_server(
     api_key: str | None,
     project_name: str,
     *,
+    from_tunnel: bool = False,
     pairing_service: Any | None = None,
     config: Any | None = None,
 ) -> ChatWebSocketAccessResult:
     """Validate API key and project existence for websocket chat connection."""
     resolved_config = config or get_config()
-    configured_api_key = str(getattr(resolved_config, "api_key", "") or "").strip()
+    validation = validate_api_key_for_current_server(
+        api_key,
+        pairing_service=pairing_service,
+        config=resolved_config,
+    )
+    if validation.success and from_tunnel and not api_key:
+        return ChatWebSocketAccessResult(
+            success=False,
+            close_code=4001,
+            close_reason="API key required",
+        )
+    if not validation.success:
+        return ChatWebSocketAccessResult(
+            success=False,
+            close_code=4001,
+            close_reason="API key required" if not api_key else "Invalid API key",
+        )
 
-    # Local/dev mode: static API key is unset, so websocket access is open.
-    if configured_api_key:
-        if api_key == configured_api_key:
-            pass
-        else:
-            if not api_key:
-                return ChatWebSocketAccessResult(
-                    success=False,
-                    close_code=4001,
-                    close_reason="API key required",
-                )
-
-            resolved_pairing = pairing_service or get_pairing_service()
-            if not resolved_pairing.validate_api_key(api_key):
-                return ChatWebSocketAccessResult(
-                    success=False,
-                    close_code=4001,
-                    close_reason="Invalid API key",
-                )
+    if project_name == GLOBAL_CHAT_PROJECT_NAME:
+        global_chat_dir = runtime_dir("global_chat", Path.home() / ".code-bridge" / "global_chat")
+        return ChatWebSocketAccessResult(
+            success=True,
+            project_path=str(global_chat_dir),
+            local_port=int(getattr(resolved_config, "port", 0) or 0),
+        )
 
     project = resolved_config.get_project(project_name)
     if project is None:

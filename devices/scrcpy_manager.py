@@ -44,6 +44,7 @@ class ScrcpyManager:
         self._devices_refresh_task: Optional[asyncio.Task] = None
         self._adb_path: Optional[str] = None
         self._emulator_path: Optional[str] = None
+        self._node_path: Optional[str] = None
 
     @property
     def is_running(self) -> bool:
@@ -95,7 +96,11 @@ class ScrcpyManager:
         if self._adb_path:
             return self._adb_path
 
+        executable_name = "adb.exe" if os.name == "nt" else "adb"
+        bundled_adb = self.scrcpy_path.parent / "vendor" / "platform-tools" / executable_name
         candidates = [
+            os.environ.get("CODEBRIDGE_ADB_PATH"),
+            str(bundled_adb),
             shutil.which("adb"),
             str(Path.home() / "Library/Android/sdk/platform-tools/adb"),
             str(Path.home() / "Android/Sdk/platform-tools/adb"),
@@ -119,6 +124,43 @@ class ScrcpyManager:
         for candidate in candidates:
             if candidate and Path(candidate).exists():
                 self._emulator_path = candidate
+                return candidate
+        return None
+
+    def _subprocess_env(self) -> dict[str, str]:
+        """Build child process env with bundled Android tools visible on PATH."""
+        env = os.environ.copy()
+        adb_path = self._resolve_adb_path()
+        if adb_path:
+            platform_tools_dir = str(Path(adb_path).parent)
+            env["CODEBRIDGE_ADB_PATH"] = adb_path
+            existing_path = env.get("PATH", "")
+            env["PATH"] = platform_tools_dir if not existing_path else os.pathsep.join([platform_tools_dir, existing_path])
+        return env
+
+    def _resolve_node_path(self) -> Optional[str]:
+        """Resolve Node.js executable path.
+
+        Packaged desktop apps bundle Node under server/vendor/node. Finder-
+        launched macOS apps often have a minimal PATH, so check the bundled
+        runtime and common Homebrew/system locations before giving up.
+        """
+        if self._node_path:
+            return self._node_path
+
+        executable_name = "node.exe" if os.name == "nt" else "node"
+        bundled_node = self.scrcpy_path.parent / "vendor" / "node" / "bin" / executable_name
+        candidates = [
+            os.environ.get("CODEBRIDGE_NODE_PATH"),
+            str(bundled_node),
+            shutil.which("node"),
+            "/opt/homebrew/bin/node",
+            "/usr/local/bin/node",
+            "/usr/bin/node",
+        ]
+        for candidate in candidates:
+            if candidate and Path(candidate).exists():
+                self._node_path = candidate
                 return candidate
         return None
 
@@ -583,6 +625,42 @@ class ScrcpyManager:
             return stderr.decode("utf-8", errors="replace").strip() or "adb reverse failed"
         return None
 
+    async def capture_screenshot(self, device_id: str, output_path: str | Path) -> Optional[str]:
+        """Capture a PNG screenshot from a connected Android device."""
+        adb_path = self._resolve_adb_path()
+        if not adb_path:
+            return "adb not found"
+
+        target = Path(output_path)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return f"Cannot create screenshot directory: {exc}"
+
+        proc = await asyncio.create_subprocess_exec(
+            adb_path,
+            "-s",
+            device_id,
+            "exec-out",
+            "screencap",
+            "-p",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        except asyncio.TimeoutError:
+            return "adb screencap timed out"
+        if proc.returncode != 0:
+            return stderr.decode("utf-8", errors="replace").strip() or "adb screencap failed"
+        if not stdout:
+            return "adb screencap returned no data"
+        try:
+            target.write_bytes(stdout)
+        except OSError as exc:
+            return f"Cannot write screenshot: {exc}"
+        return None
+
     async def open_url_in_browser(self, device_id: str, url: str) -> Optional[str]:
         """Open a URL on the device, preferring Chrome.
 
@@ -695,6 +773,14 @@ class ScrcpyManager:
                 "success": False,
                 "error": "Tango server not installed. Run: cd server/scrcpy && npm run build",
             }
+        node_path = self._resolve_node_path()
+        if not node_path:
+            return {
+                "success": False,
+                "error": "Node.js is required to start device mirroring. Install Node.js and try again.",
+                "installed": True,
+                "node_installed": False,
+            }
 
         try:
             last_error = "Tango server failed to start"
@@ -709,13 +795,13 @@ class ScrcpyManager:
                 # Tango reads port from command line argument
                 dist_path = self.scrcpy_path / "dist"
                 self._process = await asyncio.create_subprocess_exec(
-                    "node",
+                    node_path,
                     "tango-server.mjs",
                     str(self.port),
                     cwd=str(dist_path),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
-                    env=os.environ.copy(),
+                    env=self._subprocess_env(),
                 )
 
                 self._running = True
@@ -784,6 +870,10 @@ class ScrcpyManager:
         return {
             "running": self.is_running,
             "installed": self.is_installed(),
+            "adb_installed": self._resolve_adb_path() is not None,
+            "adb_path": self._resolve_adb_path(),
+            "node_installed": self._resolve_node_path() is not None,
+            "node_path": self._resolve_node_path(),
             "url": self.scrcpy_url if self.is_running else None,
             "port": self.port,
         }

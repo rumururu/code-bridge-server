@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 logger = logging.getLogger(__name__)
 
+from agent.scheduler import get_scheduler
 from core.config import get_config
 from core.database import migrate_accessible_folders_from_projects
 from system.lifecycle_service import (
@@ -46,8 +47,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     tunnel_service = await start_remote_tunnel_for_current_server(config, firebase_auth)
     heartbeat_task = start_heartbeat_for_current_server(config, firebase_auth)
 
+    scheduler = get_scheduler()
+    await scheduler.start()
+
     yield
 
+    await scheduler.stop()
     await shutdown_runtime_for_current_server(
         heartbeat_task=heartbeat_task,
         tunnel_service=tunnel_service,

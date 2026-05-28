@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from core.config import get_config
+from core.runtime_paths import runtime_dir
 from system.optional_services import get_active_tunnel_url, get_server_id as get_firebase_server_id
 from .pairing_models import (
     CurrentPairingDataResult,
@@ -44,10 +45,16 @@ logger = logging.getLogger(__name__)
 
 # Pairing token validity in seconds (5 minutes)
 PAIRING_TOKEN_TTL_SECONDS = 300
+API_KEY_HASH_FIELD = "api_key_sha256"
+LEGACY_API_KEY_FIELD = "api_key"
 
 
 def _now_ts() -> float:
     return time.time()
+
+
+def _hash_api_key(api_key: str) -> str:
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
 
 
 # Backward compatibility aliases
@@ -69,7 +76,7 @@ class PairingService:
                        Defaults to ~/.code-bridge/
         """
         if config_dir is None:
-            config_dir = Path.home() / ".code-bridge"
+            config_dir = runtime_dir("pairing", Path.home() / ".code-bridge")
         self.config_dir = config_dir
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
@@ -85,14 +92,38 @@ class PairingService:
         api_keys_file = self.config_dir / "api_keys.json"
         if api_keys_file.exists():
             try:
-                self._api_keys = json.loads(api_keys_file.read_text())
+                data = json.loads(api_keys_file.read_text())
+                self._api_keys = data if isinstance(data, dict) else {}
             except (json.JSONDecodeError, OSError):
                 self._api_keys = {}
 
     def _save_api_keys(self) -> None:
         """Persist API keys to disk."""
         api_keys_file = self.config_dir / "api_keys.json"
-        api_keys_file.write_text(json.dumps(self._api_keys, indent=2))
+        tmp_file = api_keys_file.with_name(f"{api_keys_file.name}.tmp")
+        tmp_file.write_text(json.dumps(self._api_keys, indent=2), encoding="utf-8")
+        os.replace(tmp_file, api_keys_file)
+        try:
+            api_keys_file.chmod(0o600)
+        except OSError:
+            pass
+
+    def _store_api_key_hash(self, client_data: dict[str, Any], api_key: str) -> None:
+        """Store only a one-way hash of a client API key."""
+        client_data[API_KEY_HASH_FIELD] = _hash_api_key(api_key)
+        client_data.pop(LEGACY_API_KEY_FIELD, None)
+
+    def _api_key_matches(self, key_data: dict[str, Any], api_key: str) -> bool:
+        """Check an API key and opportunistically migrate legacy plaintext rows."""
+        stored_hash = key_data.get(API_KEY_HASH_FIELD)
+        if isinstance(stored_hash, str):
+            return secrets.compare_digest(stored_hash, _hash_api_key(api_key))
+
+        legacy_key = key_data.get(LEGACY_API_KEY_FIELD)
+        if isinstance(legacy_key, str) and secrets.compare_digest(legacy_key, api_key):
+            self._store_api_key_hash(key_data, api_key)
+            return True
+        return False
 
     @property
     def server_id(self) -> str:
@@ -362,9 +393,57 @@ class PairingService:
         Returns:
             Typed verification result
         """
+        validate_result = self.validate_pair_token(pair_token)
+        if not validate_result.success:
+            return validate_result
+
+        token_data = self._pending_tokens[pair_token]
+
+        # Mark token as used
+        token_data["used"] = True
+
+        # Check for existing client with same device_name (prevents duplicate registrations)
+        existing_client_id = self._find_client_by_device_name(device_name or "")
+        if existing_client_id and existing_client_id != client_id:
+            # Update existing client instead of creating new one
+            logger.info("Updating existing client %s (device: %s)", existing_client_id, device_name)
+            resolved_client_id = existing_client_id
+        else:
+            resolved_client_id = client_id or str(uuid.uuid4())
+
+        # Generate API key for this client
+        api_key = self._generate_api_key()
+
+        # Store API key with optional Firebase user info
+        client_data: dict[str, Any] = {
+            "device_name": device_name or "Unknown Device",
+            "paired_at": _now_ts(),
+            "last_used": _now_ts(),
+        }
+        self._store_api_key_hash(client_data, api_key)
+
+        # Include Firebase user info if provided
+        if firebase_user_id or firebase_email:
+            client_data["firebase_user"] = {
+                "user_id": firebase_user_id,
+                "email": firebase_email,
+            }
+
+        self._api_keys[resolved_client_id] = client_data
+        self._save_api_keys()
+
+        return PairingVerifyTokenResult(
+            success=True,
+            status_code=200,
+            api_key=api_key,
+            server_id=self.server_id,
+            client_id=resolved_client_id,
+        )
+
+    def validate_pair_token(self, pair_token: str) -> PairingVerifyTokenResult:
+        """Validate a pairing token without consuming it or issuing an API key."""
         self._cleanup_expired_tokens()
 
-        # Check if token exists and is valid
         token_data = self._pending_tokens.get(pair_token)
         if token_data is None:
             return PairingVerifyTokenResult(
@@ -388,45 +467,10 @@ class PairingService:
                 error="Token expired",
             )
 
-        # Mark token as used
-        token_data["used"] = True
-
-        # Check for existing client with same device_name (prevents duplicate registrations)
-        existing_client_id = self._find_client_by_device_name(device_name or "")
-        if existing_client_id and existing_client_id != client_id:
-            # Update existing client instead of creating new one
-            logger.info("Updating existing client %s (device: %s)", existing_client_id, device_name)
-            resolved_client_id = existing_client_id
-        else:
-            resolved_client_id = client_id or str(uuid.uuid4())
-
-        # Generate API key for this client
-        api_key = self._generate_api_key()
-
-        # Store API key with optional Firebase user info
-        client_data: dict[str, Any] = {
-            "api_key": api_key,
-            "device_name": device_name or "Unknown Device",
-            "paired_at": _now_ts(),
-            "last_used": _now_ts(),
-        }
-
-        # Include Firebase user info if provided
-        if firebase_user_id or firebase_email:
-            client_data["firebase_user"] = {
-                "user_id": firebase_user_id,
-                "email": firebase_email,
-            }
-
-        self._api_keys[resolved_client_id] = client_data
-        self._save_api_keys()
-
         return PairingVerifyTokenResult(
             success=True,
             status_code=200,
-            api_key=api_key,
             server_id=self.server_id,
-            client_id=resolved_client_id,
         )
 
     def update_client_firebase_user(
@@ -465,7 +509,7 @@ class PairingService:
             True if valid, False otherwise
         """
         for client_id, key_data in self._api_keys.items():
-            if key_data.get("api_key") == api_key:
+            if self._api_key_matches(key_data, api_key):
                 # Update last used timestamp
                 key_data["last_used"] = _now_ts()
                 self._save_api_keys()
@@ -484,7 +528,7 @@ class PairingService:
             True if key found and updated, False otherwise
         """
         for client_id, key_data in self._api_keys.items():
-            if key_data.get("api_key") == api_key:
+            if self._api_key_matches(key_data, api_key):
                 key_data["last_used"] = _now_ts()
                 return True
         return False
@@ -781,6 +825,47 @@ class SSOPairingResult(PairingOperationResult):
         return payload
 
 
+async def _register_sso_firestore_device(
+    *,
+    firebase_auth: Any,
+    pairing_service: PairingService,
+    user_id: str,
+    id_token: str,
+) -> tuple[bool, Optional[str]]:
+    """Register the server document for the SSO requesting Firebase user."""
+    from firebase import device_registration
+
+    project_id = firebase_auth.project_id
+    if not project_id:
+        return False, "Firebase project ID unavailable"
+
+    try:
+        server_id = firebase_auth.server_id
+    except Exception as exc:
+        logger.warning("Firebase server ID unavailable during SSO: %s", exc)
+        return False, "Firebase server ID unavailable"
+
+    config = get_config()
+    local_url = f"http://{pairing_service.get_local_ip()}:{config.api_port}"
+
+    try:
+        registered = await device_registration.register_device(
+            project_id=project_id,
+            user_id=user_id,
+            server_id=server_id,
+            id_token=id_token,
+            tunnel_url=get_active_tunnel_url(),
+            local_url=local_url,
+        )
+    except Exception as exc:
+        logger.warning("Firestore registration failed during SSO: %s", exc)
+        return False, "Firebase registration failed"
+
+    if not registered:
+        return False, "Firebase registration failed"
+    return True, None
+
+
 async def verify_sso_pairing_for_current_server(
     *,
     firebase_id_token: str,
@@ -836,7 +921,11 @@ async def verify_sso_pairing_for_current_server(
             )
 
     # Verify the ID token from app
-    user_info = await firebase_auth.verify_id_token(firebase_id_token)
+    try:
+        user_info = await firebase_auth.verify_id_token(firebase_id_token)
+    except Exception as exc:
+        logger.warning("Firebase token verification failed during SSO: %s", exc)
+        user_info = None
     if not user_info:
         return SSOPairingResult(
             success=False,
@@ -866,14 +955,23 @@ async def verify_sso_pairing_for_current_server(
         )
 
     is_primary_owner = (requesting_user_id == server_owner_user_id)
-    is_already_paired = paired_accounts.has_account(requesting_user_id)
 
     if is_primary_owner:
         # Primary owner - update their auth tokens
-        await firebase_auth.authenticate_with_token(
-            id_token=firebase_id_token,
-            refresh_token=firebase_refresh_token,
-        )
+        try:
+            auth_success = await firebase_auth.authenticate_with_token(
+                id_token=firebase_id_token,
+                refresh_token=firebase_refresh_token,
+            )
+        except Exception as exc:
+            logger.warning("Firebase authentication failed during SSO: %s", exc)
+            auth_success = False
+        if not auth_success:
+            return SSOPairingResult(
+                success=False,
+                status_code=401,
+                error="Token verification failed",
+            )
         logger.info("SSO: Primary owner %s re-authenticated", requesting_email)
     elif force_replace:
         # Taking over as primary owner
@@ -882,16 +980,39 @@ async def verify_sso_pairing_for_current_server(
             requesting_email or requesting_user_id,
             firebase_auth.email or server_owner_user_id,
         )
-        await firebase_auth.authenticate_with_token(
-            id_token=firebase_id_token,
-            refresh_token=firebase_refresh_token,
-        )
+        try:
+            auth_success = await firebase_auth.authenticate_with_token(
+                id_token=firebase_id_token,
+                refresh_token=firebase_refresh_token,
+            )
+        except Exception as exc:
+            logger.warning("Firebase authentication failed during SSO: %s", exc)
+            auth_success = False
+        if not auth_success:
+            return SSOPairingResult(
+                success=False,
+                status_code=401,
+                error="Token verification failed",
+            )
     else:
         # Secondary account - just verify token is valid (already done above)
         logger.info(
             "SSO: Adding secondary account %s (primary: %s)",
             requesting_email or requesting_user_id,
             firebase_auth.email or server_owner_user_id,
+        )
+
+    registered, registration_error = await _register_sso_firestore_device(
+        firebase_auth=firebase_auth,
+        pairing_service=resolved_pairing_service,
+        user_id=requesting_user_id,
+        id_token=firebase_id_token,
+    )
+    if not registered:
+        return SSOPairingResult(
+            success=False,
+            status_code=502,
+            error=registration_error or "Firebase registration failed",
         )
 
     # Add/update account in paired accounts manager
@@ -916,7 +1037,6 @@ async def verify_sso_pairing_for_current_server(
 
     # Store API key with Firebase user info
     client_data: dict[str, Any] = {
-        "api_key": api_key,
         "device_name": device_name or "Unknown Device",
         "paired_at": _now_ts(),
         "last_used": _now_ts(),
@@ -927,6 +1047,7 @@ async def verify_sso_pairing_for_current_server(
         "paired_via": "sso",
         "is_primary_owner": is_primary_owner,
     }
+    resolved_pairing_service._store_api_key_hash(client_data, api_key)
 
     resolved_pairing_service._api_keys[resolved_client_id] = client_data
     resolved_pairing_service._save_api_keys()

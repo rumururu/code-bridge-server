@@ -2,10 +2,17 @@
 
 from typing import Any, Optional
 
-from fastapi import Cookie, Header, HTTPException, Query, Request
+from fastapi import Cookie, Header, HTTPException, Query, Request, WebSocket
 
 from auth.auth_service import validate_api_key_for_current_server
 from dashboard.dashboard_auth_service import get_dashboard_auth_status
+
+TUNNEL_HEADER_NAMES = (
+    "CF-Connecting-IP",
+    "CF-Ray",
+    "CF-IPCountry",
+    "CF-Visitor",
+)
 
 
 async def verify_api_key(
@@ -19,11 +26,7 @@ async def verify_api_key(
     IP login and legacy mode only grant anonymous access for LOCAL requests.
     """
     provided_key = x_api_key or api_key
-    # Debug logging
-    key_preview = provided_key[:8] + "..." if provided_key and len(provided_key) > 8 else provided_key
-    print(f"[DEBUG verify_api_key] path={request.url.path}, X-API-Key={key_preview}, query_api_key={'present' if api_key else 'none'}")
     validation = validate_api_key_for_current_server(provided_key)
-    print(f"[DEBUG verify_api_key] validation.success={validation.success}, error={validation.error}")
 
     # Tunnel access ALWAYS requires API key (pairing), regardless of IP login setting
     # IP login only grants anonymous access for local network, not external tunnel
@@ -40,6 +43,14 @@ async def verify_api_key(
     return validation.api_key
 
 
+def has_tunnel_headers(headers: Any) -> bool:
+    """Return True when request headers indicate Cloudflare Tunnel access."""
+    for header in TUNNEL_HEADER_NAMES:
+        if headers.get(header):
+            return True
+    return False
+
+
 def is_request_from_tunnel(request: Request) -> bool:
     """Check if request came through Cloudflare Tunnel.
 
@@ -50,16 +61,12 @@ def is_request_from_tunnel(request: Request) -> bool:
 
     If any of these headers are present, the request came through the tunnel.
     """
-    cf_headers = [
-        "CF-Connecting-IP",
-        "CF-Ray",
-        "CF-IPCountry",
-        "CF-Visitor",
-    ]
-    for header in cf_headers:
-        if request.headers.get(header):
-            return True
-    return False
+    return has_tunnel_headers(request.headers)
+
+
+def is_websocket_from_tunnel(websocket: WebSocket) -> bool:
+    """Check if a WebSocket handshake came through Cloudflare Tunnel."""
+    return has_tunnel_headers(websocket.headers)
 
 
 async def require_local_access(request: Request) -> None:

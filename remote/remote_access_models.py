@@ -21,6 +21,7 @@ class PairingRemoteAccessResult:
 
     firebase_registered: Optional[bool] = None
     firebase_error: Optional[str] = None
+    status_code: int = 200
     ownership_conflict: bool = False
     current_owner_email: Optional[str] = None
 

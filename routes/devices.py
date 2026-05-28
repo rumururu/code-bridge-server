@@ -23,7 +23,7 @@ from devices.device_action_service import (
 from devices.scrcpy_manager import get_scrcpy_manager
 from auth.auth_service import validate_api_key_for_current_server
 from .result_response import as_flagged_response
-from .deps import verify_api_key, verify_api_key_or_localhost
+from .deps import is_websocket_from_tunnel, verify_api_key, verify_api_key_or_localhost
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +161,10 @@ async def avd_install_ws(
     api_key: Optional[str] = Query(None),
 ) -> None:
     """Stream realtime install-progress events until the job finishes."""
+    if is_websocket_from_tunnel(websocket) and not api_key:
+        await websocket.close(code=4401, reason="unauthorized")
+        return
+
     auth = validate_api_key_for_current_server(api_key)
     if not auth.success:
         await websocket.close(code=4401, reason="unauthorized")

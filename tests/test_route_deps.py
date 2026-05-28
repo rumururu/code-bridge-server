@@ -10,7 +10,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 from auth.auth_service import ApiKeyValidationResult
-from routes.deps import verify_api_key
+from routes.deps import is_websocket_from_tunnel, verify_api_key
 
 
 def _make_mock_request(*, from_tunnel: bool = False) -> MagicMock:
@@ -29,12 +29,13 @@ class RouteDepsTest(unittest.IsolatedAsyncioTestCase):
         with patch(
             "routes.deps.validate_api_key_for_current_server",
             return_value=ApiKeyValidationResult(success=True, api_key="token-1"),
-        ):
+        ), patch("builtins.print") as mock_print:
             validated = await verify_api_key(
                 request=request, x_api_key="token-1", api_key=None
             )
 
         self.assertEqual(validated, "token-1")
+        mock_print.assert_not_called()
 
     async def test_verify_api_key_raises_http_exception_on_failure(self):
         request = _make_mock_request(from_tunnel=False)
@@ -92,6 +93,18 @@ class RouteDepsTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(validated, "__ip_login__")
+
+    def test_is_websocket_from_tunnel_detects_cloudflare_headers(self):
+        websocket = MagicMock()
+        websocket.headers.get = lambda h: "test-value" if h == "CF-Ray" else None
+
+        self.assertTrue(is_websocket_from_tunnel(websocket))
+
+    def test_is_websocket_from_tunnel_returns_false_without_cloudflare_headers(self):
+        websocket = MagicMock()
+        websocket.headers.get = lambda h: None
+
+        self.assertFalse(is_websocket_from_tunnel(websocket))
 
 
 if __name__ == "__main__":

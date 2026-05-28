@@ -53,6 +53,8 @@ class LlmSession(ABC):
         - {"type": "result", ...} when turn completes
         - {"type": "control_request", "request": {...}} for permission prompts
         - {"type": "error", "error": {"message": str}} on errors
+        - normalized non-Claude events should include raw_event/provider_id/session_id
+          metadata when the provider CLI emits a raw JSON event.
         """
         ...
 
@@ -135,9 +137,13 @@ class LlmSessionFactory:
             from llm.codex_session import CodexSession
             return CodexSession(project_path=project_path, model=model)
 
+        if normalized_id == "google":
+            from llm.gemini_session import GeminiSession
+            return GeminiSession(project_path=project_path, model=model)
+
         raise ValueError(f"Unknown LLM provider: {provider_id}")
 
     @staticmethod
     def get_supported_providers() -> list[str]:
         """Return list of supported provider IDs."""
-        return ["anthropic", "openai"]
+        return ["anthropic", "openai", "google"]

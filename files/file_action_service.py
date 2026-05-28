@@ -9,8 +9,8 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from files.files import get_file_manager
+from core.base_result import BaseRouteResult
 from projects.projects import get_project_manager
-from routes.result_response import BaseRouteResult
 
 
 # Backwards-compatible alias

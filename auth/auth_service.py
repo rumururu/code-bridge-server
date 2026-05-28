@@ -35,36 +35,36 @@ def validate_api_key_for_current_server(
     """Validate API key against pairing service.
 
     Access is granted in these cases (checked in order):
-    1. IP Login is enabled -> allow without api_key (local only, tunnel blocked in deps.py)
-    2. Static api_key from config.yaml matches -> allow
-    3. Paired client api_key validates -> allow
+    1. Static api_key from config.yaml matches -> allow
+    2. Paired client api_key validates -> allow
+    3. IP Login is enabled and no api_key was supplied -> allow anonymous
+       local access. Tunnel access is still blocked in route dependencies.
     """
     resolved_config = config or get_config()
     configured_api_key = str(getattr(resolved_config, "api_key", "") or "").strip()
-
-    # Check if IP login is enabled (allows anonymous LOCAL access)
-    if _check_allow_ip_login():
-        return ApiKeyValidationResult(
-            success=True,
-            api_key=api_key or "__ip_login__",
-            is_ip_login=api_key is None,
-        )
 
     # Check static API key from config (for advanced users)
     if configured_api_key and api_key == configured_api_key:
         return ApiKeyValidationResult(success=True, api_key=api_key)
 
-    # No API key provided and IP login is disabled
-    # Return a specific error code so the app can show appropriate message
-    if not api_key:
+    # Check paired client API keys
+    if api_key:
+        resolved_pairing = pairing_service or get_pairing_service()
+        if resolved_pairing.validate_api_key(api_key):
+            return ApiKeyValidationResult(success=True, api_key=api_key)
+        return ApiKeyValidationResult(success=False, error="Invalid API key")
+
+    # Check if IP login is enabled (allows anonymous LOCAL access only).
+    if _check_allow_ip_login():
         return ApiKeyValidationResult(
-            success=False,
-            error="IP_LOGIN_DISABLED: The server does not allow direct IP connections. Please connect via QR code.",
+            success=True,
+            api_key="__ip_login__",
+            is_ip_login=True,
         )
 
-    # Check paired client API keys
-    resolved_pairing = pairing_service or get_pairing_service()
-    if resolved_pairing.validate_api_key(api_key):
-        return ApiKeyValidationResult(success=True, api_key=api_key)
-
-    return ApiKeyValidationResult(success=False, error="Invalid API key")
+    # No API key provided and IP login is disabled. Return a specific error code
+    # so the app can show the QR pairing flow.
+    return ApiKeyValidationResult(
+        success=False,
+        error="IP_LOGIN_DISABLED: The server does not allow direct IP connections. Please connect via QR code.",
+    )

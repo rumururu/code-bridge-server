@@ -450,9 +450,11 @@ class PairingDataTest(unittest.TestCase):
             self.assertTrue(result.success)
             # Should use old client_id, not new one
             self.assertEqual(result.client_id, "old-client-id")
-            # Old client should be updated with new api_key
+            # Old client should be updated with a hashed API key.
             self.assertIn("old-client-id", service._api_keys)
-            self.assertNotEqual(service._api_keys["old-client-id"]["api_key"], "old-key")
+            self.assertNotIn("api_key", service._api_keys["old-client-id"])
+            self.assertIn("api_key_sha256", service._api_keys["old-client-id"])
+            self.assertTrue(service.validate_api_key(result.api_key or ""))
             # New client_id should not be created
             self.assertNotIn("new-client-id", service._api_keys)
 
@@ -485,3 +487,20 @@ class PairingDataTest(unittest.TestCase):
             # Both clients should exist
             self.assertIn("existing-client-id", service._api_keys)
             self.assertIn("new-client-id", service._api_keys)
+            self.assertNotIn("api_key", service._api_keys["new-client-id"])
+            self.assertIn("api_key_sha256", service._api_keys["new-client-id"])
+            self.assertTrue(service.validate_api_key(result.api_key or ""))
+
+    def test_validate_api_key_migrates_legacy_plaintext_key(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = PairingService(config_dir=Path(tmp_dir))
+            service._api_keys["c1"] = {
+                "api_key": "legacy-key",
+                "device_name": "Pixel 7",
+                "paired_at": 1000.0,
+                "last_used": 1000.0,
+            }
+
+            self.assertTrue(service.validate_api_key("legacy-key"))
+            self.assertNotIn("api_key", service._api_keys["c1"])
+            self.assertIn("api_key_sha256", service._api_keys["c1"])

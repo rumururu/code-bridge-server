@@ -235,8 +235,6 @@ The preview token system solves this:
 | `/api/projects/{name}` | DELETE | Yes | Delete project |
 | `/api/projects/{name}/start` | POST | Yes | Start dev server |
 | `/api/projects/{name}/stop` | POST | Yes | Stop dev server |
-| `/api/projects/{name}/build` | POST | Yes | Build project (Flutter web) |
-| `/api/projects/{name}/build-status` | GET | Yes | Get build status |
 | `/api/projects/{name}/run-device` | POST | Yes | Run on Android device |
 | `/api/projects/{name}/stop-device-run` | POST | Yes | Stop device run |
 | `/api/projects/{name}/device-run-log` | GET | Yes | Get device run logs |
@@ -272,7 +270,6 @@ The preview token system solves this:
 |----------|--------|------|-------------|
 | `/api/preview/token` | POST | Yes | Get preview token |
 | `/preview/{project}/{path}` | GET | Token | Proxy to dev server |
-| `/build-preview/{name}/{path}` | GET | Token | Serve built files |
 
 ### LLM Settings
 

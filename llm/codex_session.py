@@ -77,21 +77,22 @@ class CodexSession(LlmSession):
 
     @property
     def has_pending_permission_denials(self) -> bool:
-        """Codex uses --full-auto, so no pending permissions in normal operation."""
+        """Codex exec adapter does not expose live permission prompts."""
         return self._pending_permission_request is not None
 
     def _build_command(self, message: str, is_resume: bool = False) -> list[str]:
         """Build Codex exec command."""
         if is_resume and self._session_id:
-            # Resume previous session
+            # `codex exec resume` has its own option surface; notably it does
+            # not accept `-C` or `--sandbox`. We set cwd on the subprocess and
+            # pass the next prompt as the resume command argument so the app
+            # follows the CLI's native resume path.
             cmd = [
                 self._codex_path,
                 "exec",
                 "resume",
                 self._session_id,
                 "--json",
-                "--full-auto",  # Auto-approve in sandboxed mode
-                "-C", self.project_path,
             ]
         else:
             # New session
@@ -99,19 +100,30 @@ class CodexSession(LlmSession):
                 self._codex_path,
                 "exec",
                 "--json",
-                "--full-auto",  # Auto-approve in sandboxed mode
-                "-s", self.sandbox_mode,
                 "-C", self.project_path,
             ]
+            if self.sandbox_mode == "danger-full-access":
+                cmd.append("--dangerously-bypass-approvals-and-sandbox")
+            elif isinstance(self.sandbox_mode, str) and self.sandbox_mode.strip():
+                cmd.extend(["-s", self.sandbox_mode.strip()])
 
         if isinstance(self.model, str) and self.model.strip():
             cmd.extend(["-m", self.model.strip()])
 
-        if not is_resume:
-            # Add the prompt as the last argument for new sessions
-            cmd.append(message)
+        cmd.append(message)
 
         return cmd
+
+    async def resume_session(self, session_id: str) -> None:
+        """Pin a past Codex session id so the next turn uses native resume."""
+        next_id = session_id.strip() if isinstance(session_id, str) else ""
+        if not next_id:
+            return
+        if self._session_id == next_id and self.is_running:
+            return
+        self._session_id = next_id
+        if self.is_running:
+            await self.close()
 
     async def _read_stdout(self) -> None:
         """Read stdout JSONL events from Codex process."""
@@ -186,6 +198,11 @@ class CodexSession(LlmSession):
         # Normalize Codex events to match Claude event format
         normalized = self._normalize_event(event)
         if normalized:
+            normalized["raw_event"] = event
+            normalized["provider_id"] = self.provider_id
+            normalized["provider"] = self.provider_id
+            if self._session_id:
+                normalized["session_id"] = self._session_id
             await self._event_queue.put(normalized)
 
     def _normalize_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
@@ -215,7 +232,7 @@ class CodexSession(LlmSession):
         if event_type == "item.completed":
             item = event.get("item", {})
             if not isinstance(item, dict):
-                return {"type": "codex_event", "event": event}
+                return {"type": "provider_event", "event": event, "legacy_type": "codex_event"}
 
             item_type = str(item.get("type", "") or "")
             text = self._extract_item_text(item)
@@ -297,7 +314,7 @@ class CodexSession(LlmSession):
             }
 
         # Pass through unknown events for debugging
-        return {"type": "codex_event", "event": event}
+        return {"type": "provider_event", "event": event, "legacy_type": "codex_event"}
 
     def _extract_item_text(self, item: dict[str, Any]) -> str:
         """Best-effort text extraction from Codex item payloads."""
@@ -350,23 +367,14 @@ class CodexSession(LlmSession):
             is_resume = self._session_id is not None
             cmd = self._build_command(message, is_resume=is_resume)
 
-            # For resume, we need to send the message via stdin
-            stdin_mode = asyncio.subprocess.PIPE if is_resume else asyncio.subprocess.DEVNULL
-
             self._process = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=stdin_mode,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.project_path,
                 env=os.environ.copy(),
             )
-
-            # If resuming, write message to stdin
-            if is_resume and self._process.stdin:
-                self._process.stdin.write((message + "\n").encode("utf-8"))
-                await self._process.stdin.drain()
-                self._process.stdin.close()
 
             # Start reading stdout and stderr
             self._stdout_task = asyncio.create_task(self._read_stdout())
@@ -440,20 +448,20 @@ class CodexSession(LlmSession):
     async def approve_pending_permissions_and_retry(
         self,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Codex uses --full-auto mode, permissions are auto-approved."""
+        """Codex exec adapter does not expose live approval prompts."""
         yield {
             "type": "error",
-            "error": {"message": "Codex runs in auto-approval mode. No manual approval needed."},
+            "error": {"message": "Codex exec mode does not expose a pending approval to approve."},
         }
 
     async def deny_pending_permissions(
         self,
         message: str = "Permission denied by user.",
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Codex uses --full-auto mode, cannot deny permissions mid-turn."""
+        """Codex exec adapter does not expose live denial prompts."""
         yield {
             "type": "error",
-            "error": {"message": "Codex runs in auto-approval mode. Cannot deny permissions."},
+            "error": {"message": "Codex exec mode does not expose a pending approval to deny."},
         }
 
     async def close(self) -> None:

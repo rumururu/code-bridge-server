@@ -86,7 +86,9 @@ class ProjectManagerCoreTest(unittest.TestCase):
             return_value=("emulator-5554", None)
         )
         fake_scrcpy.configure_emulator_display = AsyncMock(return_value=None)
+        fake_scrcpy.setup_reverse_port = AsyncMock(return_value=None)
         fake_scrcpy.open_url_in_browser = AsyncMock(return_value=None)
+        fake_scrcpy.capture_screenshot = AsyncMock(side_effect=["rendering", None])
 
         with patch.object(manager, "get_server_port", return_value=None), \
              patch.object(
@@ -94,6 +96,7 @@ class ProjectManagerCoreTest(unittest.TestCase):
                  "start_dev_server",
                  new=AsyncMock(return_value={"success": True, "port": 5173}),
              ), \
+             patch("projects.project_manager.asyncio.sleep", new=AsyncMock()), \
              patch("projects.project_manager.get_scrcpy_manager", return_value=fake_scrcpy):
             result = asyncio.run(
                 manager.open_web_preview_on_device(
@@ -107,7 +110,9 @@ class ProjectManagerCoreTest(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(result["device_id"], "emulator-5554")
-        self.assertEqual(result["preview_url"], "http://10.0.2.2:5173")
+        self.assertEqual(result["preview_url"], "http://localhost:5173")
+        self.assertTrue(result["screenshot_path"].endswith(".png"))
+        fake_scrcpy.setup_reverse_port.assert_awaited_once_with("emulator-5554", 5173)
         fake_scrcpy.ensure_emulator_ready.assert_awaited_once_with(
             "avd:Pixel_8_API_35"
         )
@@ -120,8 +125,9 @@ class ProjectManagerCoreTest(unittest.TestCase):
         )
         fake_scrcpy.open_url_in_browser.assert_awaited_once_with(
             "emulator-5554",
-            "http://10.0.2.2:5173",
+            "http://localhost:5173",
         )
+        self.assertEqual(fake_scrcpy.capture_screenshot.await_count, 2)
 
 
 if __name__ == "__main__":

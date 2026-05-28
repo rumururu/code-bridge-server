@@ -29,12 +29,16 @@ def get_chat_provider_selection() -> ChatProviderSelection:
     selected_model = selected.get("model") if isinstance(selected, dict) else None
 
     provider_id = selected_company if selected_company else "anthropic"
-    provider_name = "Claude" if provider_id == "anthropic" else provider_id.title()
+    provider_name = {
+        "anthropic": "Claude",
+        "openai": "Codex",
+        "google": "Gemini",
+    }.get(provider_id, provider_id.title())
 
-    if provider_id not in ("anthropic", "openai"):
+    if provider_id not in ("anthropic", "openai", "google"):
         raise ChatSessionInitError(
             f"Selected LLM provider '{provider_id}' is not supported yet. "
-            "Select Anthropic or OpenAI in Settings > LLM Configuration."
+            "Select Anthropic, OpenAI, or Google in Settings > LLM Configuration."
         )
 
     resolved_model = selected_model if isinstance(selected_model, str) and selected_model.strip() else None

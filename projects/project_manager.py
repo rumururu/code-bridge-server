@@ -7,7 +7,7 @@ from typing import Any, Callable
 from core.database import get_project_db
 from devices.scrcpy_manager import get_scrcpy_manager
 from .project_dev_server_start import resolve_dev_server_start_plan, spawn_dev_server_process
-from .project_device_logs import device_run_log_path, read_log_tail
+from .project_device_logs import device_preview_screenshot_path, device_run_log_path, read_log_tail
 from .project_device_run_plan import resolve_device_run_plan
 from .project_device_run_service import (
     extract_vm_service_uri_from_log,
@@ -247,6 +247,12 @@ class ProjectManager:
         self._running_device_runs[name] = info
         self._last_device_run_logs[name] = info.log_path
 
+        screenshot_path, screenshot_error = await _capture_device_screenshot(
+            get_scrcpy_manager(),
+            name,
+            plan.device_id,
+        )
+
         return {
             "success": True,
             "message": f"Started flutter run on {plan.device_id}",
@@ -254,6 +260,8 @@ class ProjectManager:
             "device_id": plan.device_id,
             "log_path": info.log_path,
             "vm_service_uri": vm_service_uri,
+            "screenshot_path": screenshot_path,
+            "screenshot_error": screenshot_error,
         }
 
     async def open_web_preview_on_device(
@@ -334,12 +342,20 @@ class ProjectManager:
         if open_error:
             return {"success": False, "message": open_error}
 
+        screenshot_path, screenshot_error = await _capture_device_screenshot(
+            scrcpy_manager,
+            name,
+            resolved_device_id,
+        )
+
         return {
             "success": True,
             "message": f"Opened {name} preview on {resolved_device_id}",
             "device_id": resolved_device_id,
             "preview_url": preview_url,
             "port": port,
+            "screenshot_path": screenshot_path,
+            "screenshot_error": screenshot_error,
             "display_override_applied": display_override_applied,
             "display_config": {
                 "width": width,
@@ -464,6 +480,27 @@ class ProjectManager:
 
     def _detect_port_for_project(self, project_path: str, project_type: ProjectType) -> int | None:
         return detect_port_for_project(project_path, project_type)
+
+
+async def _capture_device_screenshot(
+    scrcpy_manager: Any,
+    project_name: str,
+    device_id: str,
+    *,
+    attempts: int = 3,
+    delay_seconds: float = 0.75,
+) -> tuple[str | None, str | None]:
+    """Best-effort Android screenshot capture with short first-render retries."""
+    screenshot_path = device_preview_screenshot_path(project_name, device_id)
+    last_error: str | None = None
+    for attempt in range(max(1, attempts)):
+        last_error = await scrcpy_manager.capture_screenshot(device_id, screenshot_path)
+        if not last_error:
+            return str(screenshot_path), None
+        if attempt < attempts - 1:
+            await asyncio.sleep(delay_seconds)
+    return None, last_error
+
 
 # Global project manager instance
 _project_manager: ProjectManager | None = None

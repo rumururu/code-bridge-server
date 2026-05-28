@@ -27,7 +27,8 @@ def _is_port_listening(host: str, port: int) -> bool:
     except (socket.timeout, socket.error, OSError):
         return False
 from core.config import VERSION, get_config
-from core.database import get_project_db
+from core.database import get_project_db, get_usage_db
+from agent.agent_store import get_agent_store
 from devices.device_action_service import (
     get_scrcpy_status_for_current_server,
     list_connected_devices_for_current_server,
@@ -210,6 +211,8 @@ class DashboardOverview:
     tunnel: DashboardTunnelStatus
     firebase: DashboardFirebaseStatus
     autostart: DashboardAutostartStatus
+    work: dict[str, Any] = field(default_factory=dict)
+    usage: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -221,6 +224,8 @@ class DashboardOverview:
             "tunnel": self.tunnel.as_dict(),
             "firebase": self.firebase.as_dict(),
             "autostart": self.autostart.as_dict(),
+            "work": self.work,
+            "usage": self.usage,
         }
 
 
@@ -421,6 +426,38 @@ def _build_autostart_status() -> DashboardAutostartStatus:
     )
 
 
+def _build_work_status() -> dict[str, Any]:
+    store = get_agent_store()
+    tasks = store.list_tasks(limit=200)
+    runs = store.list_runs(limit=200)
+    pending_tasks = [task for task in tasks if task.get("status") in {"queued", "backlog", "todo", "pending"}]
+    active_tasks = [task for task in tasks if task.get("status") in {"running", "in_progress", "review", "blocked"}]
+    done_tasks = [task for task in tasks if task.get("status") == "done"]
+    active_runs = [run for run in runs if run.get("status") in {"queued", "running", "pending_approval"}]
+    return {
+        "task_count": len(tasks),
+        "pending_task_count": len(pending_tasks),
+        "active_task_count": len(active_tasks),
+        "done_task_count": len(done_tasks),
+        "active_run_count": len(active_runs),
+        "recent_tasks": tasks[:10],
+        "recent_runs": runs[:10],
+    }
+
+
+def _build_usage_status() -> dict[str, Any]:
+    config = get_config()
+    usage_db = get_usage_db()
+    return {
+        "summary": usage_db.get_weekly_summary(
+            budget_usd=config.weekly_budget_usd,
+            window_days=config.usage_window_days,
+        ),
+        "by_provider": usage_db.breakdown("provider_id", window_days=config.usage_window_days),
+        "recent_turns": usage_db.list_events(window_days=config.usage_window_days, limit=10),
+    }
+
+
 async def build_dashboard_overview() -> DashboardOverview:
     """Build complete dashboard overview aggregating all server state."""
     server = _build_server_status()
@@ -431,6 +468,8 @@ async def build_dashboard_overview() -> DashboardOverview:
     tunnel = _build_tunnel_status()
     firebase = _build_firebase_status()
     autostart = _build_autostart_status()
+    work = _build_work_status()
+    usage = _build_usage_status()
 
     return DashboardOverview(
         server=server,
@@ -441,6 +480,8 @@ async def build_dashboard_overview() -> DashboardOverview:
         tunnel=tunnel,
         firebase=firebase,
         autostart=autostart,
+        work=work,
+        usage=usage,
     )
 
 

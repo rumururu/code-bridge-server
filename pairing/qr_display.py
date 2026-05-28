@@ -54,6 +54,15 @@ def generate_qr_terminal(
         return _render_ascii(matrix, invert=invert)
 
 
+def _stdout_supports_unicode() -> bool:
+    encoding = sys.stdout.encoding or "utf-8"
+    try:
+        "\u2580\u2584\u2588".encode(encoding)
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
 def _render_unicode(matrix: list[list[bool]], invert: bool = True) -> str:
     """Render QR code using Unicode half-block characters.
 
@@ -107,7 +116,7 @@ def _render_ascii(matrix: list[list[bool]], invert: bool = True) -> str:
             if invert:
                 cell = not cell
             if cell:
-                line += "██"  # Filled module
+                line += "##"  # Filled module
             else:
                 line += "  "  # Empty module
         lines.append(line)
@@ -144,7 +153,7 @@ def print_qr_to_terminal(
         BOLD = GREEN = CYAN = RESET = DIM = ""
 
     # Generate QR code
-    qr_str = generate_qr_terminal(data, border=2, use_unicode=True)
+    qr_str = generate_qr_terminal(data, border=2, use_unicode=_stdout_supports_unicode())
 
     # Print with formatting
     print()
@@ -201,7 +210,7 @@ def display_pairing_qr(
     print()
 
     # Print QR code
-    qr_str = generate_qr_terminal(qr_url, border=2, use_unicode=True)
+    qr_str = generate_qr_terminal(qr_url, border=2, use_unicode=_stdout_supports_unicode())
     for line in qr_str.split("\n"):
         print(f"  {line}")
 
