@@ -1,0 +1,149 @@
+name: Release desktop installers
+
+# Builds the Code Bridge Server desktop installer for macOS (DMG) and
+# Windows (MSI) when a v* tag is pushed, signs each artifact, and attaches
+# them to the GitHub Release.
+#
+# Status: **PARKED**. The workflow is committed as a ready-to-run skeleton
+# but is gated on:
+#   1. SignPath Foundation approval for the open-source project
+#      `rumururu/code-bridge-server` (application submitted 2026-05-29).
+#   2. Repository secrets/variables registration after approval:
+#      - secret SIGNPATH_API_TOKEN
+#      - variable SIGNPATH_ORG_ID
+#      - secret DEVELOPER_ID_P12_BASE64
+#      - secret DEVELOPER_ID_P12_PASSWORD
+#      - secret NOTARY_KEY_PATH (path within the runner work dir)
+#      - secret NOTARY_KEY_ID
+#      - secret NOTARY_ISSUER_ID
+#      - secret CODESIGN_IDENTITY
+#
+# Until those are in place the trigger is intentionally restricted to a
+# manual workflow_dispatch with a `dry_run` flag so the YAML cannot accept
+# a tag and fail mid-pipeline. Once the secrets land, swap the `on:` block
+# to enable `push: tags: ['v*']`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Skip signing + release attach steps (sanity check only)'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: write
+
+jobs:
+  windows-msi:
+    name: Build + sign Windows MSI
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install WiX v4
+        run: dotnet tool install --global wix
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r server/requirements.txt pyinstaller
+
+      - name: Build unsigned MSI
+        run: |
+          python scripts/build_desktop_server_app.py --format msi --include-scrcpy
+
+      - name: Upload unsigned MSI artifact
+        id: upload_unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: codebridge-msi-unsigned
+          path: dist/desktop_server_app/Code Bridge Server.msi
+          if-no-files-found: error
+
+      - name: Submit to SignPath (skipped on dry_run)
+        if: ${{ inputs.dry_run != 'true' }}
+        uses: signpath-io/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORG_ID }}
+          project-slug: code-bridge-server
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: msi
+          github-artifact-id: ${{ steps.upload_unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: dist/desktop_server_app
+
+      - name: Attach signed MSI to GitHub Release
+        if: ${{ inputs.dry_run != 'true' && startsWith(github.ref, 'refs/tags/v') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/desktop_server_app/Code Bridge Server.msi
+
+  macos-dmg:
+    name: Build + sign + notarize macOS DMG
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r server/requirements.txt pyinstaller
+
+      - name: Import Developer ID cert (skipped on dry_run)
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          security create-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+          echo "$DEVELOPER_ID_P12_BASE64" | base64 --decode > cert.p12
+          security import cert.p12 \
+              -k build.keychain \
+              -P "$DEVELOPER_ID_P12_PASSWORD" \
+              -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+              -s -k actions build.keychain
+
+      - name: Build unsigned DMG
+        run: |
+          python scripts/build_desktop_server_app.py --format dmg --include-scrcpy
+
+      - name: Sign + notarize + staple (skipped on dry_run)
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          NOTARY_KEY_PATH: ${{ secrets.NOTARY_KEY_PATH }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: |
+          python scripts/sign_notarize_desktop_app.py \
+              --identity "$CODESIGN_IDENTITY" \
+              --notary-key "$NOTARY_KEY_PATH" \
+              --notary-key-id "$NOTARY_KEY_ID" \
+              --notary-issuer "$NOTARY_ISSUER_ID"
+
+      - name: Upload DMG artifact (dry_run path)
+        if: ${{ inputs.dry_run == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codebridge-dmg-dryrun
+          path: dist/desktop_server_app/Code Bridge Server.dmg
+          if-no-files-found: error
+
+      - name: Attach signed DMG to GitHub Release
+        if: ${{ inputs.dry_run != 'true' && startsWith(github.ref, 'refs/tags/v') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/desktop_server_app/Code Bridge Server.dmg
