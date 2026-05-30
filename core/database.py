@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = runtime_path("code_bridge.db", SERVER_DIR / "core" / "code_bridge.db")
 
+LEGACY_FOUNDATION_SCHEMA_VERSION = 2026052800
 AGENT_COCKPIT_SCHEMA_VERSION = 2026052801
 WORK_COCKPIT_SCHEMA_VERSION = 2026052802
 TASK_SCHEDULES_SCHEMA_VERSION = 2026052803
@@ -500,7 +501,65 @@ def _migrate_task_schedules(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migrate_legacy_foundation(conn: sqlite3.Connection) -> None:
+    """Original tables that predated the schema_migrations framework.
+
+    Idempotent on existing DBs because every CREATE uses IF NOT EXISTS and
+    the ALTER for ``projects.enabled`` is wrapped in a try/except for the
+    "duplicate column" path. New installs get all four tables in one go
+    from the migration runner instead of from init_db().
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS projects (
+            name TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            type TEXT DEFAULT 'flutter',
+            dev_server_command TEXT,
+            dev_server_port INTEGER,
+            enabled INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS usage_turns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL,
+            cost_usd REAL NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_usage_turns_created_at
+        ON usage_turns(created_at);
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS accessible_folders (
+            path TEXT PRIMARY KEY,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    # Legacy DBs created before the ``enabled`` column may need this added.
+    try:
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN enabled INTEGER DEFAULT 1"
+        )
+    except sqlite3.OperationalError:
+        # Column already exists.
+        pass
+
+
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
+    (
+        LEGACY_FOUNDATION_SCHEMA_VERSION,
+        "legacy_foundation",
+        _migrate_legacy_foundation,
+    ),
     (
         AGENT_COCKPIT_SCHEMA_VERSION,
         "agent_cockpit_foundation",
@@ -531,52 +590,16 @@ def _run_schema_migrations(conn: sqlite3.Connection) -> None:
 
 
 def init_db() -> None:
-    """Initialize database and create tables."""
+    """Initialize database and create tables.
+
+    All schema lives in the ``_SCHEMA_MIGRATIONS`` tuple now — including the
+    original ``projects`` / ``usage_turns`` / ``app_settings`` /
+    ``accessible_folders`` tables, which are owned by the
+    ``legacy_foundation`` migration. ``init_db`` just runs the migrator.
+    Idempotent: every migration uses ``CREATE TABLE IF NOT EXISTS`` so
+    existing DBs are unaffected on the first post-upgrade run.
+    """
     with get_db_connection() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS projects (
-                name TEXT PRIMARY KEY,
-                path TEXT NOT NULL,
-                type TEXT DEFAULT 'flutter',
-                dev_server_command TEXT,
-                dev_server_port INTEGER,
-                enabled INTEGER DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        # Migration: add enabled column if missing
-        try:
-            conn.execute("ALTER TABLE projects ADD COLUMN enabled INTEGER DEFAULT 1")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS usage_turns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_name TEXT NOT NULL,
-                cost_usd REAL NOT NULL DEFAULT 0,
-                input_tokens INTEGER NOT NULL DEFAULT 0,
-                output_tokens INTEGER NOT NULL DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_usage_turns_created_at
-            ON usage_turns(created_at)
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS app_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS accessible_folders (
-                path TEXT PRIMARY KEY,
-                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
         _run_schema_migrations(conn)
         conn.commit()
 

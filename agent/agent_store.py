@@ -10,8 +10,10 @@ from typing import Any
 
 from core.database import get_db_connection, init_db
 
+from ._artifact_store import ArtifactStoreMixin
 from ._capability_store import CapabilityStoreMixin
 from ._connector_request_store import ConnectorRequestStoreMixin
+from ._event_store import EventStoreMixin
 from ._row_converters import (
     _json_loads,
     _row_to_artifact,
@@ -35,7 +37,12 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
-class AgentStore(CapabilityStoreMixin, ConnectorRequestStoreMixin):
+class AgentStore(
+    ArtifactStoreMixin,
+    CapabilityStoreMixin,
+    ConnectorRequestStoreMixin,
+    EventStoreMixin,
+):
     """Persistence helper for durable agent platform records.
 
     Domain-specific groups of methods are split into mixins under
@@ -238,141 +245,6 @@ class AgentStore(CapabilityStoreMixin, ConnectorRequestStoreMixin):
                 (run_id,),
             ).fetchall()
         return [_row_to_message(row) for row in rows]
-
-    def append_event(
-        self,
-        *,
-        run_id: str,
-        event_type: str,
-        provider_id: str | None = None,
-        provider_event: dict[str, Any] | None = None,
-        app_event: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
-        if self.get_run(run_id) is None:
-            return None
-        event_id = _new_id("evt")
-        with get_db_connection() as conn:
-            next_sequence = int(
-                conn.execute(
-                    """
-                    SELECT COALESCE(MAX(sequence), 0) + 1
-                    FROM agent_events
-                    WHERE run_id = ?
-                    """,
-                    (run_id,),
-                ).fetchone()[0]
-            )
-            conn.execute(
-                """
-                INSERT INTO agent_events (
-                    id, run_id, sequence, event_type, provider_id,
-                    provider_event_json, app_event_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event_id,
-                    run_id,
-                    next_sequence,
-                    event_type,
-                    provider_id,
-                    _json_dumps(provider_event) if provider_event is not None else None,
-                    _json_dumps(app_event) if app_event is not None else None,
-                ),
-            )
-            conn.execute(
-                "UPDATE agent_runs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (run_id,),
-            )
-            conn.commit()
-        return self.get_event(event_id)
-
-    def get_event(self, event_id: str) -> dict[str, Any] | None:
-        with get_db_connection(use_row_factory=True) as conn:
-            row = conn.execute(
-                "SELECT * FROM agent_events WHERE id = ?",
-                (event_id,),
-            ).fetchone()
-        return _row_to_event(row) if row else None
-
-    def list_events(
-        self,
-        run_id: str,
-        *,
-        after_sequence: int | None = None,
-        limit: int = 200,
-    ) -> list[dict[str, Any]]:
-        clauses = ["run_id = ?"]
-        values: list[Any] = [run_id]
-        if after_sequence is not None:
-            clauses.append("sequence > ?")
-            values.append(after_sequence)
-        values.append(max(1, min(int(limit), 500)))
-        with get_db_connection(use_row_factory=True) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT * FROM agent_events
-                WHERE {' AND '.join(clauses)}
-                ORDER BY sequence ASC
-                LIMIT ?
-                """,
-                values,
-            ).fetchall()
-        return [_row_to_event(row) for row in rows]
-
-    def add_artifact(
-        self,
-        *,
-        run_id: str,
-        kind: str,
-        path: str | None = None,
-        mime_type: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
-        if self.get_run(run_id) is None:
-            return None
-        artifact_id = _new_id("art")
-        with get_db_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO agent_artifacts (id, run_id, kind, path, mime_type, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    artifact_id,
-                    run_id,
-                    kind,
-                    path,
-                    mime_type,
-                    _json_dumps(metadata or {}),
-                ),
-            )
-            conn.execute(
-                "UPDATE agent_runs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (run_id,),
-            )
-            conn.commit()
-        return self.get_artifact(artifact_id)
-
-    def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
-        with get_db_connection(use_row_factory=True) as conn:
-            row = conn.execute(
-                "SELECT * FROM agent_artifacts WHERE id = ?",
-                (artifact_id,),
-            ).fetchone()
-        return _row_to_artifact(row) if row else None
-
-    def list_artifacts(self, run_id: str) -> list[dict[str, Any]]:
-        with get_db_connection(use_row_factory=True) as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM agent_artifacts
-                WHERE run_id = ?
-                ORDER BY created_at ASC
-                """,
-                (run_id,),
-            ).fetchall()
-        return [_row_to_artifact(row) for row in rows]
 
     def create_task(
         self,
