@@ -10,6 +10,8 @@ from typing import Any
 
 from core.database import get_db_connection, init_db
 
+from ._capability_store import CapabilityStoreMixin
+from ._connector_request_store import ConnectorRequestStoreMixin
 from ._row_converters import (
     _json_loads,
     _row_to_artifact,
@@ -33,8 +35,15 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
-class AgentStore:
-    """Persistence helper for durable agent platform records."""
+class AgentStore(CapabilityStoreMixin, ConnectorRequestStoreMixin):
+    """Persistence helper for durable agent platform records.
+
+    Domain-specific groups of methods are split into mixins under
+    ``server/agent/_*_store.py`` and composed here. ``AgentStore`` itself
+    keeps the runs / messages / events / artifacts / tasks / task-steps /
+    task-capabilities / capability-registry methods that share a lot of
+    cross-table state and are too tightly coupled to extract safely yet.
+    """
 
     def __init__(self) -> None:
         init_db()
@@ -771,267 +780,6 @@ class AgentStore:
                 (task_id,),
             ).fetchall()
         return [_row_to_task_capability(row) for row in rows]
-
-    def create_connector_request(
-        self,
-        *,
-        task_id: str,
-        connector_type: str,
-        name: str,
-        step_id: str | None = None,
-        run_id: str | None = None,
-        status: str = "pending_review",
-        adapter: dict[str, Any] | None = None,
-        parameters: dict[str, Any] | None = None,
-        result: dict[str, Any] | None = None,
-        error: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
-        if self.get_task(task_id) is None:
-            return None
-        request_id = _new_id("creq")
-        with get_db_connection(use_row_factory=True) as conn:
-            conn.execute(
-                """
-                INSERT INTO agent_connector_requests (
-                    id, task_id, step_id, run_id, connector_type, name, status,
-                    adapter_json, parameters_json, result_json, error_json,
-                    completed_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE
-                    WHEN ? IN ('completed', 'failed', 'cancelled') THEN CURRENT_TIMESTAMP
-                    ELSE NULL
-                END)
-                """,
-                (
-                    request_id,
-                    task_id,
-                    step_id,
-                    run_id,
-                    connector_type,
-                    name,
-                    status or "pending_review",
-                    _json_dumps(adapter or {}),
-                    _json_dumps(parameters or {}),
-                    _json_dumps(result or {}),
-                    _json_dumps(error or {}),
-                    status or "pending_review",
-                ),
-            )
-            conn.commit()
-            row = conn.execute(
-                "SELECT * FROM agent_connector_requests WHERE id = ?",
-                (request_id,),
-            ).fetchone()
-        return _row_to_connector_request(row) if row else None
-
-    def get_connector_request(self, request_id: str) -> dict[str, Any] | None:
-        with get_db_connection(use_row_factory=True) as conn:
-            row = conn.execute(
-                "SELECT * FROM agent_connector_requests WHERE id = ?",
-                (request_id,),
-            ).fetchone()
-        return _row_to_connector_request(row) if row else None
-
-    def list_connector_requests(
-        self,
-        *,
-        task_id: str | None = None,
-        step_id: str | None = None,
-        status: str | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        clauses: list[str] = []
-        values: list[Any] = []
-        if task_id:
-            clauses.append("task_id = ?")
-            values.append(task_id)
-        if step_id:
-            clauses.append("step_id = ?")
-            values.append(step_id)
-        if status:
-            clauses.append("status = ?")
-            values.append(status)
-        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        values.append(max(1, min(int(limit), 500)))
-        with get_db_connection(use_row_factory=True) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT * FROM agent_connector_requests
-                {where_sql}
-                ORDER BY updated_at DESC, created_at DESC
-                LIMIT ?
-                """,
-                values,
-            ).fetchall()
-        return [_row_to_connector_request(row) for row in rows]
-
-    def update_connector_request(
-        self,
-        request_id: str,
-        updates: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        scalar_columns = {"status", "connector_type", "name", "step_id", "run_id"}
-        json_columns = {
-            "adapter": "adapter_json",
-            "parameters": "parameters_json",
-            "result": "result_json",
-            "error": "error_json",
-        }
-        assignments: list[str] = []
-        values: list[Any] = []
-        for key, value in updates.items():
-            if key in scalar_columns:
-                assignments.append(f"{key} = ?")
-                values.append(value)
-            elif key in json_columns:
-                assignments.append(f"{json_columns[key]} = ?")
-                values.append(_json_dumps(value or {}))
-        status = updates.get("status")
-        if status in {"completed", "failed", "cancelled"}:
-            assignments.append("completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)")
-        if not assignments:
-            return self.get_connector_request(request_id)
-        assignments.append("updated_at = CURRENT_TIMESTAMP")
-        values.append(request_id)
-        with get_db_connection(use_row_factory=True) as conn:
-            cursor = conn.execute(
-                f"""
-                UPDATE agent_connector_requests
-                SET {', '.join(assignments)}
-                WHERE id = ?
-                """,
-                values,
-            )
-            conn.commit()
-            if cursor.rowcount == 0:
-                return None
-            row = conn.execute(
-                "SELECT * FROM agent_connector_requests WHERE id = ?",
-                (request_id,),
-            ).fetchone()
-        return _row_to_connector_request(row) if row else None
-
-    def upsert_capability(
-        self,
-        *,
-        capability_type: str,
-        name: str,
-        provider_id: str | None = None,
-        status: str = "available",
-        scope: str = "global",
-        source: str = "codebridge",
-        description: str | None = None,
-        permission_level: str = "approval",
-        desktop_only: bool = False,
-        local_only: bool = True,
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        capability_id = f"cap_{uuid.uuid5(uuid.NAMESPACE_URL, '|'.join([capability_type, name, provider_id or '', source])).hex}"
-        with get_db_connection() as conn:
-            existing = conn.execute(
-                """
-                SELECT id FROM agent_capabilities
-                WHERE type = ?
-                  AND name = ?
-                  AND IFNULL(provider_id, '') = ?
-                  AND source = ?
-                """,
-                (capability_type, name, provider_id or "", source),
-            ).fetchone()
-            if existing:
-                capability_id = str(existing[0])
-                conn.execute(
-                    """
-                    UPDATE agent_capabilities
-                    SET status = ?,
-                        scope = ?,
-                        description = ?,
-                        permission_level = ?,
-                        desktop_only = ?,
-                        local_only = ?,
-                        metadata_json = ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (
-                        status,
-                        scope,
-                        description,
-                        permission_level,
-                        1 if desktop_only else 0,
-                        1 if local_only else 0,
-                        _json_dumps(metadata or {}),
-                        capability_id,
-                    ),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO agent_capabilities (
-                        id, type, name, provider_id, status, scope, source,
-                        description, permission_level, desktop_only, local_only,
-                        metadata_json
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                (
-                    capability_id,
-                    capability_type,
-                    name,
-                    provider_id,
-                    status,
-                    scope,
-                    source,
-                    description,
-                    permission_level,
-                    1 if desktop_only else 0,
-                    1 if local_only else 0,
-                    _json_dumps(metadata or {}),
-                ),
-                )
-            conn.commit()
-        return self.get_capability(capability_id) or {}
-
-    def get_capability(self, capability_id: str) -> dict[str, Any] | None:
-        with get_db_connection(use_row_factory=True) as conn:
-            row = conn.execute(
-                "SELECT * FROM agent_capabilities WHERE id = ?",
-                (capability_id,),
-            ).fetchone()
-        return _row_to_capability(row) if row else None
-
-    def list_capabilities(
-        self,
-        *,
-        capability_type: str | None = None,
-        provider_id: str | None = None,
-        status: str | None = None,
-        limit: int = 200,
-    ) -> list[dict[str, Any]]:
-        clauses: list[str] = []
-        values: list[Any] = []
-        if capability_type:
-            clauses.append("type = ?")
-            values.append(capability_type)
-        if provider_id:
-            clauses.append("provider_id = ?")
-            values.append(provider_id)
-        if status:
-            clauses.append("status = ?")
-            values.append(status)
-        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        values.append(max(1, min(int(limit), 500)))
-        with get_db_connection(use_row_factory=True) as conn:
-            rows = conn.execute(
-                f"""
-                SELECT * FROM agent_capabilities
-                {where_sql}
-                ORDER BY type ASC, provider_id ASC, name ASC
-                LIMIT ?
-                """,
-                values,
-            ).fetchall()
-        return [_row_to_capability(row) for row in rows]
 
     def list_task_timeline(self, task_id: str) -> dict[str, Any] | None:
         task = self.get_task(task_id)
