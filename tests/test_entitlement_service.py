@@ -112,7 +112,7 @@ def test_revenuecat_active_entitlement_returns_active():
     payload = {
         "subscriber": {
             "entitlements": {
-                "code_bridge_pro": {"expires_date": future},
+                "Code Bridge Pro": {"expires_date": future},
             }
         }
     }
@@ -133,7 +133,7 @@ def test_revenuecat_expired_entitlement_returns_inactive():
     payload = {
         "subscriber": {
             "entitlements": {
-                "code_bridge_pro": {"expires_date": past},
+                "Code Bridge Pro": {"expires_date": past},
             }
         }
     }
@@ -152,7 +152,7 @@ def test_revenuecat_lifetime_entitlement_returns_active():
     payload = {
         "subscriber": {
             "entitlements": {
-                "code_bridge_pro": {"expires_date": None},
+                "Code Bridge Pro": {"expires_date": None},
             }
         }
     }
@@ -204,7 +204,7 @@ def test_revenuecat_503_serves_stale_cache(caplog):
     ok_payload = {
         "subscriber": {
             "entitlements": {
-                "code_bridge_pro": {"expires_date": future},
+                "Code Bridge Pro": {"expires_date": future},
             }
         }
     }
@@ -259,7 +259,7 @@ def test_revenuecat_network_failure_serves_stale_cache():
     ok_payload = {
         "subscriber": {
             "entitlements": {
-                "code_bridge_pro": {"expires_date": future},
+                "Code Bridge Pro": {"expires_date": future},
             }
         }
     }
@@ -302,7 +302,7 @@ def test_fresh_cache_is_reused_without_http_call():
     ok_payload = {
         "subscriber": {
             "entitlements": {
-                "code_bridge_pro": {"expires_date": future},
+                "Code Bridge Pro": {"expires_date": future},
             }
         }
     }

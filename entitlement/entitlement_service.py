@@ -39,7 +39,10 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Entitlement identifier configured in RevenueCat.
-ENTITLEMENT_ID = "code_bridge_pro"
+# Must match ``lib/config/revenuecat_config.dart:entitlementId`` — the
+# entitlement is registered in the RevenueCat dashboard with this exact
+# string (whitespace and capitalization included).
+ENTITLEMENT_ID = "Code Bridge Pro"
 
 # Local-dev / host-machine override. Single allowed value: ``active``.
 ENV_OVERRIDE = "CODE_BRIDGE_ENTITLEMENT_OVERRIDE"
