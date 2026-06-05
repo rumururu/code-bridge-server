@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
@@ -15,6 +16,11 @@ from .deps import is_websocket_from_tunnel
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["agent-ws"])
 _ws_manager = get_ws_manager()
+
+# Keepalive interval (seconds) for idle agent timeline websocket connections.
+# Server emits {"type": "ping"} on idle to keep intermediate proxies (tunnels,
+# load balancers) from closing the socket. Client need not respond.
+_AGENT_WS_IDLE_PING_INTERVAL = 25.0
 
 
 @router.websocket("/ws/agent/runs/{run_id}")
@@ -45,6 +51,7 @@ async def agent_run_timeline_websocket(
     await websocket.accept()
     _ws_manager.register_connection(websocket)
     last_sequence = 0
+    last_send_at = time.monotonic()
     try:
         await websocket.send_json(
             {
@@ -54,16 +61,24 @@ async def agent_run_timeline_websocket(
                 "artifacts": store.list_artifacts(run_id),
             }
         )
+        last_send_at = time.monotonic()
         while True:
             events = store.list_events(run_id, after_sequence=last_sequence, limit=100)
             for event in events:
                 last_sequence = max(last_sequence, int(event.get("sequence") or 0))
                 await websocket.send_json({"type": "agent_event", "event": event})
+                last_send_at = time.monotonic()
             try:
                 message = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
                 if message == "ping":
                     await websocket.send_json({"type": "pong"})
+                    last_send_at = time.monotonic()
             except asyncio.TimeoutError:
+                # Idle keepalive: emit a server-side ping to keep proxies/tunnels
+                # from closing the socket. Client is not expected to respond.
+                if time.monotonic() - last_send_at >= _AGENT_WS_IDLE_PING_INTERVAL:
+                    await websocket.send_json({"type": "ping"})
+                    last_send_at = time.monotonic()
                 continue
     except WebSocketDisconnect:
         logger.info("agent run websocket disconnected run_id=%s", run_id)

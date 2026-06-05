@@ -147,7 +147,7 @@ async def _handle_user_message(
 ) -> None:
     user_message_raw = message.get("content", "")
     user_message = str(user_message_raw).strip()
-    logger.info("project=%s incoming user_message len=%d", project_name, len(user_message))
+    logger.debug("project=%s incoming user_message len=%d", project_name, len(user_message))
     if not user_message:
         await websocket.send_json({"type": "error", "message": "Message content is empty"})
         return
@@ -343,7 +343,15 @@ async def _dispatch_chat_message(
 
     handler = handlers.get(message_type)
     if handler is None:
-        await websocket.send_json({"type": "error", "message": f"Unknown message type: {message_type}"})
+        # Keep the JSON error so existing clients still get a payload,
+        # but close with policy-violation (1008) so misbehaving senders stop.
+        await websocket.send_json(
+            {"type": "error", "message": f"Unknown message type: {message_type}"}
+        )
+        try:
+            await websocket.close(code=1008, reason="unknown message type")
+        except Exception:
+            logger.debug("project=%s close after unknown message failed", project_name)
         return
     await handler()
 
@@ -450,13 +458,13 @@ async def _chat_websocket_impl(
                 }
             )
 
-        logger.warning("[chat_ws] creating session project=%s path=%r", project_name, project_path)
+        logger.info("[chat_ws] creating session project=%s path=%r", project_name, project_path)
         session_result = await create_chat_session_for_current_server(
             project_name,
             project_path,
             selection_result.selection,
         )
-        logger.warning("[chat_ws] session create result success=%s error=%s", session_result.success, session_result.error_message)
+        logger.info("[chat_ws] session create result success=%s error=%s", session_result.success, session_result.error_message)
         if not session_result.success or session_result.session is None:
             await websocket.send_json(
                 {

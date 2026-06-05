@@ -7,7 +7,7 @@ import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-DEFAULT_SERVER_LOG_PATH = Path("/tmp/code_bridge_server.log")
+DEFAULT_SERVER_LOG_PATH = Path("~/.code-bridge/logs/server.log").expanduser()
 LOG_PATH_ENV_KEYS = ("CODE_BRIDGE_SERVER_LOG_PATH", "CODEBRIDGE_SERVER_LOG_PATH")
 MAX_LOG_BYTES = 2_000_000
 LOG_BACKUP_COUNT = 3
@@ -40,7 +40,12 @@ def _has_file_handler(logger: logging.Logger, log_path: Path) -> bool:
 def configure_server_logging(log_level: str = "info") -> Path:
     """Attach rotating file handler to root logger and forward uvicorn logs."""
     log_path = resolve_server_log_path()
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Create parent dir with restrictive mode (POSIX only honors the mode bits).
+    try:
+        log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except TypeError:
+        # Fallback for any Path stub without the mode kwarg.
+        log_path.parent.mkdir(parents=True, exist_ok=True)
 
     level = getattr(logging, log_level.upper(), logging.INFO)
     formatter = logging.Formatter(
@@ -59,6 +64,12 @@ def configure_server_logging(log_level: str = "info") -> Path:
         handler.setLevel(level)
         handler.setFormatter(formatter)
         root_logger.addHandler(handler)
+        # Tighten permissions on POSIX so logs aren't world-readable.
+        if os.name == "posix":
+            try:
+                os.chmod(log_path, 0o600)
+            except OSError:
+                pass
 
     if root_logger.level == logging.NOTSET:
         root_logger.setLevel(level)

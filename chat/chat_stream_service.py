@@ -22,8 +22,8 @@ APP_EVENT_SCHEMA_VERSION = 1
 PROVIDER_EVENT_SCHEMA_VERSION = 1
 
 
-def _build_marionette_context(project_name: str) -> str | None:
-    """Build Marionette context reminder if Flutter app is running.
+def _build_flutter_test_mcp_context(project_name: str) -> str | None:
+    """Build Flutter runtime MCP context reminder if a Flutter app is running.
 
     Returns a system-reminder string with VM Service URI and usage instructions,
     or None if no app is running.
@@ -43,7 +43,7 @@ def _build_marionette_context(project_name: str) -> str | None:
     return f"""<system-reminder>
 ## Flutter App Runtime Context
 
-A Flutter app is currently running and you can interact with it using Marionette MCP.
+A Flutter app is currently running and you can interact with it using Flutter Test MCP.
 
 **Device:** {device_id}
 **VM Service URI:** {vm_uri}
@@ -52,36 +52,36 @@ A Flutter app is currently running and you can interact with it using Marionette
 
 1. **Connect to app** (required before other commands):
    ```
-   mcp__marionette__connect(uri: "{vm_uri}")
+   mcp__flutter_test__connect(uri: "{vm_uri}")
    ```
 
 2. **Hot Reload** (apply code changes):
    ```
-   mcp__marionette__hot_reload()
+   mcp__flutter_test__hot_reload()
    ```
 
 3. **Get interactive elements** (find tappable widgets):
    ```
-   mcp__marionette__get_interactive_elements()
+   mcp__flutter_test__get_interactive_elements()
    ```
 
 4. **Tap element** (by key, text, or coordinates):
    ```
-   mcp__marionette__tap(text: "Button Text")
-   mcp__marionette__tap(key: "my_button_key")
+   mcp__flutter_test__tap(text: "Button Text")
+   mcp__flutter_test__tap(key: "my_button_key")
    ```
 
 5. **Enter text** (requires widget key):
    ```
-   mcp__marionette__enter_text(key: "email_field", input: "test@example.com")
+   mcp__flutter_test__enter_text(key: "email_field", input: "test@example.com")
    ```
 
 6. **Take screenshot**:
    ```
-   mcp__marionette__take_screenshots()
+   mcp__flutter_test__take_screenshots()
    ```
 
-**Workflow:** connect → get_interactive_elements → tap/enter_text → take_screenshots
+**Workflow:** connect -> get_interactive_elements -> tap/enter_text -> take_screenshots
 </system-reminder>"""
 
 
@@ -801,7 +801,7 @@ async def stream_claude_turn(
     deny_from_permission_message: str | None = None,
 ) -> bool:
     """Stream one Claude turn and forward events to websocket client."""
-    logger.warning(
+    logger.info(
         "[chat_stream] BEGIN stream_claude_turn project=%s session_type=%s",
         project_name, type(session).__name__,
     )
@@ -836,9 +836,9 @@ async def stream_claude_turn(
             raise ValueError("user_message is required when retry_from_permission is False")
 
         # Inject Marionette context if Flutter app is running
-        marionette_ctx = _build_marionette_context(project_name)
-        if marionette_ctx:
-            user_message = f"{user_message}\n\n{marionette_ctx}"
+        flutter_test_mcp_ctx = _build_flutter_test_mcp_context(project_name)
+        if flutter_test_mcp_ctx:
+            user_message = f"{user_message}\n\n{flutter_test_mcp_ctx}"
 
         event_stream = session.send_message(user_message)
 
