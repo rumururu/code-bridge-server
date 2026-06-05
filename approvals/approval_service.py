@@ -6,7 +6,7 @@ from audit.audit_store import get_audit_store
 from policy.policy_engine import default_policy_snapshot
 from policy.policy_store import decide_policy_with_rules, get_policy_rule_store
 
-from .approval_store import get_approval_store
+from .approval_store import get_approval_store, is_request_expired
 
 
 def request_approval_for_operation(
@@ -87,6 +87,31 @@ def decide_approval(
     request = store.get_request(approval_id)
     if request is None:
         return None
+
+    # Reject decisions on requests whose expires_at has already passed.
+    # We flip the row's status to ``expired`` so a stale request cannot
+    # be approved later by the same approver clicking again, and emit a
+    # dedicated audit event so reviewers can see expired-then-actioned
+    # attempts in the timeline.
+    if is_request_expired(request):
+        store.mark_expired(approval_id)
+        get_audit_store().record_event(
+            operation=request["operation"],
+            run_id=request["run_id"],
+            risk_level=request["risk_level"],
+            decision="approval_expired",
+            payload={
+                "approval_id": approval_id,
+                "attempted_decision": decision,
+                "expires_at": request.get("expires_at"),
+                "approver": approver or {},
+            },
+        )
+        return {
+            "error": "Approval request has expired",
+            "approval": store.get_request(approval_id) or request,
+        }
+
     if decision.startswith("approve") and request.get("desktop_only") and not _is_desktop_approver(approver):
         get_audit_store().record_event(
             operation=request["operation"],

@@ -2,9 +2,12 @@
 
 import asyncio
 import inspect
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Awaitable, Callable, Optional, Union
+
+logger = logging.getLogger(__name__)
 
 # Dangerous commands to block
 BLOCKED_COMMANDS = {
@@ -337,8 +340,11 @@ class TerminalSession:
             for result in results:
                 yield result
 
-        except OSError as e:
-            yield {"type": "error", "data": str(e)}
+        except OSError:
+            # Streamed errors reach the client directly, so log the full
+            # detail server-side and surface only a generic notice.
+            logger.exception("terminal stream OSError for command")
+            yield {"type": "error", "data": "Command failed"}
             yield {"type": "exit", "data": 1}
         finally:
             self.current_process = None

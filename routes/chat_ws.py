@@ -7,8 +7,6 @@ from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-logger = logging.getLogger(__name__)
-
 from agent.agent_store import get_agent_store
 from chat.chat_stream_service import stream_claude_turn
 from chat.chat_ws_service import (
@@ -23,7 +21,10 @@ from chat.chat_ws_service import (
 from pairing.pairing import get_pairing_service
 from services.chat.ws_manager import get_ws_manager
 from workspaces.workspace_store import get_workspace_store
+
 from .deps import is_websocket_from_tunnel
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])
 
@@ -168,6 +169,7 @@ async def _handle_user_message(
     run = store.create_run(
         project_name=None if _is_global_chat(project_name) else project_name,
         workspace_id=workspace_id if isinstance(workspace_id, str) else None,
+        agent_id="agent_adhoc_dev",
         provider_id=getattr(session, "provider_id", None),
         model=getattr(session, "model", None),
         title=user_message[:80],
@@ -274,9 +276,13 @@ async def _handle_abort_turn(
                 "message": "No turn in progress to abort",
             })
     except OSError as e:
+        # Send a generic message to the client; full exception detail
+        # belongs in server logs only, not the WebSocket payload.
+        logger.exception("Failed to abort turn for project=%s", project_name)
+        del e
         await websocket.send_json({
             "type": "error",
-            "message": f"Failed to abort turn: {str(e)}",
+            "message": "Failed to abort turn",
         })
 
 

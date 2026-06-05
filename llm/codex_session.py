@@ -103,6 +103,38 @@ class CodexSession(LlmSession):
                 "-C", self.project_path,
             ]
             if self.sandbox_mode == "danger-full-access":
+                # This flag fully neutralizes the in-process approval gate,
+                # so we want a loud, attributable record every time it is
+                # used. The warning lands in server logs; the audit event
+                # makes it visible in the dashboard timeline alongside
+                # normal approval decisions.
+                logger.warning(
+                    "Codex session %s starting with --dangerously-bypass-approvals-and-sandbox"
+                    " (project=%s, model=%s)",
+                    id(self),
+                    self.project_path,
+                    self.model,
+                )
+                try:
+                    from audit.audit_store import get_audit_store
+
+                    get_audit_store().record_event(
+                        operation="codex.sandbox_bypass",
+                        run_id=None,
+                        risk_level="high",
+                        decision="bypass_engaged",
+                        payload={
+                            "project_path": self.project_path,
+                            "model": self.model,
+                            "flag": "--dangerously-bypass-approvals-and-sandbox",
+                        },
+                    )
+                except Exception:  # noqa: BLE001
+                    # Never let audit failure prevent the user-requested
+                    # session from starting; surface in logs only.
+                    logger.exception(
+                        "Failed to record codex sandbox bypass audit event"
+                    )
                 cmd.append("--dangerously-bypass-approvals-and-sandbox")
             elif isinstance(self.sandbox_mode, str) and self.sandbox_mode.strip():
                 cmd.extend(["-s", self.sandbox_mode.strip()])

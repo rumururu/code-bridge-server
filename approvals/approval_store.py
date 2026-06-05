@@ -2,10 +2,31 @@
 
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from core.database import get_db_connection, init_db
 from policy.policy_store import decide_policy_with_rules
+
+
+def is_request_expired(request: dict[str, Any] | None) -> bool:
+    """Return True when the request's ``expires_at`` has already passed.
+
+    ``expires_at`` is an ISO-8601 timestamp. Naive timestamps are treated
+    as UTC to match how the database stores ``CURRENT_TIMESTAMP``.
+    """
+    if not request:
+        return False
+    raw = request.get("expires_at")
+    if not raw:
+        return False
+    try:
+        expires = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return datetime.now(tz=timezone.utc) >= expires
 
 
 def _new_id(prefix: str) -> str:
@@ -123,7 +144,28 @@ class ApprovalStore:
                 """,
                 values,
             ).fetchall()
-        return [_row_to_request(row) for row in rows]
+        # Skip rows whose expires_at has already passed; they should never
+        # be presented to the user as actionable. Status is left as
+        # 'pending' on disk — ``mark_expired`` is the canonical writer.
+        return [
+            _row_to_request(row)
+            for row in rows
+            if not is_request_expired(_row_to_request(row))
+        ]
+
+    def mark_expired(self, approval_id: str) -> dict[str, Any] | None:
+        """Flip a pending request to ``status = 'expired'`` if it's still pending."""
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                UPDATE approval_requests
+                SET status = 'expired', resolved_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = 'pending'
+                """,
+                (approval_id,),
+            )
+            conn.commit()
+        return self.get_request(approval_id)
 
     def create_decision(
         self,
