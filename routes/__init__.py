@@ -1,5 +1,8 @@
 """API route modules for Code Bridge Server."""
 
+from fastapi import Depends
+
+from .deps import verify_subscription
 from .health import router as health_router
 from .debug import router as debug_router
 from .system_settings import router as system_settings_router
@@ -60,6 +63,35 @@ _SHARED_ROUTERS = (
     filesystem_router,
 )
 
+# Routers that must NEVER be gated by the entitlement dependency. These
+# expose pre-pairing / pre-login / connectivity-check surfaces that have
+# to work *before* a subscription can possibly be validated:
+#
+# - ``health_router``: ``/api/health`` is hit by the app's connectivity
+#   probe and by external monitors. Gating it would break "is the server
+#   reachable?" checks before the user has ever signed in.
+# - ``pairing_router``: QR pairing happens before the app has any
+#   credentials at all; the whole point is to *establish* identity.
+# - ``system_remote_router``: hosts ``/api/system/remote-access/login``
+#   (Firebase SSO exchange), ``network-status``, and tunnel start/stop.
+#   These run *before* the user is signed in with the identity that
+#   RevenueCat keys off, so they cannot be gated.
+_ENTITLEMENT_EXEMPT_ROUTERS = frozenset(
+    {
+        id(health_router),
+        id(pairing_router),
+        id(system_remote_router),
+    }
+)
+
+
+def _entitlement_dependencies(router) -> list:
+    """Return the dependency list to attach when including ``router``."""
+
+    if id(router) in _ENTITLEMENT_EXEMPT_ROUTERS:
+        return []
+    return [Depends(verify_subscription)]
+
 # Routers that must NEVER be reachable on the tunnel-exposed API listener,
 # regardless of bind address. They expose local-management surfaces
 # (dashboard HTML, dashboard-auth, debug endpoints, debug-level filesystem
@@ -94,10 +126,13 @@ def register_dashboard_routers(app) -> None:
     registered on the API app at all.
     """
     for router in _SHARED_ROUTERS:
-        app.include_router(router)
+        app.include_router(router, dependencies=_entitlement_dependencies(router))
     for router in _DASHBOARD_ONLY_ROUTERS:
         app.include_router(router)
     # Root-level ``/{filename}`` catch-all must come after everything else.
+    # Preview is not in ``_SHARED_ROUTERS`` and is gated by its own
+    # preview-token mechanism; we deliberately do not stack the
+    # entitlement check on top of it.
     app.include_router(preview_router)
 
 
@@ -110,6 +145,6 @@ def register_api_routers(app) -> None:
     ``0.0.0.0`` or is fronted by a tunnel.
     """
     for router in _SHARED_ROUTERS:
-        app.include_router(router)
+        app.include_router(router, dependencies=_entitlement_dependencies(router))
     # Preview router last (root-level ``/{filename}`` catch-all).
     app.include_router(preview_router)
