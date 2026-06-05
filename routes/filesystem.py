@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from core.database import get_accessible_folder_db
 from files.filesystem_service import browse_directory, get_quick_access_paths
 
-from .deps import require_local_access
+from .deps import require_local_access, require_localhost_only
 
 router = APIRouter(
     prefix="/api/filesystem",
@@ -91,15 +91,20 @@ async def remove_accessible_folder(path: str = Query(...)) -> dict[str, Any]:
     return {"success": True, "path": path}
 
 
-@router.get("/browse-unrestricted")
+@router.get(
+    "/browse-unrestricted",
+    dependencies=[Depends(require_localhost_only)],
+)
 async def browse_filesystem_unrestricted(path: str | None = Query(None)) -> dict[str, Any]:
-    """Browse filesystem without accessible_folders restrictions.
+    """Browse filesystem without ``accessible_folders`` restrictions.
 
     This endpoint is used by the dashboard's folder picker to add new
-    accessible folders. It allows browsing any user-accessible directory.
-
-    Security: This is intended for the dashboard only. The actual
-    accessible_folders still enforce the security boundary for other operations.
+    accessible folders. It allows browsing any user-accessible directory,
+    so it is restricted to localhost (127.0.0.1 / ::1). The router-level
+    ``require_local_access`` blocks tunnel access but still allows the
+    rest of the local network — the extra ``require_localhost_only``
+    here ensures that even if the dashboard binding is ever widened from
+    127.0.0.1, only loopback clients can enumerate the host filesystem.
     """
     from pathlib import Path as PathLib
     import platform

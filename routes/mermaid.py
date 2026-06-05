@@ -6,18 +6,29 @@ avoiding external CDN JavaScript loading in the app.
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from core.mermaid_service import get_mermaid_service
 
+from .deps import verify_api_key
+
 router = APIRouter(tags=["mermaid"])
+
+# Mermaid source code is hand-authored markup — anything larger than this is
+# either an attempt to abuse the renderer or a configuration mistake.
+_MAX_MERMAID_CODE_LEN = 32 * 1024
+_ALLOWED_THEMES = frozenset({"default", "dark", "forest", "neutral"})
 
 
 class MermaidRenderRequest(BaseModel):
     """Request model for Mermaid diagram rendering."""
 
-    code: str = Field(..., description="Mermaid diagram code")
+    code: str = Field(
+        ...,
+        description="Mermaid diagram code",
+        max_length=_MAX_MERMAID_CODE_LEN,
+    )
     theme: str = Field(default="default", description="Theme: default, dark, forest, neutral")
 
 
@@ -30,13 +41,23 @@ class MermaidRenderResponse(BaseModel):
     error: str | None = None
 
 
-@router.post("/api/render-mermaid", response_model=MermaidRenderResponse)
+@router.post(
+    "/api/render-mermaid",
+    response_model=MermaidRenderResponse,
+    dependencies=[Depends(verify_api_key)],
+)
 async def render_mermaid(request: MermaidRenderRequest) -> dict[str, Any]:
     """Render a Mermaid diagram to SVG.
 
     Returns both raw SVG and base64-encoded SVG for flexibility.
     The base64 version can be used directly in an img src attribute.
     """
+    if request.theme not in _ALLOWED_THEMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported theme. Allowed: {sorted(_ALLOWED_THEMES)}",
+        )
+
     service = get_mermaid_service()
 
     if not service.is_available:

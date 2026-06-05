@@ -34,6 +34,10 @@ class PairingRoutesTest(unittest.TestCase):
     def tearDown(self):
         self.client.close()
 
+    # Sample tokens matching secrets.token_hex(16) — 32 lowercase hex chars.
+    _VALID_PAIR_TOKEN = "0123456789abcdef0123456789abcdef"
+    _OTHER_VALID_PAIR_TOKEN = "fedcba9876543210fedcba9876543210"
+
     def test_verify_pair_token_failure_returns_400(self):
         with patch(
             "routes.pairing.verify_pair_token_for_current_server",
@@ -45,10 +49,27 @@ class PairingRoutesTest(unittest.TestCase):
                 )
             ),
         ):
-            response = self.client.post("/api/pair/verify", json={"pair_token": "expired"})
+            response = self.client.post(
+                "/api/pair/verify",
+                json={"pair_token": self._OTHER_VALID_PAIR_TOKEN},
+            )
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json().get("error"), "Pair token expired")
+
+    def test_verify_pair_token_rejects_malformed_token(self):
+        # Malformed payload must never reach the verification flow.
+        with patch(
+            "routes.pairing.verify_pair_token_for_current_server",
+            new=AsyncMock(),
+        ) as mock_verify_flow:
+            response = self.client.post(
+                "/api/pair/verify",
+                json={"pair_token": "not-a-real-token"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        mock_verify_flow.assert_not_called()
 
     def test_get_pair_qr_uses_pairing_data_response_builder(self):
         qr_result = PairingQrResult(
@@ -103,13 +124,16 @@ class PairingRoutesTest(unittest.TestCase):
                 )
             ),
         ) as mock_verify_flow:
-            response = self.client.post("/api/pair/verify", json={"pair_token": "valid"})
+            response = self.client.post(
+                "/api/pair/verify",
+                json={"pair_token": self._VALID_PAIR_TOKEN},
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json().get("success"))
         self.assertEqual(response.json().get("api_key"), "key-1")
         mock_verify_flow.assert_awaited_once_with(
-            pair_token="valid",
+            pair_token=self._VALID_PAIR_TOKEN,
             client_id=None,
             device_name=None,
             firebase_id_token=None,
@@ -131,7 +155,7 @@ class PairingRoutesTest(unittest.TestCase):
             response = self.client.post(
                 "/api/pair/verify",
                 json={
-                    "pair_token": "valid",
+                    "pair_token": self._VALID_PAIR_TOKEN,
                     "firebase_id_token": "id-token",
                     "firebase_refresh_token": "refresh-token",
                 },
@@ -141,7 +165,7 @@ class PairingRoutesTest(unittest.TestCase):
         body = response.json()
         self.assertEqual(body.get("error"), "Firebase registration failed")
         mock_verify_flow.assert_awaited_once_with(
-            pair_token="valid",
+            pair_token=self._VALID_PAIR_TOKEN,
             client_id=None,
             device_name=None,
             firebase_id_token="id-token",
@@ -207,11 +231,24 @@ class PairingRoutesTest(unittest.TestCase):
             expired=False,
         )
 
+        # Token must match the secrets.token_hex(16) shape — 32 hex chars.
+        valid_token = "0123456789abcdef0123456789abcdef"
         with patch("routes.pairing.get_pair_token_status_for_current_server", return_value=status):
-            response = self.client.get("/api/pair/token-status/token-1")
+            response = self.client.get(f"/api/pair/token-status/{valid_token}")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"exists": True, "used": False, "expired": False})
+
+    def test_get_token_status_rejects_malformed_token(self):
+        # The route should reject obviously-wrong tokens cheaply (400),
+        # without invoking the pairing service.
+        with patch(
+            "routes.pairing.get_pair_token_status_for_current_server",
+        ) as service:
+            response = self.client.get("/api/pair/token-status/not-a-real-token")
+
+        self.assertEqual(response.status_code, 400)
+        service.assert_not_called()
 
     def test_revoke_paired_client_returns_404_when_missing(self):
         revoke_result = PairingRevokeResult(

@@ -31,92 +31,85 @@ from .devices import router as devices_router
 from .scrcpy_proxy import router as scrcpy_proxy_router
 
 
-def register_routers(app) -> None:
-    """Register all API routers with the FastAPI app.
+# Routers shared by both apps (Dashboard and API). Ordered so that the
+# preview router (root-level ``/{filename}`` catch-all) stays last when
+# this list is registered.
+_SHARED_ROUTERS = (
+    health_router,
+    system_settings_router,
+    system_remote_router,
+    system_inspect_router,
+    chat_ws_router,
+    chat_sessions_router,
+    workspaces_router,
+    agents_router,
+    agent_ws_router,
+    app_builder_router,
+    approvals_router,
+    audit_router,
+    policies_router,
+    usage_router,
+    mermaid_router,
+    pairing_router,
+    projects_router,
+    files_router,
+    git_router,
+    terminal_router,
+    devices_router,
+    scrcpy_proxy_router,
+    filesystem_router,
+)
 
-    Most HTTP/WebSocket routes are registered through modular routers.
-    The preview router is intentionally registered last because it has
-    a root-level catch-all (``/{filename}``).
+# Routers that must NEVER be reachable on the tunnel-exposed API listener,
+# regardless of bind address. They expose local-management surfaces
+# (dashboard HTML, dashboard-auth, debug endpoints, debug-level filesystem
+# browsing) and are mounted only by ``register_dashboard_routers``.
+_DASHBOARD_ONLY_ROUTERS = (
+    debug_router,
+    dashboard_auth_router,
+    dashboard_router,
+)
+
+
+def register_routers(app) -> None:
+    """Register every available router (legacy single-app mode).
+
+    Kept for backward compatibility with ``create_code_bridge_app``. New
+    code should use :func:`register_dashboard_routers` /
+    :func:`register_api_routers` so the dashboard vs. tunnel boundary is
+    explicit at the router-registration layer, not just at the bind
+    address.
     """
-    app.include_router(health_router)
-    app.include_router(debug_router)
-    app.include_router(system_settings_router)
-    app.include_router(system_remote_router)
-    app.include_router(system_inspect_router)
-    app.include_router(chat_ws_router)
-    app.include_router(chat_sessions_router)
-    app.include_router(workspaces_router)
-    app.include_router(agents_router)
-    app.include_router(agent_ws_router)
-    app.include_router(app_builder_router)
-    app.include_router(approvals_router)
-    app.include_router(audit_router)
-    app.include_router(policies_router)
-    app.include_router(usage_router)
-    app.include_router(mermaid_router)
-    # Incremental migration
-    app.include_router(pairing_router)
-    app.include_router(projects_router)
-    app.include_router(files_router)
-    app.include_router(git_router)
-    app.include_router(terminal_router)
-    app.include_router(devices_router)
-    app.include_router(scrcpy_proxy_router)
-    app.include_router(filesystem_router)
-    # Dashboard auth router for login/password management
-    app.include_router(dashboard_auth_router)
-    # Dashboard router has root / redirect and /dashboard page
-    app.include_router(dashboard_router)
-    # Keep preview router last because it includes a root-level /{filename} catch-all route.
-    app.include_router(preview_router)
+    register_dashboard_routers(app)
 
 
 def register_dashboard_routers(app) -> None:
-    """Register Dashboard-specific routers (localhost only, not tunnel-exposed).
+    """Register routers for the Dashboard app (localhost-only listener).
 
-    This includes all routers for the full admin dashboard experience.
-    The dashboard app binds to 127.0.0.1 only, so it's not accessible
-    externally even if tunnel is running.
+    Includes both shared API routers and dashboard-exclusive routers
+    (HTML pages, auth, debug). Even though the dashboard listener binds
+    to 127.0.0.1 only, declaring the dashboard-exclusive set here keeps
+    a defense-in-depth boundary: changing the bind address alone is not
+    enough to leak debug/dashboard-auth endpoints, because they are not
+    registered on the API app at all.
     """
-    # Include all routers - dashboard needs full access
-    register_routers(app)
+    for router in _SHARED_ROUTERS:
+        app.include_router(router)
+    for router in _DASHBOARD_ONLY_ROUTERS:
+        app.include_router(router)
+    # Root-level ``/{filename}`` catch-all must come after everything else.
+    app.include_router(preview_router)
 
 
 def register_api_routers(app) -> None:
-    """Register API-only routers (tunnel-exposed for external access).
+    """Register routers for the tunnel-exposed API app.
 
-    Excludes:
-    - Dashboard HTML pages (/, /dashboard, /pair)
-    - Dashboard auth endpoints (/api/dashboard/auth/*)
-    - Debug endpoints (/api/debug/*)
-
-    These are excluded because:
-    - Dashboard pages should only be accessed locally
-    - Dashboard auth/debug are local management features
+    Includes only the shared routers and the preview catch-all. The
+    dashboard HTML, dashboard-auth and debug routers are deliberately
+    omitted so they cannot be reached even if the API binds to
+    ``0.0.0.0`` or is fronted by a tunnel.
     """
-    app.include_router(health_router)
-    app.include_router(system_settings_router)
-    app.include_router(system_remote_router)
-    app.include_router(system_inspect_router)
-    app.include_router(chat_ws_router)
-    app.include_router(chat_sessions_router)
-    app.include_router(workspaces_router)
-    app.include_router(agents_router)
-    app.include_router(agent_ws_router)
-    app.include_router(app_builder_router)
-    app.include_router(approvals_router)
-    app.include_router(audit_router)
-    app.include_router(policies_router)
-    app.include_router(usage_router)
-    app.include_router(mermaid_router)
-    # Feature routers
-    app.include_router(pairing_router)
-    app.include_router(projects_router)
-    app.include_router(files_router)
-    app.include_router(git_router)
-    app.include_router(terminal_router)
-    app.include_router(devices_router)
-    app.include_router(scrcpy_proxy_router)
-    app.include_router(filesystem_router)
-    # Preview router last (has root-level catch-all)
+    for router in _SHARED_ROUTERS:
+        app.include_router(router)
+    # Preview router last (root-level ``/{filename}`` catch-all).
     app.include_router(preview_router)

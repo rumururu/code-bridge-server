@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import warnings
 from typing import Any, Callable
 
 from fastapi import FastAPI
@@ -12,13 +14,38 @@ from core.config import get_config
 from routes import register_api_routers, register_dashboard_routers, register_routers
 from core.server_logging import configure_server_logging
 
+logger = logging.getLogger(__name__)
+
 
 def create_code_bridge_app(
     *,
     config: Any | None = None,
     router_registrar: Callable[[FastAPI], None] = register_routers,
 ) -> FastAPI:
-    """Create and configure Code Bridge FastAPI application (legacy single-app mode)."""
+    """Create the legacy single-app variant.
+
+    .. deprecated::
+        Use :func:`create_dashboard_app` (localhost-only, 127.0.0.1) and
+        :func:`create_api_app` (tunnel-exposed) instead. The single-app
+        variant exposes dashboard HTML, dashboard-auth and debug routes
+        on the same port as the API, so binding it to ``0.0.0.0`` or
+        routing it through a tunnel leaks local-management surfaces.
+
+    Retained for the ``--single`` CLI flag and existing tests. New code
+    must use the dual-app entry points.
+    """
+    warnings.warn(
+        "create_code_bridge_app() is deprecated; use create_dashboard_app() "
+        "and create_api_app() so the dashboard/API boundary is enforced at "
+        "the routing layer instead of relying on the bind address.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    logger.warning(
+        "Starting in legacy single-app mode. Dashboard HTML, auth and "
+        "debug routes share the API port — do not bind to 0.0.0.0 or "
+        "expose this port through a tunnel."
+    )
     resolved_config = config or get_config()
     configure_server_logging(getattr(resolved_config, "log_level", "info"))
 
