@@ -1,11 +1,20 @@
 """Common dependencies for API routes."""
 
+import asyncio
+import logging
 from typing import Any, Optional
 
 from fastapi import Cookie, Header, HTTPException, Query, Request, WebSocket
 
 from auth.auth_service import validate_api_key_for_current_server
 from dashboard.dashboard_auth_service import get_dashboard_auth_status
+
+logger = logging.getLogger(__name__)
+
+# Default interval for the WS periodic re-authentication loop (seconds).
+# Picked to bound revocation latency to ~30s without producing meaningful
+# load on the pairing/config check path.
+WS_REAUTH_INTERVAL_SECONDS = 30.0
 
 TUNNEL_HEADER_NAMES = (
     "CF-Connecting-IP",
@@ -156,3 +165,71 @@ async def require_dashboard_auth(
             status_code=401,
             detail="Dashboard authentication required",
         )
+
+
+async def _periodic_reauth_loop(
+    websocket: Any,
+    api_key: Optional[str],
+    interval_seconds: float,
+    *,
+    validator: Any = None,
+) -> None:
+    """Background loop: revalidate ``api_key`` every ``interval_seconds``.
+
+    On revocation (validator returns ``success=False``), closes the websocket
+    with code 4001 / reason ``auth_invalid`` so clients (already hardened by
+    BridgeService WS-2 phase 2 work) can drop into the auth-failed UI and
+    re-authenticate. Transient validator exceptions are logged at WARNING and
+    do **not** close the socket — only an explicit ``success=False`` from the
+    validator is treated as revocation.
+    """
+    check = validator or validate_api_key_for_current_server
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            raise
+
+        try:
+            result = check(api_key)
+            still_valid = bool(getattr(result, "success", False))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "periodic reauth check raised; will retry next tick",
+                exc_info=True,
+            )
+            continue
+
+        if still_valid:
+            continue
+
+        logger.info("periodic reauth detected revoked api key; closing ws")
+        try:
+            await websocket.close(code=4001, reason="auth_invalid")
+        except Exception:
+            logger.debug("periodic reauth: close raised", exc_info=True)
+        return
+
+
+def start_periodic_reauth_task(
+    websocket: Any,
+    api_key: Optional[str],
+    *,
+    interval_seconds: float = WS_REAUTH_INTERVAL_SECONDS,
+    validator: Any = None,
+) -> asyncio.Task:
+    """Spawn a background task that re-validates ``api_key`` on a fixed cadence.
+
+    Callers must ``cancel()`` the returned task in their ``finally`` block to
+    avoid leaks when the websocket disconnects.
+    """
+    return asyncio.create_task(
+        _periodic_reauth_loop(
+            websocket,
+            api_key,
+            interval_seconds,
+            validator=validator,
+        )
+    )

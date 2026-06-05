@@ -11,7 +11,7 @@ from agent.agent_store import get_agent_store
 from auth.auth_service import validate_api_key_for_current_server
 from services.chat.ws_manager import get_ws_manager
 
-from .deps import is_websocket_from_tunnel
+from .deps import is_websocket_from_tunnel, start_periodic_reauth_task
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["agent-ws"])
@@ -52,6 +52,9 @@ async def agent_run_timeline_websocket(
     _ws_manager.register_connection(websocket)
     last_sequence = 0
     last_send_at = time.monotonic()
+    # WS-1: periodic re-auth — revoked api key tears down the stream
+    # within ~one interval instead of persisting until disconnect.
+    reauth_task = start_periodic_reauth_task(websocket, api_key)
     try:
         await websocket.send_json(
             {
@@ -83,4 +86,6 @@ async def agent_run_timeline_websocket(
     except WebSocketDisconnect:
         logger.info("agent run websocket disconnected run_id=%s", run_id)
     finally:
+        if reauth_task is not None and not reauth_task.done():
+            reauth_task.cancel()
         _ws_manager.unregister_connection(websocket)

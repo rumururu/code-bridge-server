@@ -28,6 +28,12 @@ def _json_loads(value: str | None, default: Any) -> Any:
 
 
 def _row_to_audit_event(row: Any) -> dict[str, Any]:
+    # ``redacted_categories`` is a post-migration column; older rows / older
+    # DBs may not expose it via sqlite3.Row, so guard the lookup.
+    try:
+        raw_categories = row["redacted_categories"]
+    except (IndexError, KeyError):
+        raw_categories = None
     return {
         "id": row["id"],
         "timestamp": row["timestamp"],
@@ -45,6 +51,7 @@ def _row_to_audit_event(row: Any) -> dict[str, Any]:
         "decision": row["decision"],
         "payload": _json_loads(row["payload_redacted_json"], {}),
         "affected_paths": _json_loads(row["affected_paths_json"], []),
+        "redacted_categories": _json_loads(raw_categories, []),
         "hash_prev": row["hash_prev"],
         "hash_current": row["hash_current"],
     }
@@ -75,8 +82,12 @@ class AuditStore:
         affected_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         event_id = _new_id()
-        redacted_payload = redact_payload(payload or {})
+        redacted_payload, redacted_categories = redact_payload(payload or {})
         affected_paths = affected_paths or []
+        # Deterministic ordering so equality assertions in tests are stable
+        # and identical category sets serialize to the same JSON string.
+        categories_list = sorted(redacted_categories)
+        categories_json = _json_dumps(categories_list) if categories_list else None
         with get_db_connection(use_row_factory=True) as conn:
             prev_hash_row = conn.execute(
                 """
@@ -100,9 +111,10 @@ class AuditStore:
                     id, actor_type, client_id, device_name, project_name,
                     provider_id, model, session_id, run_id, operation, resource,
                     risk_level, decision, payload_redacted_json,
-                    affected_paths_json, hash_prev, hash_current
+                    affected_paths_json, redacted_categories,
+                    hash_prev, hash_current
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -120,6 +132,7 @@ class AuditStore:
                     decision,
                     _json_dumps(redacted_payload),
                     _json_dumps(affected_paths),
+                    categories_json,
                     prev_hash,
                     hash_current,
                 ),

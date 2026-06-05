@@ -22,7 +22,7 @@ from pairing.pairing import get_pairing_service
 from services.chat.ws_manager import get_ws_manager
 from workspaces.workspace_store import get_workspace_store
 
-from .deps import is_websocket_from_tunnel
+from .deps import is_websocket_from_tunnel, start_periodic_reauth_task
 
 logger = logging.getLogger(__name__)
 
@@ -430,6 +430,9 @@ async def _chat_websocket_impl(
     logger.info("accepted project=%s path=%s", project_name, websocket.url.path)
 
     active_turn_task: asyncio.Task[None] | None = None
+    # WS-1: periodic re-auth so revoked api keys terminate the live stream
+    # rather than waiting for next handshake.
+    reauth_task = start_periodic_reauth_task(ws, api_key)
     try:
         project_path = access.project_path or ""
         local_port = access.local_port or 0
@@ -588,5 +591,7 @@ async def _chat_websocket_impl(
     finally:
         if active_turn_task is not None and not active_turn_task.done():
             active_turn_task.cancel()
+        if reauth_task is not None and not reauth_task.done():
+            reauth_task.cancel()
         # Always unregister connection when done
         _ws_manager.unregister_connection(websocket)

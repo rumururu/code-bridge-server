@@ -18,6 +18,29 @@ LEGACY_FOUNDATION_SCHEMA_VERSION = 2026052800
 AGENT_COCKPIT_SCHEMA_VERSION = 2026052801
 WORK_COCKPIT_SCHEMA_VERSION = 2026052802
 TASK_SCHEDULES_SCHEMA_VERSION = 2026052803
+DRY_RUN_SUPPORT_SCHEMA_VERSION = 2026060100
+AUDIT_REDACTED_CATEGORIES_SCHEMA_VERSION = 2026060500
+
+_PSEUDO_AGENTS = [
+    {
+        "id": "agent_legacy_chat",
+        "name": "Legacy chat",
+        "description": "기존 데이터 마이그레이션용 placeholder. 신규 run/task에 사용 금지.",
+        "system_prompt": "",
+        "provider_id": None,
+        "model": None,
+        "is_pseudo": 1,
+    },
+    {
+        "id": "agent_adhoc_dev",
+        "name": "Ad-hoc Dev",
+        "description": "Dev ChatPanel 즉석 채팅이 묶이는 pseudo-agent. 메모리 누적 안 함, UI 노출 안 함.",
+        "system_prompt": "",
+        "provider_id": None,
+        "model": None,
+        "is_pseudo": 1,
+    },
+]
 
 
 @contextmanager
@@ -305,6 +328,26 @@ def _add_column_if_missing(
     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _seed_pseudo_agents(conn: sqlite3.Connection) -> None:
+    for agent in _PSEUDO_AGENTS:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO agents
+              (id, name, description, system_prompt, provider_id, model, is_pseudo)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                agent["id"],
+                agent["name"],
+                agent["description"],
+                agent["system_prompt"],
+                agent["provider_id"],
+                agent["model"],
+                agent["is_pseudo"],
+            ),
+        )
+
+
 def _migrate_work_cockpit_foundation(conn: sqlite3.Connection) -> None:
     for column, definition in (
         ("project_name", "TEXT"),
@@ -501,6 +544,83 @@ def _migrate_task_schedules(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migrate_agents_and_memories(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS agents (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            system_prompt TEXT NOT NULL DEFAULT '',
+            provider_id TEXT,
+            model TEXT,
+            tools_json TEXT NOT NULL DEFAULT '[]',
+            flow_json TEXT NOT NULL DEFAULT '[]',
+            policy_overrides_json TEXT NOT NULL DEFAULT '{}',
+            is_pseudo INTEGER NOT NULL DEFAULT 0,
+            archived_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agents_archived
+        ON agents(archived_at);
+
+        CREATE TABLE IF NOT EXISTS agent_memories (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source_run_id TEXT,
+            source_event_type TEXT NOT NULL DEFAULT 'manual',
+            pinned INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(agent_id) REFERENCES agents(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_memories_agent
+        ON agent_memories(agent_id, pinned DESC, created_at DESC);
+    """)
+
+    _add_column_if_missing(conn, "agent_runs", "agent_id", "TEXT")
+    _add_column_if_missing(conn, "agent_tasks", "assigned_agent_id", "TEXT")
+
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_agent_id
+        ON agent_runs(agent_id);
+
+        CREATE INDEX IF NOT EXISTS idx_agent_tasks_assigned_agent
+        ON agent_tasks(assigned_agent_id);
+    """)
+
+    # Seed pseudo-agents and backfill existing rows.
+    _seed_pseudo_agents(conn)
+    conn.execute(
+        "UPDATE agent_runs SET agent_id = 'agent_legacy_chat' "
+        "WHERE agent_id IS NULL"
+    )
+    conn.execute(
+        "UPDATE agent_tasks SET assigned_agent_id = 'agent_legacy_chat' "
+        "WHERE assigned_agent_id IS NULL"
+    )
+
+
+def _migrate_dry_run_support(conn: sqlite3.Connection) -> None:
+    _add_column_if_missing(conn, "agent_runs", "dry_run", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "agent_runs", "simulated_summary_json", "TEXT")
+
+
+def _migrate_audit_redacted_categories(conn: sqlite3.Connection) -> None:
+    """AP-3: record which redaction categories were hit per audit row.
+
+    Stored as a JSON-encoded array of strings (e.g. ``["aws_key","email"]``)
+    so compliance can prove what kind of secret was caught without
+    re-running the redactor over historical payloads. NULL when no
+    redaction fired.
+    """
+    _add_column_if_missing(
+        conn, "audit_events", "redacted_categories", "TEXT"
+    )
+
+
 def _migrate_legacy_foundation(conn: sqlite3.Connection) -> None:
     """Original tables that predated the schema_migrations framework.
 
@@ -574,6 +694,17 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
         TASK_SCHEDULES_SCHEMA_VERSION,
         "task_schedules",
         _migrate_task_schedules,
+    ),
+    (2026053100, "agents_and_memories", _migrate_agents_and_memories),
+    (
+        DRY_RUN_SUPPORT_SCHEMA_VERSION,
+        "dry_run_support",
+        _migrate_dry_run_support,
+    ),
+    (
+        AUDIT_REDACTED_CATEGORIES_SCHEMA_VERSION,
+        "audit_redacted_categories",
+        _migrate_audit_redacted_categories,
     ),
 )
 
