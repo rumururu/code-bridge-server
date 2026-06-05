@@ -1,8 +1,14 @@
 #!/bin/bash
 # Code Bridge Server - Installation Script for macOS/Linux
-# Usage: curl -fsSL https://raw.githubusercontent.com/rumururu/code-bridge-server/8817ce8/install/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/rumururu/code-bridge-server/<sha>/install/install.sh | bash
+#
+# Environment overrides:
+#   CODE_BRIDGE_INSTALL_DIR    target directory (default: ~/.code-bridge)
+#   CODE_BRIDGE_REF            git ref to install (default: pinned SHA below)
+#   CODE_BRIDGE_AUTO_START     0 to skip auto-start after install
+#   CODE_BRIDGE_FORCE_RESET    1 to overwrite local changes during upgrade
 
-set -e
+set -euo pipefail
 
 # Colors
 RED='\033[0;31m'
@@ -13,7 +19,14 @@ NC='\033[0m' # No Color
 
 INSTALL_DIR="${CODE_BRIDGE_INSTALL_DIR:-$HOME/.code-bridge}"
 REPO_URL="https://github.com/rumururu/code-bridge-server.git"
+# Pinned upstream commit. Override with CODE_BRIDGE_REF=main for HEAD.
+CODE_BRIDGE_REF_DEFAULT="d92ac3ab59413bf49388444b44990214ed1f608b"
+CODE_BRIDGE_REF="${CODE_BRIDGE_REF:-$CODE_BRIDGE_REF_DEFAULT}"
 MIN_PYTHON_VERSION="3.10"
+
+# cloudflared release pin (override with CODE_BRIDGE_CLOUDFLARED_VERSION).
+CLOUDFLARED_VERSION="${CODE_BRIDGE_CLOUDFLARED_VERSION:-2026.5.2}"
+CLOUDFLARED_DEB_SHA256="f7378c11f55a061b4f1f7d1bccdd07bdfd947ed95634c5f6f4ba71a20d5b1d1d"
 
 echo ""
 echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
@@ -112,27 +125,68 @@ check_cloudflared() {
 
     echo -e "${YELLOW}! cloudflared not found (optional for remote access)${NC}"
 
-    if prompt_yes_no "Install cloudflared for remote access? [y/N] "; then
-        echo -e "${CYAN}Installing cloudflared...${NC}"
-
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            # macOS
-            if command -v brew &> /dev/null; then
-                brew install cloudflare/cloudflare/cloudflared
-            else
-                echo -e "${YELLOW}Homebrew not found. Please install cloudflared manually.${NC}"
-                echo "See: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
-            fi
-        elif [[ -f /etc/debian_version ]]; then
-            # Debian/Ubuntu
-            curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-            sudo dpkg -i cloudflared.deb
-            rm cloudflared.deb
-        else
-            echo -e "${YELLOW}Please install cloudflared manually for your OS.${NC}"
-            echo "See: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
-        fi
+    if ! prompt_yes_no "Install cloudflared $CLOUDFLARED_VERSION for remote access? [y/N] "; then
+        return 0
     fi
+
+    echo -e "${CYAN}Installing cloudflared $CLOUDFLARED_VERSION...${NC}"
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        if command -v brew &> /dev/null; then
+            brew install cloudflare/cloudflare/cloudflared
+        else
+            echo -e "${YELLOW}Homebrew not found. Please install cloudflared manually:${NC}"
+            echo "  https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+        fi
+        return 0
+    fi
+
+    if [[ ! -f /etc/debian_version ]]; then
+        echo -e "${YELLOW}Automatic install only available on Debian/Ubuntu via .deb.${NC}"
+        echo "Manual download: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+        return 0
+    fi
+
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+    local deb_url="https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64.deb"
+    local deb_path="$tmp/cloudflared.deb"
+
+    echo "  Downloading $deb_url"
+    if ! curl -fL --proto '=https' --tlsv1.2 -o "$deb_path" "$deb_url"; then
+        echo -e "${RED}  Failed to download cloudflared. Skipping.${NC}"
+        return 0
+    fi
+
+    # Verify SHA256 before touching dpkg. This catches a tampered mirror
+    # OR a maintainer who bumped CLOUDFLARED_VERSION without updating the
+    # pin in this script.
+    local actual_sha
+    actual_sha="$(shasum -a 256 "$deb_path" | awk '{print $1}')"
+    if [[ "$actual_sha" != "$CLOUDFLARED_DEB_SHA256" ]]; then
+        echo -e "${RED}  cloudflared SHA256 mismatch — refusing to install.${NC}"
+        echo "    expected: $CLOUDFLARED_DEB_SHA256"
+        echo "    got:      $actual_sha"
+        return 0
+    fi
+    echo -e "${GREEN}  SHA256 verified${NC}"
+
+    # Try non-interactive sudo first so curl|bash users don't sit on a
+    # silent password prompt. Fall back to a manual instruction.
+    if sudo -n true 2>/dev/null; then
+        sudo dpkg -i "$deb_path" || echo -e "${YELLOW}  dpkg returned non-zero; cloudflared may be partially installed.${NC}"
+        return 0
+    fi
+
+    # No passwordless sudo: keep the verified deb where the user can find
+    # it after the script exits and surface a manual install command.
+    mkdir -p "$INSTALL_DIR"
+    local persisted="$INSTALL_DIR/cloudflared-${CLOUDFLARED_VERSION}.deb"
+    cp "$deb_path" "$persisted"
+    echo -e "${YELLOW}  sudo password required; skipping automatic install.${NC}"
+    echo "  Verified deb saved at: $persisted"
+    echo "  Run manually: sudo dpkg -i $persisted"
 }
 
 # Check for Node.js and install mermaid-cli for diagram rendering
@@ -167,20 +221,36 @@ check_mermaid_cli() {
 # Clone or update repository
 setup_repository() {
     echo ""
-    echo -e "${CYAN}Setting up Code Bridge Server...${NC}"
+    echo -e "${CYAN}Setting up Code Bridge Server (ref: $CODE_BRIDGE_REF)...${NC}"
 
-    if [ -d "$INSTALL_DIR" ]; then
+    if [ -d "$INSTALL_DIR/.git" ]; then
         echo "Updating existing installation..."
         cd "$INSTALL_DIR"
-        git fetch origin
-        git reset --hard origin/main
+
+        # Guard local edits before any destructive git operation. Users
+        # piping curl|bash should not silently lose customizations.
+        if ! git diff --quiet HEAD 2>/dev/null || ! git diff --quiet --cached 2>/dev/null; then
+            if [[ "${CODE_BRIDGE_FORCE_RESET:-0}" != "1" ]]; then
+                local backup="$INSTALL_DIR.bak.$(date +%Y%m%d-%H%M%S)"
+                echo -e "${YELLOW}! Local changes detected in $INSTALL_DIR${NC}"
+                echo "  Backing up working tree to: $backup"
+                cp -R "$INSTALL_DIR" "$backup"
+                echo "  Set CODE_BRIDGE_FORCE_RESET=1 to skip this backup next time."
+            else
+                echo -e "${YELLOW}! CODE_BRIDGE_FORCE_RESET=1 — discarding local changes${NC}"
+            fi
+        fi
+
+        git fetch --tags origin
+        git checkout --force "$CODE_BRIDGE_REF"
     else
         echo "Installing to $INSTALL_DIR..."
         git clone "$REPO_URL" "$INSTALL_DIR"
         cd "$INSTALL_DIR"
+        git checkout --force "$CODE_BRIDGE_REF"
     fi
 
-    echo -e "${GREEN}✓ Repository ready${NC}"
+    echo -e "${GREEN}✓ Repository ready (HEAD: $(git rev-parse --short HEAD))${NC}"
 }
 
 # Create virtual environment and install dependencies
@@ -190,17 +260,29 @@ setup_venv() {
 
     cd "$INSTALL_DIR"
 
-    # Create venv if it doesn't exist
+    # Detect requirements.txt changes between runs and rebuild the venv
+    # when they differ so an upgrade doesn't leave stale packages around.
+    local req_hash
+    req_hash="$(shasum -a 256 requirements.txt | awk '{print $1}')"
+    local marker="venv/.requirements.sha256"
+
     if [ ! -d "venv" ]; then
         echo "Creating virtual environment..."
         $PYTHON_CMD -m venv venv
+    elif [ ! -f "$marker" ] || [ "$(cat "$marker" 2>/dev/null)" != "$req_hash" ]; then
+        echo "requirements.txt changed since last install — recreating venv..."
+        rm -rf venv
+        $PYTHON_CMD -m venv venv
     fi
 
-    # Activate venv and install dependencies
     echo "Installing dependencies..."
+    # shellcheck disable=SC1091
     source venv/bin/activate
     pip install --upgrade pip -q
-    pip install -r requirements.txt -q
+    pip install --upgrade -r requirements.txt -q
+    deactivate
+
+    echo "$req_hash" > "$marker"
 
     echo -e "${GREEN}✓ Python environment ready${NC}"
 }

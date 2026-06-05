@@ -1,11 +1,26 @@
 # Code Bridge Server - Installation Script for Windows
-# Usage: iwr -useb https://raw.githubusercontent.com/rumururu/code-bridge-server/8817ce8/install/install.ps1 | iex
+# Usage: iwr -useb https://raw.githubusercontent.com/rumururu/code-bridge-server/<sha>/install/install.ps1 | iex
+#
+# Environment overrides:
+#   $env:CODE_BRIDGE_INSTALL_DIR    target directory (default: ~/.code-bridge)
+#   $env:CODE_BRIDGE_REF            git ref to install (default: pinned SHA below)
+#   $env:CODE_BRIDGE_AUTO_START     "0" to skip auto-start after install
+#   $env:CODE_BRIDGE_FORCE_RESET    "1" to overwrite local changes during upgrade
 
 $ErrorActionPreference = "Stop"
 
 $INSTALL_DIR = if ($env:CODE_BRIDGE_INSTALL_DIR) { $env:CODE_BRIDGE_INSTALL_DIR } else { "$env:USERPROFILE\.code-bridge" }
 $REPO_URL = "https://github.com/rumururu/code-bridge-server.git"
+# Pinned upstream commit. Override with $env:CODE_BRIDGE_REF = "main" for HEAD.
+$CODE_BRIDGE_REF_DEFAULT = "d92ac3ab59413bf49388444b44990214ed1f608b"
+$CODE_BRIDGE_REF = if ($env:CODE_BRIDGE_REF) { $env:CODE_BRIDGE_REF } else { $CODE_BRIDGE_REF_DEFAULT }
 $MIN_PYTHON_VERSION = [version]"3.10"
+
+# cloudflared release pin (override with $env:CODE_BRIDGE_CLOUDFLARED_VERSION).
+$CLOUDFLARED_VERSION = if ($env:CODE_BRIDGE_CLOUDFLARED_VERSION) {
+    $env:CODE_BRIDGE_CLOUDFLARED_VERSION
+} else { "2026.5.2" }
+$CLOUDFLARED_EXE_SHA256 = "20b9638f685333d623798e733effbad2487093f15ba592f6c7752360ff3b7ab7"
 
 Write-Host ""
 Write-Host "=======================================" -ForegroundColor Cyan
@@ -85,29 +100,41 @@ function Test-Cloudflared {
     } catch {
         Write-Host "[!] cloudflared not found (optional for remote access)" -ForegroundColor Yellow
 
-        $response = Read-Host "Install cloudflared for remote access? [y/N]"
-        if ($response -eq "y" -or $response -eq "Y") {
-            Write-Host "Installing cloudflared..." -ForegroundColor Cyan
+        $response = Read-Host "Install cloudflared $CLOUDFLARED_VERSION for remote access? [y/N]"
+        if ($response -ne "y" -and $response -ne "Y") { return $false }
 
-            # Download cloudflared
-            $cloudflaredUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-            $cloudflaredPath = "$INSTALL_DIR\cloudflared.exe"
+        Write-Host "Installing cloudflared $CLOUDFLARED_VERSION..." -ForegroundColor Cyan
 
-            # Create directory if it doesn't exist
-            if (-not (Test-Path $INSTALL_DIR)) {
-                New-Item -ItemType Directory -Path $INSTALL_DIR -Force | Out-Null
-            }
-
-            try {
-                Invoke-WebRequest -Uri $cloudflaredUrl -OutFile $cloudflaredPath
-                Write-Host "[OK] cloudflared downloaded to $cloudflaredPath" -ForegroundColor Green
-                Write-Host "You may want to add this to your PATH." -ForegroundColor Yellow
-            } catch {
-                Write-Host "[!] Failed to download cloudflared. Please install manually." -ForegroundColor Yellow
-                Write-Host "See: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
-            }
+        if (-not (Test-Path $INSTALL_DIR)) {
+            New-Item -ItemType Directory -Path $INSTALL_DIR -Force | Out-Null
         }
-        return $false
+
+        $cloudflaredUrl = "https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION/cloudflared-windows-amd64.exe"
+        $cloudflaredPath = Join-Path $INSTALL_DIR "cloudflared.exe"
+
+        try {
+            Invoke-WebRequest -Uri $cloudflaredUrl -OutFile $cloudflaredPath -UseBasicParsing
+        } catch {
+            Write-Host "[!] Failed to download cloudflared. Please install manually." -ForegroundColor Yellow
+            Write-Host "See: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+            return $false
+        }
+
+        # Verify SHA256 before recommending the binary to the user. A
+        # mismatch means either the mirror was tampered with or the
+        # maintainer bumped the version without updating the pin.
+        $actualSha = (Get-FileHash -Algorithm SHA256 -Path $cloudflaredPath).Hash.ToLower()
+        if ($actualSha -ne $CLOUDFLARED_EXE_SHA256.ToLower()) {
+            Write-Host "[ERROR] cloudflared SHA256 mismatch — removing untrusted download." -ForegroundColor Red
+            Write-Host "  expected: $CLOUDFLARED_EXE_SHA256"
+            Write-Host "  got:      $actualSha"
+            Remove-Item -LiteralPath $cloudflaredPath -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+
+        Write-Host "[OK] cloudflared verified and saved to $cloudflaredPath" -ForegroundColor Green
+        Write-Host "You may want to add $INSTALL_DIR to your PATH." -ForegroundColor Yellow
+        return $true
     }
 }
 
@@ -147,20 +174,40 @@ function Test-MermaidCli {
 
 function Setup-Repository {
     Write-Host ""
-    Write-Host "Setting up Code Bridge Server..." -ForegroundColor Cyan
+    Write-Host "Setting up Code Bridge Server (ref: $CODE_BRIDGE_REF)..." -ForegroundColor Cyan
 
-    if (Test-Path $INSTALL_DIR) {
+    $gitDir = Join-Path $INSTALL_DIR ".git"
+    if (Test-Path $gitDir) {
         Write-Host "Updating existing installation..."
         Set-Location $INSTALL_DIR
-        & git fetch origin
-        & git reset --hard origin/main
+
+        # Guard local edits before any destructive git operation. Users
+        # piping iwr|iex should not silently lose customizations.
+        $dirty = (& git status --porcelain) -ne $null -and (& git status --porcelain).Trim() -ne ""
+        if ($dirty) {
+            if ($env:CODE_BRIDGE_FORCE_RESET -ne "1") {
+                $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+                $backup = "$INSTALL_DIR.bak.$stamp"
+                Write-Host "[!] Local changes detected in $INSTALL_DIR" -ForegroundColor Yellow
+                Write-Host "  Backing up working tree to: $backup"
+                Copy-Item -Recurse -Force -LiteralPath $INSTALL_DIR -Destination $backup
+                Write-Host "  Set `$env:CODE_BRIDGE_FORCE_RESET = '1' to skip this backup next time."
+            } else {
+                Write-Host "[!] CODE_BRIDGE_FORCE_RESET=1 — discarding local changes" -ForegroundColor Yellow
+            }
+        }
+
+        & git fetch --tags origin
+        & git checkout --force $CODE_BRIDGE_REF
     } else {
         Write-Host "Installing to $INSTALL_DIR..."
         & git clone $REPO_URL $INSTALL_DIR
         Set-Location $INSTALL_DIR
+        & git checkout --force $CODE_BRIDGE_REF
     }
 
-    Write-Host "[OK] Repository ready" -ForegroundColor Green
+    $head = (& git rev-parse --short HEAD).Trim()
+    Write-Host "[OK] Repository ready (HEAD: $head)" -ForegroundColor Green
 }
 
 function Setup-Venv {
@@ -171,19 +218,37 @@ function Setup-Venv {
 
     Set-Location $INSTALL_DIR
 
-    # Create venv if it doesn't exist
-    if (-not (Test-Path "venv")) {
+    $reqHash = (Get-FileHash -Algorithm SHA256 -Path "requirements.txt").Hash.ToLower()
+    $marker = Join-Path "venv" ".requirements.sha256"
+
+    $needsCreate = -not (Test-Path "venv")
+    if (-not $needsCreate -and (Test-Path $marker)) {
+        $oldHash = (Get-Content -LiteralPath $marker -Raw).Trim().ToLower()
+        if ($oldHash -ne $reqHash) {
+            Write-Host "requirements.txt changed since last install — recreating venv..."
+            Remove-Item -Recurse -Force -LiteralPath "venv"
+            $needsCreate = $true
+        }
+    } elseif (-not $needsCreate) {
+        # venv exists but has no marker — treat as legacy install and rebuild.
+        Write-Host "Legacy venv detected — recreating to record dependency state..."
+        Remove-Item -Recurse -Force -LiteralPath "venv"
+        $needsCreate = $true
+    }
+
+    if ($needsCreate) {
         Write-Host "Creating virtual environment..."
         $cmdParts = $PythonCmd -split ' '
         $exe = $cmdParts[0]
-        $args = if ($cmdParts.Length -gt 1) { $cmdParts[1..($cmdParts.Length-1)] + "-m", "venv", "venv" } else { @("-m", "venv", "venv") }
-        & $exe $args
+        $venvArgs = if ($cmdParts.Length -gt 1) { $cmdParts[1..($cmdParts.Length-1)] + "-m", "venv", "venv" } else { @("-m", "venv", "venv") }
+        & $exe $venvArgs
     }
 
-    # Activate venv and install dependencies
     Write-Host "Installing dependencies..."
     & "$INSTALL_DIR\venv\Scripts\pip.exe" install --upgrade pip -q
-    & "$INSTALL_DIR\venv\Scripts\pip.exe" install -r requirements.txt -q
+    & "$INSTALL_DIR\venv\Scripts\pip.exe" install --upgrade -r requirements.txt -q
+
+    Set-Content -LiteralPath $marker -Value $reqHash -NoNewline
 
     Write-Host "[OK] Python environment ready" -ForegroundColor Green
 }
