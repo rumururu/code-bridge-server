@@ -63,16 +63,129 @@ def _with_global_chat_context(project_name: str, user_message: str) -> str:
     return f"{GLOBAL_CHAT_USAGE_CONTEXT}\n\nUser question:\n{user_message}"
 
 
-class _SerializedWebSocket:
-    """Serialize concurrent sends while a turn task and receive loop coexist."""
+# WS-4: backpressure guard tuning.
+#
+# These thresholds protect the server from a slow consumer pinning unbounded
+# memory in the asyncio send buffer. The serialized send wrapper measures the
+# JSON-encoded payload length per send, accumulates an "inflight" gauge while
+# the underlying ``websocket.send_json`` is awaited, and decrements on
+# completion. When the gauge stays above ``WS_BACKPRESSURE_HIGH_WATERMARK_BYTES``
+# for longer than ``WS_BACKPRESSURE_SLOW_CONSUMER_TIMEOUT_S``, we close the
+# socket with WebSocket code 1011 (server error) and reason ``slow_consumer``.
+#
+# We do not attempt true OS-level flow control here (that would require socket
+# buffer hooks per platform); we instead add a small ``asyncio.sleep`` between
+# sends while the gauge is high so the LLM stream loop is throttled.
+WS_BACKPRESSURE_HIGH_WATERMARK_BYTES = 4 * 1024 * 1024  # 4 MiB
+WS_BACKPRESSURE_SLEEP_S = 0.05
+WS_BACKPRESSURE_SLOW_CONSUMER_TIMEOUT_S = 5.0
+_WS_SLOW_CONSUMER_CLOSE_CODE = 1011
+_WS_SLOW_CONSUMER_CLOSE_REASON = "slow_consumer"
 
-    def __init__(self, websocket: WebSocket):
+
+class _SerializedWebSocket:
+    """Serialize concurrent sends while a turn task and receive loop coexist.
+
+    Also enforces a soft backpressure guard (WS-4): once the unacked
+    inflight-send byte count crosses ``WS_BACKPRESSURE_HIGH_WATERMARK_BYTES``
+    we log a warning and introduce a small sleep before the next send to
+    throttle the LLM producer loop. If the high-water condition persists for
+    longer than ``WS_BACKPRESSURE_SLOW_CONSUMER_TIMEOUT_S`` we close the
+    underlying socket with code 1011 and reason ``slow_consumer``.
+    """
+
+    def __init__(
+        self,
+        websocket: WebSocket,
+        *,
+        high_watermark_bytes: int = WS_BACKPRESSURE_HIGH_WATERMARK_BYTES,
+        slow_consumer_timeout_s: float = WS_BACKPRESSURE_SLOW_CONSUMER_TIMEOUT_S,
+        backpressure_sleep_s: float = WS_BACKPRESSURE_SLEEP_S,
+    ):
         self._websocket = websocket
         self._send_lock = asyncio.Lock()
+        self._inflight_bytes = 0
+        self._high_watermark_bytes = high_watermark_bytes
+        self._slow_consumer_timeout_s = slow_consumer_timeout_s
+        self._backpressure_sleep_s = backpressure_sleep_s
+        # Monotonic timestamp (asyncio loop time) at which the inflight gauge
+        # first crossed the high-water mark; reset to ``None`` once it drops
+        # back below the watermark.
+        self._high_watermark_since: float | None = None
+        self._slow_consumer_closed = False
+
+    def _estimate_payload_bytes(self, data: Any) -> int:
+        try:
+            return len(json.dumps(data, default=str).encode("utf-8"))
+        except (TypeError, ValueError):
+            # Fall back to a small constant if data cannot be serialized; the
+            # underlying send_json will surface the real error.
+            return 0
 
     async def send_json(self, data: Any) -> None:
-        async with self._send_lock:
-            await self._websocket.send_json(data)
+        if self._slow_consumer_closed:
+            # Once we have decided the consumer is slow we stop trying to push
+            # more data; the close handshake tears down the receive loop.
+            return
+
+        payload_bytes = self._estimate_payload_bytes(data)
+        # Increment _before_ acquiring the lock so payloads queued behind a
+        # blocked underlying send_json count toward the inflight gauge.
+        self._inflight_bytes += payload_bytes
+        loop = asyncio.get_event_loop()
+        now = loop.time()
+        if self._inflight_bytes >= self._high_watermark_bytes:
+            if self._high_watermark_since is None:
+                self._high_watermark_since = now
+                logger.warning(
+                    "WS send buffer high, slow client suspected",
+                    extra={
+                        "inflight_bytes": self._inflight_bytes,
+                        "high_watermark_bytes": self._high_watermark_bytes,
+                    },
+                )
+
+        try:
+            async with self._send_lock:
+                if self._slow_consumer_closed:
+                    return
+
+                # Re-evaluate after acquiring the lock so we measure how long
+                # we have spent above the watermark including any time spent
+                # waiting on the serialized send lock.
+                now = loop.time()
+                if (
+                    self._high_watermark_since is not None
+                    and now - self._high_watermark_since > self._slow_consumer_timeout_s
+                ):
+                    self._slow_consumer_closed = True
+                    logger.warning(
+                        "WS slow consumer threshold exceeded, closing",
+                        extra={
+                            "inflight_bytes": self._inflight_bytes,
+                            "elapsed_high_s": now - self._high_watermark_since,
+                        },
+                    )
+                    try:
+                        await self._websocket.close(
+                            code=_WS_SLOW_CONSUMER_CLOSE_CODE,
+                            reason=_WS_SLOW_CONSUMER_CLOSE_REASON,
+                        )
+                    except Exception:
+                        logger.debug("WS close after slow consumer failed", exc_info=True)
+                    return
+
+                if self._inflight_bytes >= self._high_watermark_bytes:
+                    # Soft producer throttle while still in the high-water
+                    # band: yield 50 ms so the LLM stream loop slows down and
+                    # the OS socket buffer has time to drain.
+                    await asyncio.sleep(self._backpressure_sleep_s)
+
+                await self._websocket.send_json(data)
+        finally:
+            self._inflight_bytes = max(0, self._inflight_bytes - payload_bytes)
+            if self._inflight_bytes < self._high_watermark_bytes:
+                self._high_watermark_since = None
 
     async def receive_text(self) -> str:
         return await self._websocket.receive_text()
