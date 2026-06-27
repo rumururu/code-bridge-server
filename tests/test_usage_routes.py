@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -11,6 +12,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 from core import database
+from llm import claude_usage
 from routes.deps import verify_api_key
 from routes.usage import router as usage_router
 
@@ -68,6 +70,29 @@ class UsageRoutesTest(unittest.TestCase):
         )
         self.assertEqual(breakdown_response.status_code, 200)
         self.assertEqual(breakdown_response.json()["items"][0]["key"], "google")
+
+    def test_cli_usage_returns_parsed_snapshot(self):
+        sample = {
+            "available": True,
+            "all_models": {"used_percent": 42.5, "reset_label": "Nov 4 at 12am (KST)"},
+            "sonnet_only": {"used_percent": 18.0, "reset_label": "Nov 4 at 12am (KST)"},
+        }
+        claude_usage._cli_stats_cache["payload"] = None
+        claude_usage._cli_stats_cache["expires_at"] = 0.0
+        with patch.object(
+            claude_usage,
+            "_probe_claude_cli_stats_via_tui",
+            return_value=sample,
+        ):
+            response = self.client.get("/api/usage/cli")
+        claude_usage._cli_stats_cache["payload"] = None
+        claude_usage._cli_stats_cache["expires_at"] = 0.0
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["available"])
+        self.assertEqual(body["all_models"]["used_percent"], 42.5)
+        self.assertEqual(body["sonnet_only"]["used_percent"], 18.0)
 
 
 if __name__ == "__main__":

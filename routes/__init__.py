@@ -1,8 +1,5 @@
 """API route modules for Code Bridge Server."""
 
-from fastapi import Depends
-
-from .deps import verify_subscription
 from .health import router as health_router
 from .debug import router as debug_router
 from .system_settings import router as system_settings_router
@@ -13,6 +10,7 @@ from .chat_ws import router as chat_ws_router
 from .chat_sessions import router as chat_sessions_router
 from .agents import router as agents_router
 from .agent_ws import router as agent_ws_router
+from .agent_browser_rtc import router as agent_browser_rtc_router
 from .app_builder import router as app_builder_router
 from .workspaces import router as workspaces_router
 from .approvals import router as approvals_router
@@ -32,6 +30,7 @@ from .projects import router as projects_router
 from .files import router as files_router
 from .devices import router as devices_router
 from .scrcpy_proxy import router as scrcpy_proxy_router
+from .secrets import router as secrets_router
 
 
 # Routers shared by both apps (Dashboard and API). Ordered so that the
@@ -47,6 +46,7 @@ _SHARED_ROUTERS = (
     workspaces_router,
     agents_router,
     agent_ws_router,
+    agent_browser_rtc_router,
     app_builder_router,
     approvals_router,
     audit_router,
@@ -61,36 +61,8 @@ _SHARED_ROUTERS = (
     devices_router,
     scrcpy_proxy_router,
     filesystem_router,
+    secrets_router,
 )
-
-# Routers that must NEVER be gated by the entitlement dependency. These
-# expose pre-pairing / pre-login / connectivity-check surfaces that have
-# to work *before* a subscription can possibly be validated:
-#
-# - ``health_router``: ``/api/health`` is hit by the app's connectivity
-#   probe and by external monitors. Gating it would break "is the server
-#   reachable?" checks before the user has ever signed in.
-# - ``pairing_router``: QR pairing happens before the app has any
-#   credentials at all; the whole point is to *establish* identity.
-# - ``system_remote_router``: hosts ``/api/system/remote-access/login``
-#   (Firebase SSO exchange), ``network-status``, and tunnel start/stop.
-#   These run *before* the user is signed in with the identity that
-#   RevenueCat keys off, so they cannot be gated.
-_ENTITLEMENT_EXEMPT_ROUTERS = frozenset(
-    {
-        id(health_router),
-        id(pairing_router),
-        id(system_remote_router),
-    }
-)
-
-
-def _entitlement_dependencies(router) -> list:
-    """Return the dependency list to attach when including ``router``."""
-
-    if id(router) in _ENTITLEMENT_EXEMPT_ROUTERS:
-        return []
-    return [Depends(verify_subscription)]
 
 # Routers that must NEVER be reachable on the tunnel-exposed API listener,
 # regardless of bind address. They expose local-management surfaces
@@ -126,13 +98,12 @@ def register_dashboard_routers(app) -> None:
     registered on the API app at all.
     """
     for router in _SHARED_ROUTERS:
-        app.include_router(router, dependencies=_entitlement_dependencies(router))
+        app.include_router(router)
     for router in _DASHBOARD_ONLY_ROUTERS:
         app.include_router(router)
     # Root-level ``/{filename}`` catch-all must come after everything else.
     # Preview is not in ``_SHARED_ROUTERS`` and is gated by its own
-    # preview-token mechanism; we deliberately do not stack the
-    # entitlement check on top of it.
+    # preview-token mechanism.
     app.include_router(preview_router)
 
 
@@ -145,6 +116,6 @@ def register_api_routers(app) -> None:
     ``0.0.0.0`` or is fronted by a tunnel.
     """
     for router in _SHARED_ROUTERS:
-        app.include_router(router, dependencies=_entitlement_dependencies(router))
+        app.include_router(router)
     # Preview router last (root-level ``/{filename}`` catch-all).
     app.include_router(preview_router)

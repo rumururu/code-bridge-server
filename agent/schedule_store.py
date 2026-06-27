@@ -107,6 +107,47 @@ def compute_next_fire(
     raise ValueError(f"unsupported schedule kind: {kind!r}")
 
 
+def compute_next_fire_at(
+    agent_id: str,
+    *,
+    now: datetime | None = None,
+) -> datetime | None:
+    """Return the nearest enabled schedule fire time for an agent."""
+    base = now or _utcnow()
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    candidates: list[datetime] = []
+    with get_db_connection(use_row_factory=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT s.expression_json, s.next_run_at
+            FROM task_schedules s
+            JOIN agent_tasks t ON t.id = s.task_id
+            WHERE s.enabled = 1
+              AND t.assigned_agent_id = ?
+            """,
+            (agent_id,),
+        ).fetchall()
+
+    for row in rows:
+        next_at = _evaluate_next_fire(row, after=base)
+        if next_at is not None:
+            candidates.append(next_at)
+    return min(candidates) if candidates else None
+
+
+def _evaluate_next_fire(row: sqlite3.Row, *, after: datetime) -> datetime | None:
+    stored = _parse_dt(row["next_run_at"])
+    if stored is not None and stored > after:
+        return stored.astimezone(timezone.utc)
+    try:
+        expression = json.loads(row["expression_json"])
+        return compute_next_fire(expression, after=after)
+    except (TypeError, ValueError, json.JSONDecodeError, KeyError):
+        logger.warning("failed to evaluate schedule expression for next fire")
+        return None
+
+
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],

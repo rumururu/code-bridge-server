@@ -145,13 +145,20 @@ class GeminiSession(LlmSession):
         if "tool" in event_type and "result" not in event_type:
             tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
             if tool_name:
+                # Gemini CLI emits the tool call id under ``id`` (preferred)
+                # with ``tool_use_id`` as a rarer fallback. Mirror the codex
+                # session pattern (TASK_001) so a single key ordering applies
+                # across providers and AgentTaskRunSink can persist it.
+                raw_call_id = event.get("id") or event.get("tool_use_id")
+                call_id_str = str(raw_call_id) if raw_call_id else None
                 return {
                     "type": "assistant",
+                    "call_id": call_id_str,
                     "message": {
                         "role": "assistant",
                         "content": [{
                             "type": "tool_use",
-                            "id": event.get("id") or event.get("tool_use_id"),
+                            "id": call_id_str,
                             "name": tool_name,
                             "input": event.get("input") if isinstance(event.get("input"), dict) else {},
                         }],
@@ -159,13 +166,18 @@ class GeminiSession(LlmSession):
                 }
 
         if "tool" in event_type and "result" in event_type:
+            # tool_result side prefers ``tool_use_id`` (Anthropic-style) and
+            # falls back to ``id``. Same fallback order as TASK_001 codex.
+            raw_call_id = event.get("tool_use_id") or event.get("id")
+            call_id_str = str(raw_call_id) if raw_call_id else None
             return {
                 "type": "assistant",
+                "call_id": call_id_str,
                 "message": {
                     "role": "assistant",
                     "content": [{
                         "type": "tool_result",
-                        "tool_use_id": event.get("tool_use_id") or event.get("id"),
+                        "tool_use_id": call_id_str,
                         "content": text or str(event.get("result") or event.get("output") or ""),
                         "is_error": bool(event.get("is_error", False)),
                     }],

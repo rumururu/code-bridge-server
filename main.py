@@ -16,10 +16,10 @@ from pathlib import Path
 def _load_env_file_once() -> None:
     """Load ``~/.code-bridge/.env`` into ``os.environ`` if present.
 
-    Used for per-host secrets (e.g. ``REVENUECAT_SECRET_API_KEY``) that
-    we don't want sitting in ``config.yaml`` next to the rest of the
-    server config. Lines that already exist in ``os.environ`` are left
-    untouched so the env can always override the file.
+    Used for per-host secrets that we don't want sitting in
+    ``config.yaml`` next to the rest of the server config. Lines that
+    already exist in ``os.environ`` are left untouched so the env can
+    always override the file.
 
     Format is the standard ``KEY=VALUE`` shell-style; lines starting
     with ``#`` and blank lines are skipped. Quoting is intentionally

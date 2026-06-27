@@ -1,4 +1,6 @@
+import asyncio
 import sys
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +13,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from agent import agent_store
+from agent import agent_store, configurator
 from agent.tool_artifacts import ARTIFACT_ROOT
 from approvals import approval_store
 from approvals.approval_service import decide_approval
@@ -32,6 +34,8 @@ class AgentRoutesTest(unittest.TestCase):
         approval_store._approval_store = None
         audit_store._audit_store = None
         policy_store._policy_rule_store = None
+        agents.BUILDER_CONVERSE_JOBS.clear()
+        configurator.BUILDER_SESSIONS.clear()
 
         app = FastAPI()
         app.include_router(agents.router)
@@ -43,6 +47,8 @@ class AgentRoutesTest(unittest.TestCase):
         approval_store._approval_store = None
         audit_store._audit_store = None
         policy_store._policy_rule_store = None
+        agents.BUILDER_CONVERSE_JOBS.clear()
+        configurator.BUILDER_SESSIONS.clear()
         database.DB_PATH = self._original_db_path
         self._tmp.cleanup()
 
@@ -380,6 +386,264 @@ class AgentRoutesTest(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["step"]["status"], "completed")
         self.assertEqual(payload["output"]["commands"][0]["command"], "npm test")
+
+    def test_workflow_step_can_run_one_browser_step_from_task_detail(self):
+        store = agent_store.get_agent_store()
+        agent = store.create_agent(
+            name="Browser workflow bot",
+            system_prompt="Run one browser workflow step.",
+            provider_id="openai",
+            flow_json=[
+                {
+                    "id": "open_note",
+                    "type": "browser_action",
+                    "name": "Open Naver Note",
+                    "description": "Open Naver Note.",
+                    "tool_hint": "playwright",
+                    "actions": [
+                        {"type": "navigate", "url": "https://note.naver.com/"},
+                        {"type": "assert", "kind": "page_state_readable"},
+                    ],
+                    "success_criteria": "Naver Note is readable",
+                    "on_failure": {"type": "manual_handoff", "resume": "same_step"},
+                },
+                {
+                    "id": "report",
+                    "type": "llm",
+                    "name": "Report",
+                    "description": "Report the result.",
+                    "success_criteria": "Summary exists",
+                    "on_failure": {"type": "ask_user", "resume": "same_step"},
+                },
+            ],
+        )
+        task = store.create_task(
+            title="Send note",
+            assigned_agent_id=agent["id"],
+            goal="Send one Naver note",
+            source="test",
+        )
+        started = self.client.post(
+            f"/api/agent/tasks/{task['id']}/start",
+            json={"provider_id": "openai", "auto_start": False},
+        ).json()
+        browser_step = started["steps"][0]
+
+        async def fake_execute_browser_actions(_actions, *, context):
+            return BrowserActionAdapterResult(
+                status="completed",
+                message="ok",
+                observations=[
+                    {
+                        "url": "https://note.naver.com/",
+                        "title": "Naver Note",
+                        "step_id": context["step_id"],
+                    }
+                ],
+            )
+
+        from agent.browser_action_adapter import BrowserActionAdapterResult
+
+        with patch("agent.task_orchestrator.execute_browser_actions", fake_execute_browser_actions):
+            response = self.client.post(
+                f"/api/agent/tasks/{task['id']}/steps/{browser_step['id']}/run",
+                json={},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["step"]["status"], "completed")
+        steps = self.client.get(f"/api/agent/tasks/{task['id']}/steps").json()["steps"]
+        self.assertEqual(steps[0]["status"], "completed")
+        self.assertEqual(steps[1]["status"], "queued")
+
+    def test_builder_debug_step_runs_one_draft_browser_step(self):
+        async def fake_execute_browser_actions(actions, *, context):
+            return BrowserActionAdapterResult(
+                status="completed",
+                message="debug ok",
+                observations=[
+                    {
+                        "url": actions[0]["url"],
+                        "title": "Naver Note",
+                        "workflow_step_id": context["workflow_step_id"],
+                    }
+                ],
+            )
+
+        from agent.browser_action_adapter import BrowserActionAdapterResult
+
+        with patch("routes.agents.execute_browser_actions", fake_execute_browser_actions):
+            response = self.client.post(
+                "/api/agent/builder/steps/debug",
+                json={
+                    "session_id": "session_1",
+                    "step_index": 0,
+                    "draft": {
+                        "name": "Naver Note Sender",
+                        "description": "Send a Naver note",
+                        "system_prompt": "Debug safely.",
+                        "provider_id": "openai",
+                        "flow": [
+                            {
+                                "id": "open_note",
+                                "type": "browser_action",
+                                "name": "Open Naver Note",
+                                "actions": [
+                                    {
+                                        "type": "navigate",
+                                        "url": "https://note.naver.com/",
+                                    }
+                                ],
+                                "success_criteria": "Page loads",
+                            }
+                        ],
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["output"]["observations"][0]["title"], "Naver Note")
+
+    def test_builder_debug_step_blocks_external_send_action(self):
+        response = self.client.post(
+            "/api/agent/builder/steps/debug",
+            json={
+                "step_index": 0,
+                "draft": {
+                    "name": "Naver Note Sender",
+                    "system_prompt": "Debug safely.",
+                    "provider_id": "openai",
+                    "flow": [
+                        {
+                            "id": "send_note",
+                            "type": "browser_action",
+                            "name": "Send note",
+                            "actions": [
+                                {"type": "click", "selector": "text=보내기"}
+                            ],
+                            "success_criteria": "Message sent",
+                        }
+                    ],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "waiting_for_user")
+        self.assertEqual(
+            payload["output"]["wait_reason"],
+            "external_send_requires_run_approval",
+        )
+
+    def test_builder_converse_timeout_returns_fallback_draft(self):
+        async def fake_timeout(_session, *, timeout=120.0):
+            raise asyncio.TimeoutError()
+
+        with patch("routes.agents.run_configurator_turn", fake_timeout):
+            response = self.client.post(
+                "/api/agent/builder/converse",
+                json={
+                    "user_message": (
+                        "Android 리뷰 품앗이 요청을 매 1시간마다 확인하고 "
+                        "앱 설치와 실행 확인까지 하는 Agent를 만들어줘."
+                    )
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "fallback")
+        self.assertTrue(payload["fallback"])
+        self.assertTrue(payload["updated_draft"]["name"])
+        self.assertEqual(payload["updated_draft"]["provider_id"], "openai")
+        self.assertTrue(payload["updated_draft"]["system_prompt"])
+        self.assertTrue(payload["updated_draft"]["flow"])
+        self.assertTrue(payload["is_ready_to_commit"])
+        self.assertEqual(payload["task_draft"]["schedule"], "every 1h")
+
+    def test_builder_converse_timeout_concretizes_simple_web_monitor(self):
+        async def fake_timeout(_session, *, timeout=120.0):
+            raise asyncio.TimeoutError()
+
+        with patch("routes.agents.run_configurator_turn", fake_timeout):
+            response = self.client.post(
+                "/api/agent/builder/converse",
+                json={
+                    "user_message": (
+                        "매 30분마다 https://example.org 를 열고 본문에 "
+                        "Example Domain 문구가 보이는지 확인해. 실패하면 "
+                        "스크린샷을 남기고 보고하는 에이전트를 만들어줘."
+                    )
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["fallback"])
+        self.assertEqual(payload["task_draft"]["schedule"], "every 30m")
+        flow = payload["updated_draft"]["flow"]
+        browser_steps = [step for step in flow if step["type"] == "browser_action"]
+        self.assertEqual(len(browser_steps), 1)
+        actions = browser_steps[0]["actions"]
+        self.assertEqual(actions[0], {"type": "navigate", "url": "https://example.org"})
+        self.assertEqual(actions[1]["kind"], "text_visible")
+        self.assertEqual(actions[1]["value"], "Example Domain")
+        self.assertNotIn("configured_url", json.dumps(flow))
+
+    def test_builder_converse_job_returns_fallback_then_completed_result(self):
+        draft_payload = {
+            "name": "Async Builder Bot",
+            "description": "Created by async builder job",
+            "system_prompt": "Run the configured workflow safely.",
+            "provider_id": "openai",
+            "tools": [],
+            "flow": [
+                {
+                    "id": "summarize",
+                    "type": "llm",
+                    "name": "Summarize",
+                    "description": "Summarize requested work",
+                    "success_criteria": "Summary is ready",
+                }
+            ],
+            "memory_seeds": [],
+        }
+        raw_response = (
+            "초안을 보강했습니다.\n"
+            "```draft\n"
+            f"{json.dumps(draft_payload, ensure_ascii=False)}\n"
+            "```\n"
+            "READY_TO_COMMIT"
+        )
+
+        async def fake_turn(_session, *, timeout=120.0):
+            return raw_response
+
+        with patch("routes.agents.run_configurator_turn", fake_turn):
+            response = self.client.post(
+                "/api/agent/builder/converse/jobs",
+                json={"user_message": "간단한 Agent 만들어줘."},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        initial = response.json()
+        self.assertTrue(initial["job_id"].startswith("builder_job_"))
+        self.assertEqual(initial["status"], "queued")
+        self.assertTrue(initial["fallback"])
+
+        status_response = self.client.get(
+            f"/api/agent/builder/converse/jobs/{initial['job_id']}"
+        )
+        self.assertEqual(status_response.status_code, 200)
+        status = status_response.json()
+        self.assertEqual(status["status"], "completed")
+        self.assertEqual(status["updated_draft"]["name"], "Async Builder Bot")
+        self.assertFalse(status["fallback"])
+        self.assertEqual(status["result"]["session_id"], initial["session_id"])
 
     def test_deferred_skill_step_blocks_for_review(self):
         task = self.client.post(

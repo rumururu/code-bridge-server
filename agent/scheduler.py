@@ -28,7 +28,14 @@ from agent.task_orchestrator import (
 logger = logging.getLogger(__name__)
 
 
-_ACTIVE_RUN_STATUSES = {"queued", "starting", "running"}
+_ACTIVE_RUN_STATUSES = {
+    "queued",
+    "starting",
+    "running",
+    "blocked",
+    "waiting_for_user",
+    "waiting_user",
+}
 
 
 def _has_active_run_for_task(task_id: str) -> bool:

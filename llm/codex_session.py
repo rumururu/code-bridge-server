@@ -45,7 +45,7 @@ class CodexSession(LlmSession):
         """Locate Codex executable and load settings."""
         # Load sandbox mode from settings if not provided
         if self.sandbox_mode is None:
-            from llm_settings import get_codex_sandbox_mode
+            from llm.llm_settings import get_codex_sandbox_mode
             self.sandbox_mode = get_codex_sandbox_mode()
 
         self._codex_path = shutil.which("codex") or ""
@@ -93,6 +93,7 @@ class CodexSession(LlmSession):
                 "resume",
                 self._session_id,
                 "--json",
+                "--skip-git-repo-check",
             ]
         else:
             # New session
@@ -100,6 +101,7 @@ class CodexSession(LlmSession):
                 self._codex_path,
                 "exec",
                 "--json",
+                "--skip-git-repo-check",
                 "-C", self.project_path,
             ]
             if self.sandbox_mode == "danger-full-access":
@@ -288,12 +290,23 @@ class CodexSession(LlmSession):
 
         # Tool use events (Codex command execution)
         if event_type == "tool_use" or event_type == "function_call":
+            # Codex emits tool call IDs under different keys depending on CLI
+            # version. Try ``id`` → ``call_id`` → ``tool_call_id`` and keep the
+            # first match so flow visualization can pair tool_use ↔ tool_result.
+            call_id = (
+                event.get("id")
+                or event.get("call_id")
+                or event.get("tool_call_id")
+            )
+            call_id_str = str(call_id) if call_id else None
             return {
                 "type": "assistant",
+                "call_id": call_id_str,
                 "message": {
                     "role": "assistant",
                     "content": [{
                         "type": "tool_use",
+                        "id": call_id_str,
                         "name": event.get("name", event.get("function", "unknown")),
                         "input": event.get("input", event.get("arguments", {})),
                     }],
@@ -302,12 +315,23 @@ class CodexSession(LlmSession):
 
         # Tool result events
         if event_type == "tool_result" or event_type == "function_result":
+            # Result-side prefers ``call_id`` (matches the originating tool_use
+            # id), then falls back to ``tool_use_id`` (Anthropic-style) and
+            # finally ``id`` (rare codex variants).
+            call_id = (
+                event.get("call_id")
+                or event.get("tool_use_id")
+                or event.get("id")
+            )
+            call_id_str = str(call_id) if call_id else None
             return {
                 "type": "assistant",
+                "call_id": call_id_str,
                 "message": {
                     "role": "assistant",
                     "content": [{
                         "type": "tool_result",
+                        "tool_use_id": call_id_str,
                         "content": str(event.get("result", event.get("output", ""))),
                     }],
                 },

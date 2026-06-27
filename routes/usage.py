@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query
 
 from core.config import get_config
 from core.database import get_usage_db
+from llm.claude_usage import fetch_claude_cli_stats
 
 from .deps import verify_api_key
 
@@ -90,6 +91,14 @@ async def list_usage_turns(
             limit=limit,
         )
     }
+
+
+@router.get("/cli", dependencies=[Depends(verify_api_key)], response_model=None)
+async def get_claude_cli_usage(
+    force_refresh: bool = Query(default=False),
+) -> dict[str, Any]:
+    """Return Claude CLI /stats snapshot (current week, all models + sonnet only)."""
+    return await fetch_claude_cli_stats(force_refresh=force_refresh)
 
 
 @router.get("/breakdown", dependencies=[Depends(verify_api_key)], response_model=None)

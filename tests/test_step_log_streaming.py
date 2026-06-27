@@ -16,6 +16,7 @@ import asyncio
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -23,15 +24,23 @@ SERVER_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)
 
+from agent import agent_store  # noqa: E402
 from agent.agent_store import get_agent_store  # noqa: E402
 from agent.task_orchestrator import _make_step_log_emitter  # noqa: E402
-from core.database import init_db  # noqa: E402
+from core import database  # noqa: E402
 from terminal import TerminalSession  # noqa: E402
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _init_db():
-    init_db()
+@pytest.fixture(autouse=True)
+def _isolated_agent_db(tmp_path):
+    """Keep step-log persistence tests out of the live development database."""
+    original_db_path = database.DB_PATH
+    database.DB_PATH = Path(tmp_path) / "code_bridge_step_log_test.db"
+    agent_store._agent_store = None
+    database.init_db()
+    yield
+    agent_store._agent_store = None
+    database.DB_PATH = original_db_path
 
 
 # ---------------------------------------------------------------------------

@@ -384,3 +384,118 @@ class TestSchedulerTick:
         after = store.get(sched["id"])
         assert after["enabled"] is False
         assert after["last_status"] == "error"
+
+    def test_due_schedule_prepares_assigned_agent_workflow_steps(self, tmp_db):
+        agent = agent_store.get_agent_store().create_agent(
+            name="Scheduled workflow bot",
+            system_prompt="Run the assigned workflow.",
+            provider_id="openai",
+            flow_json=[
+                {
+                    "id": "open_page",
+                    "type": "browser_action",
+                    "name": "Open page",
+                    "tool_hint": "playwright",
+                    "actions": [{"type": "navigate", "url": "https://example.test"}],
+                    "on_failure": {
+                        "type": "manual_handoff",
+                        "prompt": "Complete browser setup, then continue.",
+                    },
+                },
+                {
+                    "id": "report",
+                    "type": "llm",
+                    "name": "Report",
+                    "on_failure": "ask_user",
+                },
+            ],
+        )
+        task = agent_store.get_agent_store().create_task(
+            title="Scheduled assigned workflow",
+            assigned_agent_id=agent["id"],
+            goal="Run the scheduled workflow.",
+        )
+        store = schedule_store.get_schedule_store()
+        sched = store.create(
+            task_id=task["id"],
+            expression={"kind": "interval", "seconds": 60},
+            provider_id="openai",
+        )
+
+        from core.database import get_db_connection
+
+        with get_db_connection() as conn:
+            conn.execute(
+                "UPDATE task_schedules SET next_run_at = ? WHERE id = ?",
+                ("2020-01-01T00:00:00+00:00", sched["id"]),
+            )
+            conn.commit()
+
+        async def fake_execute(_execution):
+            return None
+
+        scheduler = TaskScheduler(tick_seconds=10)
+        with mock.patch("agent.scheduler.execute_task_orchestration", fake_execute):
+            fired = asyncio.run(scheduler.trigger_once())
+
+        assert fired == 1
+        after = store.get(sched["id"])
+        assert after["last_status"] == "fired"
+        assert after["last_run_id"]
+
+        run = agent_store.get_agent_store().get_run(after["last_run_id"])
+        steps = agent_store.get_agent_store().list_task_steps(task["id"])
+        assert run is not None
+        assert run["agent_id"] == agent["id"]
+        assert [step["input"]["workflow_step_id"] for step in steps] == [
+            "open_page",
+            "report",
+        ]
+        assert steps[0]["input"]["workflow_type"] == "browser_action"
+        assert steps[0]["input"]["actions"][0]["type"] == "navigate"
+
+    @pytest.mark.parametrize(
+        "run_status",
+        ["blocked", "waiting_for_user", "waiting_user"],
+    )
+    def test_tick_skips_when_prior_run_needs_user_attention(
+        self,
+        tmp_db,
+        run_status,
+    ):
+        store = schedule_store.get_schedule_store()
+        task = _make_task()
+        run = agent_store.get_agent_store().create_run(
+            task_id=task["id"],
+            title="Prior scheduled run",
+        )
+        agent_store.get_agent_store().update_run_status(run["id"], run_status)
+
+        sched = store.create(
+            task_id=task["id"],
+            expression={"kind": "interval", "seconds": 60},
+            skip_if_active=True,
+        )
+
+        from core.database import get_db_connection
+
+        with get_db_connection() as conn:
+            conn.execute(
+                "UPDATE task_schedules SET next_run_at = ? WHERE id = ?",
+                ("2020-01-01T00:00:00+00:00", sched["id"]),
+            )
+            conn.commit()
+
+        scheduler = TaskScheduler(tick_seconds=10)
+        with mock.patch(
+            "agent.scheduler.prepare_task_orchestration"
+        ) as prepare_mock:
+            fired = asyncio.run(scheduler.trigger_once())
+
+        assert fired == 1
+        prepare_mock.assert_not_called()
+        after = store.get(sched["id"])
+        assert after["fire_count"] == 0
+        assert after["skip_count"] == 1
+        assert after["last_status"] == "skipped"
+        assert after["last_error"] == "previous run still active"

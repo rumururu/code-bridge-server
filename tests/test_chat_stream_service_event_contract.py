@@ -8,7 +8,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from chat.chat_stream_service import stream_claude_turn
+from chat.chat_stream_service import _build_flutter_test_mcp_context, stream_claude_turn
 
 
 class _FakeWebSocket:
@@ -119,7 +119,7 @@ class ChatStreamServiceEventContractTest(unittest.IsolatedAsyncioTestCase):
 
         usage_patches = _patch_usage()
         with (
-            patch("chat.chat_stream_service._build_marionette_context", return_value=None),
+            patch("chat.chat_stream_service._build_flutter_test_mcp_context", return_value=None),
             usage_patches[0],
             usage_patches[1],
             usage_patches[2],
@@ -184,7 +184,7 @@ class ChatStreamServiceEventContractTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        with patch("chat.chat_stream_service._build_marionette_context", return_value=None):
+        with patch("chat.chat_stream_service._build_flutter_test_mcp_context", return_value=None):
             completed = await stream_claude_turn(websocket, session, "demo", user_message="hi")
 
         self.assertFalse(completed)
@@ -213,7 +213,7 @@ class ChatStreamServiceEventContractTest(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        with patch("chat.chat_stream_service._build_marionette_context", return_value=None):
+        with patch("chat.chat_stream_service._build_flutter_test_mcp_context", return_value=None):
             completed = await stream_claude_turn(websocket, session, "demo", user_message="hi")
 
         self.assertFalse(completed)
@@ -226,6 +226,23 @@ class ChatStreamServiceEventContractTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(legacy_event["event"], {"type": "raw.unknown", "value": 1})
         self.assertEqual(legacy_event["provider_id"], "openai")
+
+    def test_flutter_runtime_context_uses_flutter_test_mcp_namespace(self):
+        project_manager = MagicMock()
+        project_manager.get_device_run_status.return_value = {
+            "running": True,
+            "device_id": "device-1",
+            "vm_service_uri": "ws://127.0.0.1:1234/test=/ws",
+        }
+
+        with patch("chat.chat_stream_service.get_project_manager", return_value=project_manager):
+            context = _build_flutter_test_mcp_context("demo")
+
+        self.assertIsNotNone(context)
+        self.assertIn("mcp__flutter_test__connect", context)
+        self.assertIn("mcp__flutter_test__get_interactive_elements", context)
+        self.assertIn("mcp__flutter_test__take_screenshots", context)
+        self.assertNotIn("mcp__marionette__", context)
 
 
 if __name__ == "__main__":

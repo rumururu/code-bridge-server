@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -47,12 +48,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     tunnel_service = await start_remote_tunnel_for_current_server(config, firebase_auth)
     heartbeat_task = start_heartbeat_for_current_server(config, firebase_auth)
 
-    scheduler = get_scheduler()
-    await scheduler.start()
+    scheduler = None
+    if os.environ.get("CODEBRIDGE_DISABLE_SCHEDULER") == "1":
+        logger.info("scheduler: disabled by CODEBRIDGE_DISABLE_SCHEDULER=1")
+    else:
+        scheduler = get_scheduler()
+        await scheduler.start()
 
     yield
 
-    await scheduler.stop()
+    if scheduler is not None:
+        await scheduler.stop()
     await shutdown_runtime_for_current_server(
         heartbeat_task=heartbeat_task,
         tunnel_service=tunnel_service,

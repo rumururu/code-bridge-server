@@ -31,6 +31,16 @@ class RuntimePathsTest(unittest.TestCase):
             self.assertEqual(path, Path(tmp) / "pairing")
             self.assertTrue(path.exists())
 
+    def test_runtime_dir_creates_legacy_directory_without_app_support_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = Path(tmp) / "global_chat"
+
+            with patch.dict(os.environ, {}, clear=True):
+                path = runtime_dir("global_chat", legacy)
+
+            self.assertEqual(path, legacy)
+            self.assertTrue(path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

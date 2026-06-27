@@ -36,6 +36,7 @@ def runtime_path(filename: str, legacy_path: Path) -> Path:
 def runtime_dir(dirname: str, legacy_path: Path) -> Path:
     support_dir = app_support_dir()
     if support_dir is None:
+        legacy_path.mkdir(parents=True, exist_ok=True)
         return legacy_path
     path = support_dir / dirname
     path.mkdir(parents=True, exist_ok=True)

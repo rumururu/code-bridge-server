@@ -40,6 +40,8 @@ class EventStoreMixin:
         provider_id: str | None = None,
         provider_event: dict[str, Any] | None = None,
         app_event: dict[str, Any] | None = None,
+        call_id: str | None = None,
+        parent_event_id: str | None = None,
     ) -> dict[str, Any] | None:
         if self.get_run(run_id) is None:  # type: ignore[attr-defined]
             return None
@@ -59,9 +61,10 @@ class EventStoreMixin:
                 """
                 INSERT INTO agent_events (
                     id, run_id, sequence, event_type, provider_id,
-                    provider_event_json, app_event_json
+                    provider_event_json, app_event_json,
+                    call_id, parent_event_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -73,6 +76,8 @@ class EventStoreMixin:
                     if provider_event is not None
                     else None,
                     _json_dumps(app_event) if app_event is not None else None,
+                    call_id,
+                    parent_event_id,
                 ),
             )
             conn.execute(

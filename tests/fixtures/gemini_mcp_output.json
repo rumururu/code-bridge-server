@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["@modelcontextprotocol/server-filesystem"]
+    },
+    "browser-tools": {
+      "url": "https://mcp.example.test/sse"
+    }
+  }
+}

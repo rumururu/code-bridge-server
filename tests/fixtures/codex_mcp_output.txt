@@ -1,0 +1,4 @@
+Name        Transport  Command
+playwright  stdio      npx @playwright/mcp
+github      http       https://mcp.github.example/server
+loose_config_without_transport

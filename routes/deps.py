@@ -8,7 +8,6 @@ from fastapi import Cookie, Header, HTTPException, Query, Request, WebSocket
 
 from auth.auth_service import validate_api_key_for_current_server
 from dashboard.dashboard_auth_service import get_dashboard_auth_status
-from entitlement import EntitlementResult, get_entitlement_service
 
 logger = logging.getLogger(__name__)
 
@@ -166,49 +165,6 @@ async def require_dashboard_auth(
             status_code=401,
             detail="Dashboard authentication required",
         )
-
-
-async def verify_subscription(
-    request: Request,
-    x_app_user_id: Optional[str] = Header(None, alias="X-App-User-Id"),
-    x_entitlement_token: Optional[str] = Header(None, alias="X-Entitlement-Token"),
-) -> EntitlementResult:
-    """Reject callers without an active Code Bridge subscription.
-
-    Code Bridge ships a single paid plan: every gated route requires either
-    a local (loopback) caller, or an active RevenueCat ``code_bridge_pro``
-    entitlement for the user identified by ``X-App-User-Id``.
-
-    Local (loopback) requests bypass the check entirely — same convention
-    as :func:`is_localhost_request`. This matters because the dashboard
-    and the server-side maintenance flows run on ``127.0.0.1`` without an
-    app user id.
-
-    ``X-Entitlement-Token`` is reserved for a future signed-token path; it
-    is accepted but not yet validated.
-    """
-
-    if is_localhost_request(request) and not is_request_from_tunnel(request):
-        return EntitlementResult(
-            active=True, reason="loopback", source="loopback"
-        )
-
-    # ``x_entitlement_token`` is reserved for future use; reference it so
-    # linters don't flag the unused parameter and so callers can begin
-    # sending it without a 400.
-    _ = x_entitlement_token
-
-    service = get_entitlement_service()
-    result = service.is_entitled(x_app_user_id)
-    if not result.active:
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "error": "subscription_required",
-                "reason": result.reason,
-            },
-        )
-    return result
 
 
 async def _periodic_reauth_loop(

@@ -29,6 +29,7 @@ def _row_to_run(row: Any) -> dict[str, Any]:
         "workspace_id": row["workspace_id"],
         "project_name": row["project_name"],
         "task_id": row["task_id"] if "task_id" in row.keys() else None,
+        "agent_id": row["agent_id"] if "agent_id" in row.keys() else None,
         "provider_id": row["provider_id"],
         "model": row["model"],
         "status": row["status"],
@@ -49,6 +50,7 @@ def _row_to_task(row: Any) -> dict[str, Any]:
         "id": row["id"],
         "workspace_id": row["workspace_id"],
         "run_id": row["run_id"],
+        "assigned_agent_id": row["assigned_agent_id"] if "assigned_agent_id" in row.keys() else None,
         "project_name": row["project_name"],
         "kind": row["kind"],
         "source": row["source"],
@@ -161,6 +163,10 @@ def _row_to_event(row: Any) -> dict[str, Any]:
         "provider_id": row["provider_id"],
         "provider_event": _json_loads(row["provider_event_json"], None),
         "app_event": _json_loads(row["app_event_json"], None),
+        "call_id": row["call_id"] if "call_id" in row.keys() else None,
+        "parent_event_id": (
+            row["parent_event_id"] if "parent_event_id" in row.keys() else None
+        ),
         "created_at": row["created_at"],
     }
 
@@ -184,5 +190,35 @@ def _row_to_artifact(row: Any) -> dict[str, Any]:
         "path": row["path"],
         "mime_type": row["mime_type"],
         "metadata": _json_loads(row["metadata_json"], {}),
+        "created_at": row["created_at"],
+    }
+
+
+def _row_to_agent(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "description": row["description"],
+        "system_prompt": row["system_prompt"],
+        "provider_id": row["provider_id"],
+        "model": row["model"],
+        "tools_json": _json_loads(row["tools_json"], []),
+        "flow_json": _json_loads(row["flow_json"], []),
+        "policy_overrides_json": _json_loads(row["policy_overrides_json"], {}),
+        "is_pseudo": bool(row["is_pseudo"]),
+        "archived_at": row["archived_at"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _row_to_memory(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "agent_id": row["agent_id"],
+        "content": row["content"],
+        "source_run_id": row["source_run_id"],
+        "source_event_type": row["source_event_type"],
+        "pinned": bool(row["pinned"]),
         "created_at": row["created_at"],
     }

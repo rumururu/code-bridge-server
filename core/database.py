@@ -20,6 +20,8 @@ WORK_COCKPIT_SCHEMA_VERSION = 2026052802
 TASK_SCHEDULES_SCHEMA_VERSION = 2026052803
 DRY_RUN_SUPPORT_SCHEMA_VERSION = 2026060100
 AUDIT_REDACTED_CATEGORIES_SCHEMA_VERSION = 2026060500
+EVENT_PAIRING_COLUMNS_SCHEMA_VERSION = 2026060601
+BROWSER_SESSIONS_SCHEMA_VERSION = 2026061000
 
 _PSEUDO_AGENTS = [
     {
@@ -621,6 +623,60 @@ def _migrate_audit_redacted_categories(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_event_pairing(conn: sqlite3.Connection) -> None:
+    """Add nullable call_id + parent_event_id columns to agent_events.
+
+    Enables tool_use ↔ tool_result pairing within one LLM turn (visualized
+    in the v2 flow chart). Existing rows are left with NULL — backfill is
+    not feasible because pre-existing event payloads don't expose a stable
+    tool call identifier. Partial indexes (``WHERE ... IS NOT NULL``)
+    avoid index bloat from legacy rows.
+    """
+    _add_column_if_missing(conn, "agent_events", "call_id", "TEXT")
+    _add_column_if_missing(conn, "agent_events", "parent_event_id", "TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_events_run_call "
+        "ON agent_events(run_id, call_id) WHERE call_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_events_parent "
+        "ON agent_events(parent_event_id) WHERE parent_event_id IS NOT NULL"
+    )
+
+
+def _migrate_browser_sessions(conn: sqlite3.Connection) -> None:
+    """Create persistent browser handoff session records."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS browser_sessions (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            task_id TEXT,
+            step_id TEXT,
+            workflow_step_id TEXT,
+            status TEXT NOT NULL DEFAULT 'created',
+            context_dir TEXT,
+            storage_state_path TEXT,
+            current_url TEXT,
+            title TEXT,
+            handoff_reason TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP,
+            closed_at TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_browser_sessions_run_status
+        ON browser_sessions(run_id, status, updated_at);
+
+        CREATE INDEX IF NOT EXISTS idx_browser_sessions_task_step
+        ON browser_sessions(task_id, step_id);
+
+        CREATE INDEX IF NOT EXISTS idx_browser_sessions_expires
+        ON browser_sessions(status, expires_at);
+    """)
+
+
 def _migrate_legacy_foundation(conn: sqlite3.Connection) -> None:
     """Original tables that predated the schema_migrations framework.
 
@@ -705,6 +761,16 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
         AUDIT_REDACTED_CATEGORIES_SCHEMA_VERSION,
         "audit_redacted_categories",
         _migrate_audit_redacted_categories,
+    ),
+    (
+        EVENT_PAIRING_COLUMNS_SCHEMA_VERSION,
+        "event_pairing_columns",
+        _migrate_event_pairing,
+    ),
+    (
+        BROWSER_SESSIONS_SCHEMA_VERSION,
+        "browser_sessions",
+        _migrate_browser_sessions,
     ),
 )
 

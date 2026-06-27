@@ -360,6 +360,47 @@ class ClaudeSession(LlmSession):
         line = json.dumps(payload, ensure_ascii=False) + "\n"
         await self._sdk_send_queue.put(line)
 
+    @staticmethod
+    def _enrich_with_call_id(event: dict[str, Any]) -> dict[str, Any]:
+        """Add top-level ``call_id`` for tool_use / tool_result events.
+
+        The Anthropic Messages API places the tool call identifier on the
+        first content block of an ``assistant`` event:
+
+        - ``message.content[0].id`` for ``tool_use`` blocks
+        - ``message.content[0].tool_use_id`` for ``tool_result`` blocks
+
+        Surface that identifier as a top-level ``call_id`` so the generic
+        ``AgentTaskRunSink`` can persist it into ``agent_events.call_id``
+        without provider-specific knowledge.
+
+        Always returns a new dict when modifying so the SDK-owned event
+        object stays immutable for any other consumer.
+        """
+        if not isinstance(event, dict):
+            return event
+        if event.get("type") != "assistant":
+            return event
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return event
+        content = message.get("content")
+        if not isinstance(content, list) or not content:
+            return event
+        first_block = content[0]
+        if not isinstance(first_block, dict):
+            return event
+        block_type = first_block.get("type")
+        if block_type == "tool_use":
+            block_id = first_block.get("id")
+            if isinstance(block_id, str) and block_id:
+                return {**event, "call_id": block_id}
+        elif block_type == "tool_result":
+            tool_use_id = first_block.get("tool_use_id")
+            if isinstance(tool_use_id, str) and tool_use_id:
+                return {**event, "call_id": tool_use_id}
+        return event
+
     async def _stream_until_pause_or_result(self) -> AsyncGenerator[dict[str, Any], None]:
         """Yield events until permission pause or result event."""
         while True:
@@ -397,7 +438,7 @@ class ClaudeSession(LlmSession):
                 }
                 break
 
-            yield event
+            yield self._enrich_with_call_id(event)
 
     async def send_message(
         self,
@@ -650,8 +691,15 @@ class SessionManager:
 
         existing = self._sessions.get(project_name)
 
-        # If provider changed, close old session
-        if existing is not None and existing.provider_id != provider_id:
+        # Close cached session when provider or working directory changes.
+        # Without the path check, a task that targets a real repo (e.g. the
+        # Code Bridge checkout) reuses the chat session that was bound to
+        # ~/.code-bridge/global_chat, so every bash call runs in the wrong
+        # cwd and `git log` reports "not a git repository".
+        if existing is not None and (
+            existing.provider_id != provider_id
+            or getattr(existing, "project_path", None) != project_path
+        ):
             await existing.close()
             existing = None
             self._sessions.pop(project_name, None)

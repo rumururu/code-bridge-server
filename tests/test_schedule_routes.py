@@ -250,6 +250,63 @@ class ScheduleRoutesTest(unittest.TestCase):
         # Returned schedule is the post-fire state pulled from the store
         self.assertEqual(response.json()["schedule"]["id"], created["id"])
 
+    def test_trigger_now_prepares_workflow_backed_run(self):
+        agent = agent_store.get_agent_store().create_agent(
+            name="Route schedule workflow bot",
+            system_prompt="Run workflow.",
+            provider_id="openai",
+            flow_json=[
+                {
+                    "id": "open_page",
+                    "type": "browser_action",
+                    "name": "Open page",
+                    "actions": [{"type": "navigate", "url": "https://example.test"}],
+                    "on_failure": {
+                        "type": "manual_handoff",
+                        "prompt": "Review browser action.",
+                    },
+                },
+                {
+                    "id": "report",
+                    "type": "llm",
+                    "name": "Report",
+                },
+            ],
+        )
+        task = agent_store.get_agent_store().create_task(
+            title="Route schedule workflow",
+            assigned_agent_id=agent["id"],
+            goal="Run the scheduled workflow.",
+        )
+        schedule = schedule_store.get_schedule_store().create(
+            task_id=task["id"],
+            expression={"kind": "interval", "seconds": 3600},
+            provider_id="openai",
+        )
+
+        async def fake_execute(_execution):
+            return None
+
+        with patch("agent.scheduler.execute_task_orchestration", fake_execute):
+            response = self.client.post(
+                f"/api/agent/schedules/{schedule['id']}/trigger"
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        fired = response.json()["schedule"]
+        self.assertEqual(fired["last_status"], "fired")
+        self.assertIsNotNone(fired["last_run_id"])
+        run = agent_store.get_agent_store().get_run(fired["last_run_id"])
+        steps = agent_store.get_agent_store().list_task_steps(task["id"])
+        self.assertIsNotNone(run)
+        self.assertEqual(run["agent_id"], agent["id"])
+        self.assertEqual(
+            [step["input"]["workflow_step_id"] for step in steps],
+            ["open_page", "report"],
+        )
+        self.assertEqual(steps[0]["input"]["workflow_type"], "browser_action")
+        self.assertEqual(steps[0]["input"]["actions"][0]["type"], "navigate")
+
     def test_scheduler_tick_endpoint_returns_zero_when_no_due(self):
         response = self.client.post("/api/agent/scheduler/tick")
         self.assertEqual(response.status_code, 200)

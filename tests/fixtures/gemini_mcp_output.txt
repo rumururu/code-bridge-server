@@ -1,0 +1,3 @@
+Configured MCP servers:
+- context7 stdio npx @upstash/context7-mcp
+- docs http https://mcp.example.test/docs
