@@ -139,7 +139,11 @@ class AutoStartManager:
     def launch_command(self) -> list[str]:
         if _is_frozen():
             return [str(Path(sys.executable).resolve())]
-        return [str(Path(sys.executable).resolve()), str(Path(__file__).resolve())]
+        # Deliberately unresolved: inside a venv sys.executable is a
+        # symlink to the base interpreter, and resolving it registers the
+        # base python at login — which has no pystray, so the tray would
+        # silently degrade to the headless launcher.
+        return [sys.executable, str(Path(__file__).resolve())]
 
     def is_enabled(self) -> bool:
         if self.system == "darwin":
