@@ -278,7 +278,12 @@ class ServerManager:
         env["CODEBRIDGE_DESKTOP_APP"] = "1"
         env.setdefault("CODEBRIDGE_DASHBOARD_PORT", str(DEFAULT_DASHBOARD_PORT))
         env.setdefault("CODEBRIDGE_API_PORT", str(DEFAULT_API_PORT))
-        env["CODEBRIDGE_APP_SUPPORT_DIR"] = str(self.app_support_dir)
+        # Only the signed bundle needs its state relocated — it cannot write
+        # inside itself. A script install owns a writable tree, and moving its
+        # state here would strand the api keys and pairings the terminal-mode
+        # server already wrote to the install dir.
+        if _is_frozen():
+            env["CODEBRIDGE_APP_SUPPORT_DIR"] = str(self.app_support_dir)
 
         bundled_node = _bundled_node_path(self.server_dir)
         if bundled_node.exists():
