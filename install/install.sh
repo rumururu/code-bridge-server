@@ -243,6 +243,30 @@ setup_repository() {
 
         git fetch --tags origin
         git checkout --force "$CODE_BRIDGE_REF"
+    elif [ -d "$INSTALL_DIR" ] && [ -n "$(ls -A "$INSTALL_DIR" 2>/dev/null)" ]; then
+        # The directory exists but carries no repo — either a pre-git
+        # install or a plain data dir holding .env / api_keys.json /
+        # paired_accounts.json. `git clone` refuses a non-empty
+        # destination, so attach the repo in place and keep the data.
+        echo -e "${YELLOW}! $INSTALL_DIR exists but is not a git repository${NC}"
+
+        if [[ "${CODE_BRIDGE_FORCE_RESET:-0}" != "1" ]]; then
+            local backup="$INSTALL_DIR.bak.$(date +%Y%m%d-%H%M%S)"
+            echo "  Backing up existing contents to: $backup"
+            cp -R "$INSTALL_DIR" "$backup"
+            echo "  Set CODE_BRIDGE_FORCE_RESET=1 to skip this backup next time."
+        fi
+
+        echo "  Attaching repository in place (existing files are kept)"
+        cd "$INSTALL_DIR"
+        git init -q
+        if git remote get-url origin >/dev/null 2>&1; then
+            git remote set-url origin "$REPO_URL"
+        else
+            git remote add origin "$REPO_URL"
+        fi
+        git fetch --tags origin
+        git checkout --force "$CODE_BRIDGE_REF"
     else
         echo "Installing to $INSTALL_DIR..."
         git clone "$REPO_URL" "$INSTALL_DIR"

@@ -199,6 +199,32 @@ function Setup-Repository {
 
         & git fetch --tags origin
         & git checkout --force $CODE_BRIDGE_REF
+    } elseif ((Test-Path $INSTALL_DIR) -and ((Get-ChildItem -Force -LiteralPath $INSTALL_DIR | Measure-Object).Count -gt 0)) {
+        # The directory exists but carries no repo — either a pre-git
+        # install or a plain data dir holding .env / api_keys.json /
+        # paired_accounts.json. `git clone` refuses a non-empty
+        # destination, so attach the repo in place and keep the data.
+        Write-Host "[!] $INSTALL_DIR exists but is not a git repository" -ForegroundColor Yellow
+
+        if ($env:CODE_BRIDGE_FORCE_RESET -ne "1") {
+            $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+            $backup = "$INSTALL_DIR.bak.$stamp"
+            Write-Host "  Backing up existing contents to: $backup"
+            Copy-Item -Recurse -Force -LiteralPath $INSTALL_DIR -Destination $backup
+            Write-Host "  Set `$env:CODE_BRIDGE_FORCE_RESET = '1' to skip this backup next time."
+        }
+
+        Write-Host "  Attaching repository in place (existing files are kept)"
+        Set-Location $INSTALL_DIR
+        & git init -q
+        & git remote get-url origin *> $null
+        if ($LASTEXITCODE -eq 0) {
+            & git remote set-url origin $REPO_URL
+        } else {
+            & git remote add origin $REPO_URL
+        }
+        & git fetch --tags origin
+        & git checkout --force $CODE_BRIDGE_REF
     } else {
         Write-Host "Installing to $INSTALL_DIR..."
         & git clone $REPO_URL $INSTALL_DIR
