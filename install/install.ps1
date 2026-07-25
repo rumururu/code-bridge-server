@@ -13,7 +13,7 @@ $ErrorActionPreference = "Stop"
 $INSTALL_DIR = if ($env:CODE_BRIDGE_INSTALL_DIR) { $env:CODE_BRIDGE_INSTALL_DIR } else { "$env:USERPROFILE\.code-bridge" }
 $REPO_URL = "https://github.com/rumururu/code-bridge-server.git"
 # Pinned upstream commit. Override with $env:CODE_BRIDGE_REF = "main" for HEAD.
-$CODE_BRIDGE_REF_DEFAULT = "e08d9c3e8e1e99088f3df11f00bf5213d7520ab3"
+$CODE_BRIDGE_REF_DEFAULT = "c0833ff9fa16142909f1f9d38f8727a74f54c5f9"
 $CODE_BRIDGE_REF = if ($env:CODE_BRIDGE_REF) { $env:CODE_BRIDGE_REF } else { $CODE_BRIDGE_REF_DEFAULT }
 $MIN_PYTHON_VERSION = [version]"3.10"
 

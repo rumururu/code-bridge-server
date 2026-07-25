@@ -21,7 +21,7 @@ NC='\033[0m' # No Color
 INSTALL_DIR="${CODE_BRIDGE_INSTALL_DIR:-$HOME/.code-bridge}"
 REPO_URL="https://github.com/rumururu/code-bridge-server.git"
 # Pinned upstream commit. Override with CODE_BRIDGE_REF=main for HEAD.
-CODE_BRIDGE_REF_DEFAULT="e08d9c3e8e1e99088f3df11f00bf5213d7520ab3"
+CODE_BRIDGE_REF_DEFAULT="c0833ff9fa16142909f1f9d38f8727a74f54c5f9"
 CODE_BRIDGE_REF="${CODE_BRIDGE_REF:-$CODE_BRIDGE_REF_DEFAULT}"
 MIN_PYTHON_VERSION="3.10"
 
