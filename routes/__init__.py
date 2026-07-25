@@ -20,6 +20,7 @@ from .usage import router as usage_router
 from .git import router as git_router
 from .terminal import router as terminal_router
 from .dashboard import router as dashboard_router
+from .dashboard_agents import router as dashboard_agents_router
 from .dashboard_auth import router as dashboard_auth_router
 from .filesystem import router as filesystem_router
 from .mermaid import router as mermaid_router
@@ -71,6 +72,7 @@ _SHARED_ROUTERS = (
 _DASHBOARD_ONLY_ROUTERS = (
     debug_router,
     dashboard_auth_router,
+    dashboard_agents_router,
     dashboard_router,
 )
 
