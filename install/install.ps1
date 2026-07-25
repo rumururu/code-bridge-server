@@ -298,7 +298,21 @@ Set-Location `$PSScriptRoot
 python main.py --show-qr @args
 "@ | Out-File -FilePath "$INSTALL_DIR\start.ps1" -Encoding UTF8
 
-    Write-Host "[OK] Start scripts created" -ForegroundColor Green
+    # Tray mode. pystray already comes from requirements.txt (its win32
+    # backend is ctypes-only), so this only needs the launcher the repo
+    # ships in desktop_server_app/.
+    if (Test-Path "$INSTALL_DIR\desktop_server_app\launcher.py") {
+        @"
+@echo off
+cd /d "%~dp0"
+call venv\Scripts\activate.bat
+pythonw desktop_server_app\launcher.py %*
+"@ | Out-File -FilePath "$INSTALL_DIR\start-tray.bat" -Encoding ASCII
+
+        Write-Host "[OK] Start scripts created (console + tray)" -ForegroundColor Green
+    } else {
+        Write-Host "[OK] Start scripts created" -ForegroundColor Green
+    }
 }
 
 function Show-InstallComplete {
@@ -308,7 +322,10 @@ function Show-InstallComplete {
     Write-Host "=======================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "Start Code Bridge Server with:"
-    Write-Host "  $INSTALL_DIR\start.bat"
+    Write-Host "  $INSTALL_DIR\start.bat          (console, prints the pairing QR)"
+    if (Test-Path "$INSTALL_DIR\start-tray.bat") {
+        Write-Host "  $INSTALL_DIR\start-tray.bat     (system tray icon)"
+    }
 }
 
 function Start-Server {

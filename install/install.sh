@@ -324,7 +324,22 @@ python main.py --show-qr "$@"
 EOF
 
     chmod +x "$INSTALL_DIR/start.sh"
-    echo -e "${GREEN}✓ Start script created${NC}"
+
+    # Menu-bar/tray mode. pystray and the platform bindings already come
+    # from requirements.txt, so this only needs the launcher the repo
+    # ships in desktop_server_app/.
+    if [ -f "$INSTALL_DIR/desktop_server_app/launcher.py" ]; then
+        cat > "$INSTALL_DIR/start-menubar.sh" << 'EOF'
+#!/bin/bash
+cd "$(dirname "$0")"
+source venv/bin/activate
+exec python desktop_server_app/launcher.py "$@"
+EOF
+        chmod +x "$INSTALL_DIR/start-menubar.sh"
+        echo -e "${GREEN}✓ Start scripts created (terminal + menu bar)${NC}"
+    else
+        echo -e "${GREEN}✓ Start script created${NC}"
+    fi
 }
 
 # Run the server
@@ -361,7 +376,10 @@ main() {
         echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
         echo ""
         echo "Start Code Bridge Server with:"
-        echo "  $INSTALL_DIR/start.sh"
+        echo "  $INSTALL_DIR/start.sh            (terminal, prints the pairing QR)"
+        if [ -f "$INSTALL_DIR/start-menubar.sh" ]; then
+            echo "  $INSTALL_DIR/start-menubar.sh    (menu bar / tray icon)"
+        fi
     fi
 }
 
