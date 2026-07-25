@@ -46,6 +46,14 @@ if ($env:CODE_BRIDGE_ASSUME_YES -ne "1") {
     }
 }
 
+# Drop the login item before the tree goes away, otherwise the Run key
+# keeps pointing at a deleted launcher.
+if ((Test-Path "$resolved\venv\Scripts\python.exe") -and (Test-Path "$resolved\desktop_server_app\launcher.py")) {
+    & "$resolved\venv\Scripts\python.exe" "$resolved\desktop_server_app\launcher.py" --disable-autostart *> $null
+}
+Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+    -Name "Code Bridge Server" -ErrorAction SilentlyContinue
+
 Remove-Item -Recurse -Force -LiteralPath $resolved
 Write-Host "[OK] Removed $resolved" -ForegroundColor Green
 

@@ -6,6 +6,7 @@
 #   CODE_BRIDGE_INSTALL_DIR    target directory (default: ~/.code-bridge)
 #   CODE_BRIDGE_REF            git ref to install (default: pinned SHA below)
 #   CODE_BRIDGE_AUTO_START     0 to skip auto-start after install
+#   CODE_BRIDGE_AUTOSTART      1/0 to register the login item without prompting
 #   CODE_BRIDGE_FORCE_RESET    1 to overwrite local changes during upgrade
 
 set -euo pipefail
@@ -342,6 +343,31 @@ EOF
     fi
 }
 
+# Register the menu-bar launcher as a login item
+configure_autostart() {
+    [ -f "$INSTALL_DIR/desktop_server_app/launcher.py" ] || return 0
+
+    local choice="${CODE_BRIDGE_AUTOSTART:-}"
+    if [ -z "$choice" ]; then
+        if prompt_yes_no "Start Code Bridge Server at login (menu bar mode)? [y/N] "; then
+            choice=1
+        else
+            choice=0
+        fi
+    fi
+
+    [ "$choice" = "1" ] || return 0
+
+    echo ""
+    echo -e "${CYAN}Registering login item...${NC}"
+    if "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/desktop_server_app/launcher.py" --enable-autostart; then
+        echo -e "${GREEN}✓ Code Bridge Server will start at login${NC}"
+        echo "  Turn it off from the menu-bar item, or re-run with CODE_BRIDGE_AUTOSTART=0"
+    else
+        echo -e "${YELLOW}! Could not register the login item — start it manually with start-menubar.sh${NC}"
+    fi
+}
+
 # Run the server
 run_server() {
     echo ""
@@ -366,6 +392,7 @@ main() {
     setup_repository
     setup_venv
     create_start_script
+    configure_autostart
 
     if [[ "${CODE_BRIDGE_AUTO_START:-1}" == "1" ]]; then
         run_server

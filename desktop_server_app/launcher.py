@@ -539,6 +539,18 @@ def main() -> None:
         server_main()
         return
 
+    # Headless autostart control, so installers and scripts can register
+    # the login item without opening a tray.
+    if {"--enable-autostart", "--disable-autostart"} & set(sys.argv):
+        enable = "--enable-autostart" in sys.argv
+        AutoStartManager(_app_support_dir()).set_enabled(enable)
+        print(f"Start at login: {'enabled' if enable else 'disabled'}")
+        return
+
+    if "--autostart-status" in sys.argv:
+        print("enabled" if AutoStartManager(_app_support_dir()).is_enabled() else "disabled")
+        return
+
     if pystray is None:
         run_headless_launcher()
         return

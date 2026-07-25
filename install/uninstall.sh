@@ -56,6 +56,14 @@ if [[ "${CODE_BRIDGE_ASSUME_YES:-0}" != "1" ]]; then
     fi
 fi
 
+# Drop the login item before the tree goes away, otherwise launchd (or
+# the XDG autostart entry) keeps pointing at a deleted launcher.
+if [ -x "$real_dir/venv/bin/python" ] && [ -f "$real_dir/desktop_server_app/launcher.py" ]; then
+    "$real_dir/venv/bin/python" "$real_dir/desktop_server_app/launcher.py" --disable-autostart >/dev/null 2>&1 || true
+fi
+rm -f "$HOME/Library/LaunchAgents/com.mkideabox.codebridge.server.plist"
+rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/code-bridge-server.desktop"
+
 rm -rf "$real_dir"
 echo -e "${GREEN}✓ Removed $real_dir${NC}"
 

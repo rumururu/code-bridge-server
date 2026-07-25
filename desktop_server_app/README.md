@@ -131,7 +131,7 @@ notarization, staples the ticket, validates the result, and prints the SHA-256:
 
 ```sh
 CODEBRIDGE_CODESIGN_IDENTITY="Developer ID Application: mkideabox Co. Ltd. (3SAMRT9KZD)" \
-CODEBRIDGE_NOTARY_KEY="ios/fastlane/AuthKey.p8" \
+CODEBRIDGE_NOTARY_KEY="/path/to/AuthKey.p8" \
 CODEBRIDGE_NOTARY_KEY_ID="..." \
 CODEBRIDGE_NOTARY_ISSUER="..." \
 python scripts/sign_notarize_desktop_app.py

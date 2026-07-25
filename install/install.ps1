@@ -5,6 +5,7 @@
 #   $env:CODE_BRIDGE_INSTALL_DIR    target directory (default: ~/.code-bridge)
 #   $env:CODE_BRIDGE_REF            git ref to install (default: pinned SHA below)
 #   $env:CODE_BRIDGE_AUTO_START     "0" to skip auto-start after install
+#   $env:CODE_BRIDGE_AUTOSTART      "1"/"0" to register the login item without prompting
 #   $env:CODE_BRIDGE_FORCE_RESET    "1" to overwrite local changes during upgrade
 
 $ErrorActionPreference = "Stop"
@@ -315,6 +316,27 @@ pythonw desktop_server_app\launcher.py %*
     }
 }
 
+function Set-AutoStart {
+    if (-not (Test-Path "$INSTALL_DIR\desktop_server_app\launcher.py")) { return }
+
+    $choice = $env:CODE_BRIDGE_AUTOSTART
+    if (-not $choice) {
+        $response = Read-Host "Start Code Bridge Server at login (tray mode)? [y/N]"
+        $choice = if ($response -eq "y" -or $response -eq "Y") { "1" } else { "0" }
+    }
+    if ($choice -ne "1") { return }
+
+    Write-Host ""
+    Write-Host "Registering login item..." -ForegroundColor Cyan
+    & "$INSTALL_DIR\venv\Scripts\python.exe" "$INSTALL_DIR\desktop_server_app\launcher.py" --enable-autostart
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[OK] Code Bridge Server will start at login" -ForegroundColor Green
+        Write-Host "  Turn it off from the tray item, or re-run with `$env:CODE_BRIDGE_AUTOSTART = '0'"
+    } else {
+        Write-Host "[!] Could not register the login item — start it manually with start-tray.bat" -ForegroundColor Yellow
+    }
+}
+
 function Show-InstallComplete {
     Write-Host ""
     Write-Host "=======================================" -ForegroundColor Green
@@ -349,6 +371,7 @@ Test-MermaidCli
 Setup-Repository
 Setup-Venv -PythonCmd $PythonCmd
 Create-StartScript
+Set-AutoStart
 
 if ($env:CODE_BRIDGE_AUTO_START -eq "0") {
     Show-InstallComplete
