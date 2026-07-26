@@ -245,6 +245,80 @@
         }
         .tab.active { background: var(--bg-card); color: var(--text-primary); font-weight: 600; }
 
+        /* ---- Run results --------------------------------------------------
+           A scheduled script writes its findings to stdout/stderr and nobody
+           ever sees them: the run says "failed" and the reason is on a machine
+           you are not looking at. The step output is captured already, so the
+           only thing missing was somewhere to read it.
+           ------------------------------------------------------------------ */
+        .run-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 9px 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            margin-bottom: 6px;
+            cursor: pointer;
+            background: var(--bg-secondary);
+            font-size: 14px;
+        }
+        .run-item:hover { border-color: var(--accent-color); }
+        .run-item.selected { border-color: var(--accent-color); box-shadow: inset 3px 0 0 var(--accent-color); }
+        .run-item .dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--text-muted); flex: 0 0 auto;
+        }
+        .run-item .dot.ok { background: var(--success-color); }
+        .run-item .dot.bad { background: var(--danger-color); }
+        .run-item .dot.live { background: var(--accent-color); }
+        .run-item .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .run-item .when { color: var(--text-muted); font-size: 13px; flex: 0 0 auto; }
+
+        .step-result {
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            margin-bottom: 8px;
+            overflow: hidden;
+        }
+        .step-result-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 11px;
+            background: var(--bg-primary);
+            font-size: 13.5px;
+        }
+        .step-result-head .kind {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 11px;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+        }
+        .log-pane {
+            margin: 0;
+            padding: 10px 12px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border-color);
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12.5px;
+            line-height: 1.55;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 320px;
+            overflow: auto;
+        }
+        .log-pane.err { color: var(--danger-color); }
+        .log-label {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 11px;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            padding: 8px 12px 0;
+        }
+
         #toast {
             position: fixed;
             bottom: 24px;
@@ -410,6 +484,28 @@
 
             <div class="card">
                 <div class="card-header">
+                    <h2>Run results</h2>
+                    <span class="status" id="runResultsFor"></span>
+                </div>
+                <div class="card-body">
+                    <p class="hint">
+                        What each run actually did. A script step keeps its exit code and the
+                        tail of everything it printed, so a failure is readable here instead of
+                        on a terminal you are not sitting at.
+                    </p>
+                    <div class="row" style="align-items: flex-start;">
+                        <div style="flex: 0 0 300px;">
+                            <div id="runList"></div>
+                        </div>
+                        <div style="flex: 1; min-width: 0;">
+                            <div id="runDetail"><div class="empty">Pick a run.</div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
                     <h2>Scripts</h2>
                     <span class="status" id="scriptCount"></span>
                 </div>
@@ -554,6 +650,8 @@
         let agents = [];
         let schedules = [];
         let scripts = [];
+        let runs = [];
+        let selectedRunId = null;
         let policyRules = [];
         let approvals = [];
         let tasksById = {};
@@ -655,6 +753,7 @@
             setStatus('editorStatus', '');
             renderSteps();
             renderAgentList();
+            renderRunList();
             showTab('editor');
         }
 
@@ -678,6 +777,7 @@
             setStatus('editorStatus', '');
             renderSteps();
             renderAgentList();
+            renderRunList();
             showTab('editor');
         }
 
@@ -1271,6 +1371,111 @@
             reloadAll();
         }
 
+        // --- Run results -----------------------------------------------------
+
+        const LIVE_RUN = new Set(['queued', 'starting', 'running']);
+
+        function runDotClass(status) {
+            if (LIVE_RUN.has(status)) return 'live';
+            if (status === 'completed') return 'ok';
+            if (status === 'failed' || status === 'cancelled') return 'bad';
+            return '';
+        }
+
+        function ago(value) {
+            if (!value) return '';
+            const stamp = new Date(String(value).includes('T') ? value : `${value}Z`.replace(' ', 'T'));
+            if (Number.isNaN(stamp.getTime())) return '';
+            const s = Math.max(0, Math.round((Date.now() - stamp.getTime()) / 1000));
+            if (s < 60) return 'just now';
+            if (s < 3600) return `${Math.round(s / 60)}m ago`;
+            if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+            return `${Math.round(s / 86400)}d ago`;
+        }
+
+        function renderRunList() {
+            const host = document.getElementById('runList');
+            const label = document.getElementById('runResultsFor');
+            const shown = selectedAgentId
+                ? runs.filter((run) => run.agent_id === selectedAgentId)
+                : runs;
+            label.textContent = selectedAgentId
+                ? (agents.find((a) => a.id === selectedAgentId) || {}).name || ''
+                : 'all agents';
+            if (!shown.length) {
+                host.innerHTML = '<div class="empty">No runs yet.</div>';
+                document.getElementById('runDetail').innerHTML = '<div class="empty">Pick a run.</div>';
+                return;
+            }
+            host.innerHTML = shown.slice(0, 15).map((run) => `
+                <div class="run-item${run.id === selectedRunId ? ' selected' : ''}" onclick="selectRun('${run.id}')">
+                    <span class="dot ${runDotClass(run.status)}"></span>
+                    <span class="grow">${escapeHtml(run.title || run.id)}</span>
+                    <span class="when">${escapeHtml(run.status || '')} · ${escapeHtml(ago(run.updated_at || run.created_at))}</span>
+                </div>`).join('');
+        }
+
+        async function selectRun(runId) {
+            selectedRunId = runId;
+            renderRunList();
+            const detail = document.getElementById('runDetail');
+            const run = runs.find((candidate) => candidate.id === runId);
+            if (!run || !run.task_id) {
+                detail.innerHTML = '<div class="empty">This run has no recorded steps.</div>';
+                return;
+            }
+            detail.innerHTML = '<div class="empty">Loading…</div>';
+            const result = await api(`/tasks/${encodeURIComponent(run.task_id)}/steps`);
+            const steps = (result && result.steps) || [];
+            if (!steps.length) {
+                detail.innerHTML = '<div class="empty">This run has no recorded steps.</div>';
+                return;
+            }
+            detail.innerHTML = steps.map((step) => renderStepResult(step)).join('');
+        }
+
+        function renderStepResult(step) {
+            const input = step.input || {};
+            const output = step.output || {};
+            const shell = output.shell;
+            const kind = input.workflow_type || 'llm';
+            const dot = step.status === 'completed' ? 'ok' : (step.status === 'failed' ? 'bad' : '');
+
+            let body = '';
+            if (shell) {
+                const exit = shell.exit_code === null || shell.exit_code === undefined ? '—' : shell.exit_code;
+                const bits = [`exit ${exit}`];
+                if (shell.timed_out) bits.push('timed out');
+                if (shell.duration_ms != null) bits.push(`${(shell.duration_ms / 1000).toFixed(1)}s`);
+                body += `<div class="log-label">${escapeHtml(bits.join(' · '))}</div>`;
+                // stderr first: this script logs everything there, and on a
+                // failure it is the only part worth reading first.
+                if ((shell.stderr || '').trim()) {
+                    body += `<div class="log-label">stderr</div><pre class="log-pane err">${escapeHtml(shell.stderr.trim())}</pre>`;
+                }
+                if ((shell.stdout || '').trim()) {
+                    body += `<div class="log-label">stdout</div><pre class="log-pane">${escapeHtml(shell.stdout.trim())}</pre>`;
+                }
+                if (!(shell.stderr || '').trim() && !(shell.stdout || '').trim()) {
+                    body += '<div class="log-label">printed nothing</div>';
+                }
+            } else if (output.checkpoint) {
+                body = `<div class="log-label">waiting</div><pre class="log-pane">${escapeHtml(output.checkpoint.prompt || '')}</pre>`;
+            } else if (Object.keys(output).length) {
+                body = `<pre class="log-pane">${escapeHtml(JSON.stringify(output, null, 2))}</pre>`;
+            }
+
+            return `
+                <div class="step-result">
+                    <div class="step-result-head">
+                        <span class="run-item"><span class="dot ${dot}" style="margin:0"></span></span>
+                        <span class="grow">${escapeHtml(step.title || input.workflow_step_id || step.id)}</span>
+                        <span class="kind">${escapeHtml(kind)} · ${escapeHtml(step.status || '')}</span>
+                    </div>
+                    ${body}
+                </div>`;
+        }
+
         // --- Unattended permissions ------------------------------------------
 
         function renderPolicyRules() {
@@ -1375,24 +1580,27 @@
         // --- Bootstrap ------------------------------------------------------
 
         async function reloadAll() {
-            const [agentResult, scheduleResult, taskResult, ruleResult, approvalResult, scriptResult] = await Promise.all([
+            const [agentResult, scheduleResult, taskResult, ruleResult, approvalResult, scriptResult, runResult] = await Promise.all([
                 api('/agents?limit=200'),
                 api('/schedules'),
                 api('/tasks?limit=200'),
                 api('/policies/rules'),
                 api('/approvals/pending'),
                 api('/scripts'),
+                api('/runs?limit=60'),
             ]);
             agents = (agentResult && agentResult.agents) || [];
             schedules = (scheduleResult && scheduleResult.schedules) || [];
             policyRules = (ruleResult && ruleResult.rules) || [];
             scripts = (scriptResult && scriptResult.scripts) || [];
+            runs = (runResult && runResult.runs) || [];
             approvals = (approvalResult && approvalResult.approvals) || [];
             tasksById = {};
             ((taskResult && taskResult.tasks) || []).forEach((task) => { tasksById[task.id] = task; });
             renderAgentList();
             renderAgentPicker();
             renderSchedules();
+            renderRunList();
             renderScripts();
             renderPolicyRules();
             renderApprovals();

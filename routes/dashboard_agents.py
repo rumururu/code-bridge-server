@@ -125,6 +125,14 @@ async def list_runs(
     return await agents_routes.list_runs(agent_id=agent_id, status=status, limit=limit)
 
 
+@router.get("/tasks/{task_id}/steps", response_model=None)
+async def list_task_steps(task_id: str) -> dict[str, Any]:
+    """Steps with their outputs — where a shell step's exit code and captured
+    stdout/stderr live. This is what turns "the run failed" into something you
+    can act on without opening a terminal."""
+    return await agents_routes.list_task_steps(task_id)
+
+
 @router.get("/tasks", response_model=None)
 async def list_tasks(
     workspace_id: str | None = None,
