@@ -1,9 +1,13 @@
 fastapi==0.109.0
-uvicorn[standard]==0.27.0
+# uvicorn/python-multipart floors come from mcp (pulled in by claude-agent-sdk).
+# Keeping the old ==0.27.0/==0.0.6 pins made a fresh venv unsatisfiable: pip
+# backtracked through mcp and then numpy until it hit a release with no cp313
+# wheel and tried to compile it from source. Versions below match the tested set.
+uvicorn[standard]>=0.31.1,<0.52
 websockets==12.0
 pyyaml==6.0.1
 httpx>=0.27.1,<0.28  # >=0.27.1 for mcp (claude-agent-sdk), <0.28 keeps starlette 0.35's TestClient working
-python-multipart==0.0.6
+python-multipart>=0.0.9,<0.1
 tomli>=2.0.1; python_version < "3.11"
 aiortc>=1.9.0
 numpy>=1.26.0
