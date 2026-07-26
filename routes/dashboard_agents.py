@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, Response
 
 from agent.agent_models import (
     AgentCreate,
+    AgentTaskCreate,
     AgentUpdate,
     BuilderCommitRequest,
     BuilderTurn,
@@ -93,6 +94,66 @@ async def start_dry_run(
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     return await agents_routes.start_dry_run(agent_id, body, background_tasks)
+
+
+# --- Tasks and schedules -------------------------------------------------
+#
+# An agent on its own never fires. It runs because a task is assigned to it and
+# a schedule fires that task, which is why the PC needs these too: without them
+# the dashboard could only create agents that sit idle until someone opens the
+# app to schedule them.
+
+
+@router.get("/tasks", response_model=None)
+async def list_tasks(
+    workspace_id: str | None = None,
+    project_name: str | None = None,
+    kind: str | None = None,
+    status: str | None = None,
+    limit: int = Query(default=100, ge=1, le=200),
+) -> dict[str, Any]:
+    return await agents_routes.list_tasks(
+        workspace_id=workspace_id,
+        project_name=project_name,
+        kind=kind,
+        status=status,
+        limit=limit,
+    )
+
+
+@router.post("/tasks", response_model=None)
+async def create_task(body: AgentTaskCreate) -> dict[str, Any]:
+    return await agents_routes.create_task(body)
+
+
+@router.get("/tasks/{task_id}/schedules", response_model=None)
+async def list_task_schedules(task_id: str) -> dict[str, Any]:
+    return await agents_routes.list_task_schedules(task_id)
+
+
+@router.post("/tasks/{task_id}/schedules", response_model=None)
+async def create_task_schedule(task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    return await agents_routes.create_task_schedule(task_id, body)
+
+
+@router.get("/schedules", response_model=None)
+async def list_all_schedules(enabled_only: bool = False) -> dict[str, Any]:
+    return await agents_routes.list_all_schedules(enabled_only=enabled_only)
+
+
+@router.patch("/schedules/{schedule_id}", response_model=None)
+async def patch_schedule(schedule_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    return await agents_routes.patch_schedule(schedule_id, body)
+
+
+@router.delete("/schedules/{schedule_id}", response_model=None)
+async def delete_schedule(schedule_id: str) -> dict[str, Any]:
+    return await agents_routes.delete_schedule(schedule_id)
+
+
+@router.post("/schedules/{schedule_id}/trigger", response_model=None)
+async def trigger_schedule_now(schedule_id: str) -> dict[str, Any]:
+    return await agents_routes.trigger_schedule_now(schedule_id)
 
 
 __all__ = ["router"]

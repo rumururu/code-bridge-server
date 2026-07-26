@@ -14,6 +14,7 @@ import time
 import webbrowser
 from pathlib import Path
 from queue import Queue
+from typing import IO
 
 try:
     import pystray
@@ -72,6 +73,56 @@ def _app_support_dir() -> Path:
     path = base / "Code Bridge Server"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _single_instance_lock_file() -> Path:
+    return _app_support_dir() / "launcher.lock"
+
+
+def acquire_single_instance_lock(path: Path | None = None) -> IO[str] | None:
+    """Take the launcher's exclusive lock, or ``None`` if one is already held.
+
+    Two launchers means two tray icons, and only the first one's server can
+    bind 8766/8767 — the second sits there showing a menu that controls
+    nothing and whose "Start" fails with "address already in use". That is
+    easy to hit: start at login is registered by the installer, so opening
+    ``start-menubar.sh`` by hand is enough.
+
+    The lock is an ``flock`` (POSIX) / ``msvcrt`` (Windows) file lock rather
+    than a PID file so the OS releases it when the process dies, including a
+    hard kill or a crash — a stale PID file would lock every later launch out.
+
+    The returned handle must stay referenced for the process's lifetime;
+    closing it releases the lock.
+    """
+    lock_path = path or _single_instance_lock_file()
+    try:
+        handle = open(lock_path, "a+")
+    except OSError:
+        # An unwritable state dir shouldn't be fatal — better one extra icon
+        # than a launcher that refuses to run at all.
+        return None
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    try:
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+    except OSError:
+        pass
+    return handle
 
 
 def _launcher_log_file() -> Path:
@@ -558,6 +609,15 @@ def main() -> None:
 
     if "--autostart-status" in sys.argv:
         print("enabled" if AutoStartManager(_app_support_dir()).is_enabled() else "disabled")
+        return
+
+    lock = acquire_single_instance_lock()
+    if lock is None:
+        # Already running: point the user at the instance that exists rather
+        # than adding a second tray icon whose server can never bind.
+        print(f"{APP_NAME} is already running.")
+        _write_launcher_log("Refused to start: another launcher holds the lock")
+        webbrowser.open(f"http://127.0.0.1:{DEFAULT_DASHBOARD_PORT}")
         return
 
     if pystray is None:

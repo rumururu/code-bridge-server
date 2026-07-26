@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code Bridge — Agents</title>
+    <style>
+        :root {
+            --bg-primary: #f5f5f5;
+            --bg-secondary: #ffffff;
+            --bg-card: #ffffff;
+            --text-primary: #333333;
+            --text-secondary: #666666;
+            --text-muted: #888888;
+            --border-color: #e0e0e0;
+            --accent-color: #007bff;
+            --accent-hover: #0056b3;
+            --success-color: #28a745;
+            --warning-color: #ffc107;
+            --danger-color: #dc3545;
+            --shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-primary: #1a1a1a;
+                --bg-secondary: #2d2d2d;
+                --bg-card: #2d2d2d;
+                --text-primary: #e0e0e0;
+                --text-secondary: #b0b0b0;
+                --text-muted: #808080;
+                --border-color: #404040;
+                --shadow: 0 2px 8px rgba(0,0,0,0.3);
+            }
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.5;
+        }
+
+        .header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            padding: 14px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .header h1 { font-size: 18px; margin: 0; }
+        .header .sub { color: var(--text-muted); font-size: 12px; }
+        .header-actions { display: flex; gap: 8px; align-items: center; }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 320px minmax(0, 1fr);
+            gap: 16px;
+            padding: 16px 24px 48px;
+            align-items: start;
+        }
+        @media (max-width: 900px) {
+            .layout { grid-template-columns: minmax(0, 1fr); }
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            box-shadow: var(--shadow);
+            margin-bottom: 16px;
+        }
+        .card-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+        }
+        .card-header h2 { font-size: 14px; margin: 0; text-transform: uppercase; letter-spacing: .04em; color: var(--text-secondary); }
+        .card-body { padding: 16px; }
+
+        .btn {
+            border: 1px solid transparent;
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 13px;
+            cursor: pointer;
+            background: var(--accent-color);
+            color: #fff;
+        }
+        .btn:hover { background: var(--accent-hover); }
+        .btn[disabled] { opacity: .55; cursor: not-allowed; }
+        .btn-secondary { background: transparent; color: var(--text-primary); border-color: var(--border-color); }
+        .btn-secondary:hover { background: var(--bg-primary); }
+        .btn-danger { background: var(--danger-color); }
+        .btn-xs { padding: 3px 8px; font-size: 12px; }
+
+        .field { margin-bottom: 12px; }
+        .field > label {
+            display: block;
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+        .input, select.input, textarea.input {
+            width: 100%;
+            padding: 7px 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font: inherit;
+            font-size: 13px;
+        }
+        textarea.input { resize: vertical; }
+        .row { display: flex; gap: 8px; }
+        .row > * { flex: 1; min-width: 0; }
+
+        .agent-item {
+            padding: 10px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            background: var(--bg-secondary);
+        }
+        .agent-item:hover { border-color: var(--accent-color); }
+        .agent-item.selected { border-color: var(--accent-color); box-shadow: inset 3px 0 0 var(--accent-color); }
+        .agent-item .name { font-weight: 600; font-size: 14px; }
+        .agent-item .meta { font-size: 12px; color: var(--text-muted); }
+
+        .badge {
+            display: inline-block;
+            font-size: 11px;
+            padding: 1px 6px;
+            border-radius: 999px;
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            margin-right: 4px;
+        }
+        .badge.on { border-color: var(--success-color); color: var(--success-color); }
+        .badge.off { border-color: var(--text-muted); color: var(--text-muted); }
+
+        .step {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 12px;
+            margin-bottom: 8px;
+            background: var(--bg-secondary);
+        }
+        .step-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .step-index { font-size: 12px; color: var(--text-muted); }
+
+        .chat-log {
+            height: 320px;
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px;
+            background: var(--bg-secondary);
+            font-size: 13px;
+        }
+        .chat-line { margin-bottom: 10px; white-space: pre-wrap; word-break: break-word; }
+        .chat-line .who { font-size: 11px; text-transform: uppercase; color: var(--text-muted); display: block; }
+        .chat-line.user .who { color: var(--accent-color); }
+        .chat-line.error { color: var(--danger-color); }
+
+        table.sched { width: 100%; border-collapse: collapse; font-size: 13px; }
+        table.sched th, table.sched td {
+            text-align: left;
+            padding: 8px 6px;
+            border-bottom: 1px solid var(--border-color);
+            vertical-align: middle;
+        }
+        table.sched th { font-size: 11px; text-transform: uppercase; color: var(--text-muted); font-weight: 600; }
+
+        .empty { color: var(--text-muted); font-size: 13px; padding: 8px 0; }
+        .status { font-size: 12px; color: var(--text-secondary); align-self: center; }
+        .status.error { color: var(--danger-color); }
+        .actions { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+        .hint { font-size: 12px; color: var(--text-muted); margin: 0 0 12px; }
+        .tabs { display: flex; gap: 4px; }
+        .tab {
+            padding: 6px 12px;
+            font-size: 13px;
+            border: 1px solid var(--border-color);
+            border-bottom: none;
+            border-radius: 6px 6px 0 0;
+            cursor: pointer;
+            background: var(--bg-primary);
+            color: var(--text-secondary);
+        }
+        .tab.active { background: var(--bg-card); color: var(--text-primary); font-weight: 600; }
+
+        #toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--text-primary);
+            color: var(--bg-card);
+            padding: 10px 18px;
+            border-radius: 8px;
+            font-size: 13px;
+            display: none;
+            z-index: 500;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>🤖 Agents</h1>
+            <div class="sub">Create, edit and schedule agents from the PC. Everything here is the same store your phone reads.</div>
+        </div>
+        <div class="header-actions">
+            <button class="btn btn-secondary" onclick="location.href='/dashboard'">← Dashboard</button>
+            <button class="btn btn-secondary" onclick="reloadAll()">Refresh</button>
+            <button class="btn" onclick="newAgent()">New agent</button>
+        </div>
+    </div>
+
+    <div class="layout">
+        <div>
+            <div class="card">
+                <div class="card-header"><h2>Agents</h2><span id="agentCount" class="status"></span></div>
+                <div class="card-body">
+                    <div id="agentList"><div class="empty">Loading…</div></div>
+                </div>
+            </div>
+        </div>
+
+        <div>
+            <div class="card">
+                <div class="card-header">
+                    <div class="tabs">
+                        <div class="tab active" id="tabEditor" onclick="showTab('editor')">Editor</div>
+                        <div class="tab" id="tabBuilder" onclick="showTab('builder')">Builder chat</div>
+                    </div>
+                    <span id="editorTitle" class="status"></span>
+                </div>
+
+                <div class="card-body" id="paneEditor">
+                    <p class="hint">The form writes the agent definition directly. Use Builder chat instead when you want the LLM to draft the workflow for you.</p>
+                    <input type="hidden" id="agentId">
+                    <div class="row">
+                        <div class="field">
+                            <label for="agentName">Name</label>
+                            <input id="agentName" class="input" maxlength="80" placeholder="Daily site check">
+                        </div>
+                        <div class="field">
+                            <label for="agentDescription">Description</label>
+                            <input id="agentDescription" class="input" placeholder="What this agent is for">
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="field">
+                            <label for="agentProvider">Provider</label>
+                            <select id="agentProvider" class="input">
+                                <option value="">(default)</option>
+                                <option value="anthropic">anthropic</option>
+                                <option value="openai">openai</option>
+                                <option value="google">google</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label for="agentModel">Model</label>
+                            <input id="agentModel" class="input" placeholder="model id (optional)">
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label for="agentPrompt">System prompt</label>
+                        <textarea id="agentPrompt" class="input" rows="5" placeholder="You are ..."></textarea>
+                    </div>
+
+                    <div class="card-header" style="padding-left:0; padding-right:0;">
+                        <h2>Workflow</h2>
+                        <button class="btn btn-secondary btn-xs" onclick="addStep()">Add step</button>
+                    </div>
+                    <p class="hint">Steps run in order. An agent with no steps can still be assigned work, but it has nothing to execute on a schedule.</p>
+                    <div id="stepList"></div>
+
+                    <div class="actions">
+                        <button class="btn" id="saveBtn" onclick="saveAgent()">Save</button>
+                        <button class="btn btn-secondary" onclick="newAgent()">Clear</button>
+                        <button class="btn btn-danger" id="archiveBtn" onclick="archiveAgent()" style="display:none;">Archive</button>
+                        <span id="editorStatus" class="status"></span>
+                    </div>
+                </div>
+
+                <div class="card-body" id="paneBuilder" style="display:none;">
+                    <p class="hint">Same Configurator the app talks to. It drafts the agent for you; press Create agent when it says it is ready.</p>
+                    <div id="builderLog" class="chat-log"></div>
+                    <div class="row" style="margin-top:8px;">
+                        <input id="builderInput" class="input" placeholder="e.g. Check my site every morning and report failures"
+                               onkeydown="if(event.key==='Enter'){sendBuilderTurn();}">
+                        <button class="btn" style="flex:0 0 auto;" id="builderSendBtn" onclick="sendBuilderTurn()">Send</button>
+                        <button class="btn btn-secondary" style="flex:0 0 auto;" onclick="resetBuilder()">Reset</button>
+                    </div>
+                    <div class="actions">
+                        <button class="btn" id="builderCommitBtn" onclick="commitBuilderDraft()" style="display:none;">Create agent</button>
+                        <span id="builderStatus" class="status"></span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2>Schedules</h2>
+                    <span class="status" id="scheduleCount"></span>
+                </div>
+                <div class="card-body">
+                    <p class="hint">A schedule fires a task, and the task runs its assigned agent. Created here, they show up on the phone too.</p>
+                    <div class="row">
+                        <div class="field">
+                            <label for="schedAgent">Agent</label>
+                            <select id="schedAgent" class="input"></select>
+                        </div>
+                        <div class="field">
+                            <label for="schedKind">Repeat</label>
+                            <select id="schedKind" class="input" onchange="syncScheduleKind()">
+                                <option value="daily_at">Daily at</option>
+                                <option value="interval">Every N minutes</option>
+                            </select>
+                        </div>
+                        <div class="field" id="schedTimeField">
+                            <label for="schedTime">Time (HH:MM)</label>
+                            <input id="schedTime" class="input" placeholder="09:00" value="09:00">
+                        </div>
+                        <div class="field" id="schedMinutesField" style="display:none;">
+                            <label for="schedMinutes">Minutes</label>
+                            <input id="schedMinutes" class="input" type="number" min="1" value="60">
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label for="schedGoal">What should it do on each run?</label>
+                        <input id="schedGoal" class="input" placeholder="Summarise last night's build log and report failures">
+                    </div>
+                    <div class="actions">
+                        <button class="btn" onclick="createSchedule()">Add schedule</button>
+                        <span id="schedStatus" class="status"></span>
+                    </div>
+
+                    <div id="scheduleList" style="margin-top:16px;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast"></div>
+
+    <script>
+        const API = '/api/dashboard/agent';
+
+        let agents = [];
+        let schedules = [];
+        let tasksById = {};
+        let selectedAgentId = null;
+        let steps = [];
+        let builderSession = null;
+        let builderDraft = null;
+
+        async function api(path, options = {}) {
+            try {
+                const response = await fetch(API + path, {
+                    headers: { 'Content-Type': 'application/json' },
+                    ...options,
+                });
+                const body = await response.json().catch(() => null);
+                if (!response.ok) {
+                    const detail = body && (body.detail || body.error);
+                    return { error: detail || `HTTP ${response.status}` };
+                }
+                return body;
+            } catch (error) {
+                return { error: String(error) };
+            }
+        }
+
+        function toast(message) {
+            const el = document.getElementById('toast');
+            el.textContent = message;
+            el.style.display = 'block';
+            setTimeout(() => { el.style.display = 'none'; }, 2600);
+        }
+
+        function setStatus(id, message, isError) {
+            const el = document.getElementById(id);
+            el.textContent = message || '';
+            el.className = 'status' + (isError ? ' error' : '');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text == null ? '' : String(text);
+            return div.innerHTML;
+        }
+
+        function showTab(which) {
+            const editor = which === 'editor';
+            document.getElementById('paneEditor').style.display = editor ? '' : 'none';
+            document.getElementById('paneBuilder').style.display = editor ? 'none' : '';
+            document.getElementById('tabEditor').className = 'tab' + (editor ? ' active' : '');
+            document.getElementById('tabBuilder').className = 'tab' + (editor ? '' : ' active');
+        }
+
+        // --- Agents ---------------------------------------------------------
+
+        function renderAgentList() {
+            const host = document.getElementById('agentList');
+            document.getElementById('agentCount').textContent = agents.length ? `${agents.length} total` : '';
+            if (!agents.length) {
+                host.innerHTML = '<div class="empty">No agents yet. Create one with the form or the builder.</div>';
+                return;
+            }
+            host.innerHTML = agents.map((agent) => {
+                const activation = agent.activation || {};
+                const stepCount = (agent.flow_json || []).length;
+                const badges = [
+                    `<span class="badge">${stepCount} step${stepCount === 1 ? '' : 's'}</span>`,
+                    activation.enabled_schedule_count
+                        ? `<span class="badge on">${activation.enabled_schedule_count} scheduled</span>`
+                        : '<span class="badge off">no schedule</span>',
+                ].join('');
+                return `
+                    <div class="agent-item${agent.id === selectedAgentId ? ' selected' : ''}" onclick="selectAgent('${agent.id}')">
+                        <div class="name">${escapeHtml(agent.name)}</div>
+                        <div class="meta">${escapeHtml(agent.description || agent.provider_id || '')}</div>
+                        <div style="margin-top:4px;">${badges}</div>
+                    </div>`;
+            }).join('');
+        }
+
+        function renderAgentPicker() {
+            const select = document.getElementById('schedAgent');
+            const previous = select.value;
+            select.innerHTML = agents
+                .map((agent) => `<option value="${agent.id}">${escapeHtml(agent.name)}</option>`)
+                .join('');
+            if (previous) select.value = previous;
+        }
+
+        function newAgent() {
+            selectedAgentId = null;
+            steps = [];
+            document.getElementById('agentId').value = '';
+            ['agentName', 'agentDescription', 'agentModel', 'agentPrompt'].forEach((id) => {
+                document.getElementById(id).value = '';
+            });
+            document.getElementById('agentProvider').value = '';
+            document.getElementById('archiveBtn').style.display = 'none';
+            document.getElementById('editorTitle').textContent = 'New agent';
+            setStatus('editorStatus', '');
+            renderSteps();
+            renderAgentList();
+            showTab('editor');
+        }
+
+        async function selectAgent(agentId) {
+            const result = await api(`/agents/${encodeURIComponent(agentId)}`);
+            if (!result || result.error) {
+                toast(result && result.error ? result.error : 'Could not load agent');
+                return;
+            }
+            const agent = result.agent || result;
+            selectedAgentId = agent.id;
+            document.getElementById('agentId').value = agent.id;
+            document.getElementById('agentName').value = agent.name || '';
+            document.getElementById('agentDescription').value = agent.description || '';
+            document.getElementById('agentProvider').value = agent.provider_id || '';
+            document.getElementById('agentModel').value = agent.model || '';
+            document.getElementById('agentPrompt').value = agent.system_prompt || '';
+            steps = Array.isArray(agent.flow_json) ? agent.flow_json.map((step) => ({ ...step })) : [];
+            document.getElementById('archiveBtn').style.display = '';
+            document.getElementById('editorTitle').textContent = agent.id;
+            setStatus('editorStatus', '');
+            renderSteps();
+            renderAgentList();
+            showTab('editor');
+        }
+
+        function renderSteps() {
+            const host = document.getElementById('stepList');
+            if (!steps.length) {
+                host.innerHTML = '<div class="empty">No steps yet.</div>';
+                return;
+            }
+            host.innerHTML = steps.map((step, index) => `
+                <div class="step">
+                    <div class="step-head">
+                        <span class="step-index">Step ${index + 1}</span>
+                        <span>
+                            <button class="btn btn-secondary btn-xs" onclick="moveStep(${index}, -1)" ${index === 0 ? 'disabled' : ''}>↑</button>
+                            <button class="btn btn-secondary btn-xs" onclick="moveStep(${index}, 1)" ${index === steps.length - 1 ? 'disabled' : ''}>↓</button>
+                            <button class="btn btn-danger btn-xs" onclick="removeStep(${index})">Remove</button>
+                        </span>
+                    </div>
+                    <div class="row">
+                        <div class="field">
+                            <label>Name</label>
+                            <input class="input" value="${escapeHtml(step.name || '')}" oninput="updateStep(${index}, 'name', this.value)">
+                        </div>
+                        <div class="field">
+                            <label>Tool hint</label>
+                            <input class="input" value="${escapeHtml(step.tool_hint || '')}" placeholder="optional" oninput="updateStep(${index}, 'tool_hint', this.value)">
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label>What happens in this step</label>
+                        <textarea class="input" rows="2" oninput="updateStep(${index}, 'description', this.value)">${escapeHtml(step.description || '')}</textarea>
+                    </div>
+                    <div class="field" style="margin-bottom:0;">
+                        <label>Success criteria</label>
+                        <input class="input" value="${escapeHtml(step.success_criteria || '')}" oninput="updateStep(${index}, 'success_criteria', this.value)">
+                    </div>
+                </div>`).join('');
+        }
+
+        function addStep() {
+            steps.push({ name: '', description: '', tool_hint: '', success_criteria: '' });
+            renderSteps();
+        }
+
+        function updateStep(index, field, value) {
+            // No re-render: rewriting the DOM on every keystroke would steal focus.
+            steps[index][field] = value;
+        }
+
+        function moveStep(index, delta) {
+            const target = index + delta;
+            if (target < 0 || target >= steps.length) return;
+            const [moved] = steps.splice(index, 1);
+            steps.splice(target, 0, moved);
+            renderSteps();
+        }
+
+        function removeStep(index) {
+            steps.splice(index, 1);
+            renderSteps();
+        }
+
+        function collectSteps() {
+            return steps
+                .filter((step) => (step.name || '').trim() || (step.description || '').trim())
+                .map((step) => ({
+                    ...step,
+                    name: (step.name || '').trim(),
+                    description: (step.description || '').trim(),
+                    tool_hint: (step.tool_hint || '').trim() || null,
+                    success_criteria: (step.success_criteria || '').trim(),
+                }));
+        }
+
+        async function saveAgent() {
+            const name = document.getElementById('agentName').value.trim();
+            if (!name) {
+                setStatus('editorStatus', 'Name is required', true);
+                return;
+            }
+            const id = document.getElementById('agentId').value.trim();
+            const body = {
+                name,
+                description: document.getElementById('agentDescription').value.trim() || null,
+                system_prompt: document.getElementById('agentPrompt').value,
+                provider_id: document.getElementById('agentProvider').value || null,
+                model: document.getElementById('agentModel').value.trim() || null,
+                flow_json: collectSteps(),
+            };
+            setStatus('editorStatus', 'Saving…');
+            const result = id
+                ? await api(`/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) })
+                : await api('/agents', { method: 'POST', body: JSON.stringify(body) });
+            if (!result || result.error) {
+                setStatus('editorStatus', (result && result.error) || 'Save failed', true);
+                return;
+            }
+            setStatus('editorStatus', 'Saved');
+            toast(id ? 'Agent updated' : 'Agent created');
+            const saved = result.agent || result;
+            await reloadAll();
+            if (saved && saved.id) await selectAgent(saved.id);
+        }
+
+        async function archiveAgent() {
+            const id = document.getElementById('agentId').value.trim();
+            if (!id || !confirm('Archive this agent?')) return;
+            const result = await api(`/agents/${encodeURIComponent(id)}?archive=true`, { method: 'DELETE' });
+            if (!result || result.error) {
+                setStatus('editorStatus', (result && result.error) || 'Archive failed', true);
+                return;
+            }
+            toast('Agent archived');
+            newAgent();
+            reloadAll();
+        }
+
+        // --- Builder chat ---------------------------------------------------
+
+        function appendBuilderLine(who, text) {
+            const log = document.getElementById('builderLog');
+            const line = document.createElement('div');
+            line.className = 'chat-line ' + who;
+            line.innerHTML = `<span class="who">${who}</span>${escapeHtml(text)}`;
+            log.appendChild(line);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function resetBuilder() {
+            builderSession = null;
+            builderDraft = null;
+            document.getElementById('builderLog').innerHTML = '';
+            document.getElementById('builderCommitBtn').style.display = 'none';
+            setStatus('builderStatus', '');
+        }
+
+        async function sendBuilderTurn() {
+            const input = document.getElementById('builderInput');
+            const message = input.value.trim();
+            if (!message) return;
+            input.value = '';
+            appendBuilderLine('user', message);
+
+            const button = document.getElementById('builderSendBtn');
+            button.disabled = true;
+            setStatus('builderStatus', 'Configurator is thinking…');
+
+            const body = { user_message: message };
+            if (builderSession) body.session_id = builderSession;
+            if (builderDraft) body.draft = builderDraft;
+
+            const result = await api('/builder/converse', { method: 'POST', body: JSON.stringify(body) });
+            button.disabled = false;
+
+            if (!result || result.error) {
+                setStatus('builderStatus', (result && result.error) || 'Request failed', true);
+                appendBuilderLine('error', (result && result.error) || 'Request failed');
+                return;
+            }
+            setStatus('builderStatus', '');
+            builderSession = result.session_id || builderSession;
+            builderDraft = result.updated_draft || builderDraft;
+            appendBuilderLine('builder', result.assistant_message || '(no reply)');
+            document.getElementById('builderCommitBtn').style.display =
+                result.is_ready_to_commit ? 'inline-block' : 'none';
+        }
+
+        async function commitBuilderDraft() {
+            if (!builderSession || !builderDraft) return;
+            setStatus('builderStatus', 'Creating…');
+            const result = await api('/builder/commit', {
+                method: 'POST',
+                body: JSON.stringify({ session_id: builderSession, draft: builderDraft }),
+            });
+            if (!result || result.error) {
+                setStatus('builderStatus', (result && result.error) || 'Commit failed', true);
+                return;
+            }
+            setStatus('builderStatus', '');
+            toast('Agent created');
+            resetBuilder();
+            await reloadAll();
+            const created = result.agent;
+            if (created && created.id) await selectAgent(created.id);
+        }
+
+        // --- Schedules ------------------------------------------------------
+
+        function syncScheduleKind() {
+            const daily = document.getElementById('schedKind').value === 'daily_at';
+            document.getElementById('schedTimeField').style.display = daily ? '' : 'none';
+            document.getElementById('schedMinutesField').style.display = daily ? 'none' : '';
+        }
+
+        function describeExpression(expression) {
+            if (!expression || typeof expression !== 'object') return '—';
+            if (expression.kind === 'daily_at') return `daily at ${expression.time}`;
+            if (expression.kind === 'interval') {
+                const seconds = Number(expression.seconds || 0);
+                return seconds % 60 === 0 ? `every ${seconds / 60} min` : `every ${seconds}s`;
+            }
+            return JSON.stringify(expression);
+        }
+
+        function renderSchedules() {
+            const host = document.getElementById('scheduleList');
+            document.getElementById('scheduleCount').textContent = schedules.length ? `${schedules.length} total` : '';
+            if (!schedules.length) {
+                host.innerHTML = '<div class="empty">No schedules yet.</div>';
+                return;
+            }
+            const rows = schedules.map((schedule) => {
+                const task = tasksById[schedule.task_id];
+                const agent = task && agents.find((candidate) => candidate.id === task.assigned_agent_id);
+                const enabled = schedule.enabled !== false;
+                return `
+                    <tr>
+                        <td>${escapeHtml(agent ? agent.name : (task ? task.title : schedule.task_id))}</td>
+                        <td>${escapeHtml(describeExpression(schedule.expression))}</td>
+                        <td>${escapeHtml(schedule.next_fire_at || '—')}</td>
+                        <td><span class="badge ${enabled ? 'on' : 'off'}">${enabled ? 'enabled' : 'paused'}</span></td>
+                        <td style="text-align:right; white-space:nowrap;">
+                            <button class="btn btn-secondary btn-xs" onclick="toggleSchedule('${schedule.id}', ${!enabled})">${enabled ? 'Pause' : 'Enable'}</button>
+                            <button class="btn btn-secondary btn-xs" onclick="triggerSchedule('${schedule.id}')">Run now</button>
+                            <button class="btn btn-danger btn-xs" onclick="deleteSchedule('${schedule.id}')">Delete</button>
+                        </td>
+                    </tr>`;
+            }).join('');
+            host.innerHTML = `<table class="sched">
+                <thead><tr><th>Agent</th><th>Repeat</th><th>Next run</th><th>State</th><th></th></tr></thead>
+                <tbody>${rows}</tbody></table>`;
+        }
+
+        function buildExpression() {
+            if (document.getElementById('schedKind').value === 'daily_at') {
+                return { kind: 'daily_at', time: document.getElementById('schedTime').value.trim() };
+            }
+            const minutes = Number(document.getElementById('schedMinutes').value);
+            return { kind: 'interval', seconds: Math.max(1, minutes) * 60 };
+        }
+
+        async function createSchedule() {
+            const agentId = document.getElementById('schedAgent').value;
+            const goal = document.getElementById('schedGoal').value.trim();
+            if (!agentId) {
+                setStatus('schedStatus', 'Create an agent first', true);
+                return;
+            }
+            if (!goal) {
+                setStatus('schedStatus', 'Describe what each run should do', true);
+                return;
+            }
+            const agent = agents.find((candidate) => candidate.id === agentId);
+            setStatus('schedStatus', 'Creating…');
+
+            // A schedule fires a task, never an agent directly, so the task is
+            // created first and the agent is assigned to it.
+            const taskResult = await api('/tasks', {
+                method: 'POST',
+                body: JSON.stringify({
+                    title: goal.slice(0, 80),
+                    goal,
+                    assigned_agent_id: agentId,
+                    kind: 'general',
+                    source: 'dashboard',
+                }),
+            });
+            if (!taskResult || taskResult.error) {
+                setStatus('schedStatus', (taskResult && taskResult.error) || 'Task creation failed', true);
+                return;
+            }
+
+            const task = taskResult.task;
+            const scheduleResult = await api(`/tasks/${encodeURIComponent(task.id)}/schedules`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    expression: buildExpression(),
+                    name: goal.slice(0, 80),
+                    provider_id: agent ? agent.provider_id : null,
+                    model: agent ? agent.model : null,
+                    prompt: goal,
+                    enabled: true,
+                }),
+            });
+            if (!scheduleResult || scheduleResult.error) {
+                setStatus('schedStatus', (scheduleResult && scheduleResult.error) || 'Schedule creation failed', true);
+                return;
+            }
+            setStatus('schedStatus', '');
+            document.getElementById('schedGoal').value = '';
+            toast('Schedule added');
+            reloadAll();
+        }
+
+        async function toggleSchedule(scheduleId, enabled) {
+            const result = await api(`/schedules/${encodeURIComponent(scheduleId)}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ enabled }),
+            });
+            if (!result || result.error) {
+                toast((result && result.error) || 'Update failed');
+                return;
+            }
+            reloadAll();
+        }
+
+        async function triggerSchedule(scheduleId) {
+            setStatus('schedStatus', 'Firing…');
+            const result = await api(`/schedules/${encodeURIComponent(scheduleId)}/trigger`, { method: 'POST' });
+            if (!result || result.error) {
+                setStatus('schedStatus', (result && result.error) || 'Trigger failed', true);
+                return;
+            }
+            setStatus('schedStatus', '');
+            toast('Schedule fired');
+            reloadAll();
+        }
+
+        async function deleteSchedule(scheduleId) {
+            if (!confirm('Delete this schedule?')) return;
+            const result = await api(`/schedules/${encodeURIComponent(scheduleId)}`, { method: 'DELETE' });
+            if (!result || result.error) {
+                toast((result && result.error) || 'Delete failed');
+                return;
+            }
+            toast('Schedule deleted');
+            reloadAll();
+        }
+
+        // --- Bootstrap ------------------------------------------------------
+
+        async function reloadAll() {
+            const [agentResult, scheduleResult, taskResult] = await Promise.all([
+                api('/agents?limit=200'),
+                api('/schedules'),
+                api('/tasks?limit=200'),
+            ]);
+            agents = (agentResult && agentResult.agents) || [];
+            schedules = (scheduleResult && scheduleResult.schedules) || [];
+            tasksById = {};
+            ((taskResult && taskResult.tasks) || []).forEach((task) => { tasksById[task.id] = task; });
+            renderAgentList();
+            renderAgentPicker();
+            renderSchedules();
+        }
+
+        syncScheduleKind();
+        newAgent();
+        reloadAll();
+    </script>
+</body>
+</html>

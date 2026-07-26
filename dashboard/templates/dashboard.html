@@ -1545,65 +1545,18 @@
                 </div>
             </div>
 
-            <!-- Agent Builder Card -->
+            <!-- Agents Card (summary; authoring lives on /agents) -->
             <div class="card" style="grid-column: 1 / -1;">
                 <div class="card-header">
                     <h2>🤖 <span data-i18n="agents">Agents</span></h2>
                     <div style="display: flex; align-items: center; gap: 8px;">
-                        <button class="btn btn-secondary btn-sm" onclick="openAgentForm()" data-i18n="agent_new">New agent</button>
                         <button class="btn btn-secondary btn-sm" onclick="refreshAgents()">Refresh</button>
+                        <button class="btn btn-sm" onclick="location.href='/agents'" data-i18n="agents_open">Open Agents</button>
                     </div>
                 </div>
                 <div class="card-content">
-                    <p class="section-desc" data-i18n="agents_desc">Build agents here on the PC, or chat with the builder like you do in the app.</p>
+                    <p class="section-desc" data-i18n="agents_desc">Create, edit and schedule agents on the Agents page. Everything you make there shows up in the app.</p>
                     <div id="agentList"></div>
-
-                    <!-- Form editor -->
-                    <div id="agentForm" style="display:none; margin-top:16px; border-top:1px solid var(--border, #333); padding-top:16px;">
-                        <input type="hidden" id="agentFormId">
-                        <div class="info-row">
-                            <span class="info-label" data-i18n="agent_name">Name</span>
-                            <input id="agentFormName" class="input" style="flex:1" maxlength="80" placeholder="Daily site check">
-                        </div>
-                        <div class="info-row">
-                            <span class="info-label" data-i18n="agent_description">Description</span>
-                            <input id="agentFormDescription" class="input" style="flex:1" placeholder="What this agent is for">
-                        </div>
-                        <div class="info-row">
-                            <span class="info-label" data-i18n="agent_model">Model</span>
-                            <select id="agentFormProvider" class="input">
-                                <option value="">(default)</option>
-                                <option value="anthropic">anthropic</option>
-                                <option value="openai">openai</option>
-                                <option value="google">google</option>
-                            </select>
-                            <input id="agentFormModel" class="input" style="flex:1" placeholder="model id (optional)">
-                        </div>
-                        <div style="margin-top:8px;">
-                            <span class="info-label" data-i18n="agent_prompt">System prompt</span>
-                            <textarea id="agentFormPrompt" class="input" rows="6" style="width:100%; margin-top:6px;" placeholder="You are ..."></textarea>
-                        </div>
-                        <div style="display:flex; gap:8px; margin-top:12px;">
-                            <button class="btn btn-sm" onclick="saveAgentForm()" data-i18n="save">Save</button>
-                            <button class="btn btn-secondary btn-sm" onclick="closeAgentForm()" data-i18n="cancel">Cancel</button>
-                            <span id="agentFormStatus" style="align-self:center; font-size:12px; color:var(--text-secondary);"></span>
-                        </div>
-                    </div>
-
-                    <!-- Conversational builder -->
-                    <div style="margin-top:16px; border-top:1px solid var(--border, #333); padding-top:16px;">
-                        <div style="display:flex; align-items:center; justify-content:space-between;">
-                            <span class="info-label" data-i18n="agent_builder_chat">Builder chat</span>
-                            <button class="btn btn-secondary btn-sm" onclick="resetBuilderChat()" data-i18n="reset">Reset</button>
-                        </div>
-                        <div id="builderLog" style="max-height:240px; overflow-y:auto; margin-top:8px; font-size:13px; line-height:1.5;"></div>
-                        <div style="display:flex; gap:8px; margin-top:8px;">
-                            <input id="builderInput" class="input" style="flex:1" placeholder="e.g. Check my site every morning and report failures"
-                                   onkeydown="if(event.key==='Enter'){sendBuilderTurn();}">
-                            <button class="btn btn-sm" onclick="sendBuilderTurn()" data-i18n="send">Send</button>
-                            <button class="btn btn-sm" id="builderCommitBtn" onclick="commitBuilderDraft()" style="display:none;" data-i18n="agent_commit">Create agent</button>
-                        </div>
-                    </div>
                 </div>
             </div>
 
@@ -1782,17 +1735,11 @@
         // i18n Translations
         const i18n = {
             en: {
-                // Agents (PC builder)
+                // Agents (authoring lives on /agents)
                 agents: 'Agents',
-                agents_desc: 'Build agents here on the PC, or chat with the builder like you do in the app.',
+                agents_desc: 'Create, edit and schedule agents on the Agents page. Everything you make there shows up in the app.',
                 agents_empty: 'No agents yet',
-                agent_new: 'New agent',
-                agent_name: 'Name',
-                agent_description: 'Description',
-                agent_model: 'Model',
-                agent_prompt: 'System prompt',
-                agent_builder_chat: 'Builder chat',
-                agent_commit: 'Create agent',
+                agents_open: 'Open Agents',
                 save: 'Save',
                 cancel: 'Cancel',
                 reset: 'Reset',
@@ -1844,17 +1791,11 @@
                 autostart_unsupported: 'Unsupported'
             },
             ko: {
-                // Agents (PC builder)
+                // Agents (편집은 /agents 페이지에서)
                 agents: '에이전트',
-                agents_desc: 'PC에서 바로 에이전트를 만들거나, 앱에서처럼 빌더와 대화하며 만들 수 있습니다.',
+                agents_desc: '에이전트 페이지에서 만들고 수정하고 스케줄을 겁니다. 여기서 만든 것은 앱에도 그대로 보입니다.',
                 agents_empty: '아직 에이전트가 없습니다',
-                agent_new: '새 에이전트',
-                agent_name: '이름',
-                agent_description: '설명',
-                agent_model: '모델',
-                agent_prompt: '시스템 프롬프트',
-                agent_builder_chat: '빌더 대화',
-                agent_commit: '에이전트 생성',
+                agents_open: '에이전트 열기',
                 save: '저장',
                 cancel: '취소',
                 reset: '초기화',
@@ -3137,8 +3078,6 @@
         // is served on the localhost-only listener, so it uses
         // /api/dashboard/agent/* instead and needs no key.
         const AGENT_API = '/api/dashboard/agent';
-        let builderSession = null;
-        let builderDraft = null;
 
         async function refreshAgents() {
             const list = document.getElementById('agentList');
@@ -3162,142 +3101,10 @@
                         </div>
                     </div>
                     <div style="display:flex; gap:6px;">
-                        <button class="btn btn-secondary btn-sm" onclick="openAgentForm('${escapeHtml(agent.id)}')">Edit</button>
-                        <button class="btn btn-danger btn-sm" onclick="archiveAgent('${escapeHtml(agent.id)}')">Archive</button>
+                        <button class="btn btn-secondary btn-sm" onclick="location.href='/agents'">Open</button>
                     </div>
                 </div>
             `).join('');
-        }
-
-        function closeAgentForm() {
-            document.getElementById('agentForm').style.display = 'none';
-            document.getElementById('agentFormStatus').textContent = '';
-        }
-
-        async function openAgentForm(agentId) {
-            const form = document.getElementById('agentForm');
-            form.style.display = 'block';
-            document.getElementById('agentFormStatus').textContent = '';
-            if (!agentId) {
-                document.getElementById('agentFormId').value = '';
-                document.getElementById('agentFormName').value = '';
-                document.getElementById('agentFormDescription').value = '';
-                document.getElementById('agentFormProvider').value = '';
-                document.getElementById('agentFormModel').value = '';
-                document.getElementById('agentFormPrompt').value = '';
-                return;
-            }
-            const agent = await fetchApi(`${AGENT_API}/agents/${encodeURIComponent(agentId)}`);
-            if (!agent) return;
-            document.getElementById('agentFormId').value = agent.id || '';
-            document.getElementById('agentFormName').value = agent.name || '';
-            document.getElementById('agentFormDescription').value = agent.description || '';
-            document.getElementById('agentFormProvider').value = agent.provider_id || '';
-            document.getElementById('agentFormModel').value = agent.model || '';
-            document.getElementById('agentFormPrompt').value = agent.system_prompt || '';
-        }
-
-        async function saveAgentForm() {
-            const id = document.getElementById('agentFormId').value.trim();
-            const name = document.getElementById('agentFormName').value.trim();
-            if (!name) {
-                document.getElementById('agentFormStatus').textContent = 'Name is required';
-                return;
-            }
-            const body = {
-                name,
-                description: document.getElementById('agentFormDescription').value.trim() || null,
-                system_prompt: document.getElementById('agentFormPrompt').value,
-                provider_id: document.getElementById('agentFormProvider').value || null,
-                model: document.getElementById('agentFormModel').value.trim() || null,
-            };
-            const result = id
-                ? await fetchApi(`${AGENT_API}/agents/${encodeURIComponent(id)}`, {
-                    method: 'PATCH', body: JSON.stringify(body),
-                  })
-                : await fetchApi(`${AGENT_API}/agents`, {
-                    method: 'POST', body: JSON.stringify(body),
-                  });
-            if (!result || result.error) {
-                document.getElementById('agentFormStatus').textContent = (result && result.error) || 'Failed';
-                return;
-            }
-            showToast(id ? 'Agent updated' : 'Agent created');
-            closeAgentForm();
-            refreshAgents();
-        }
-
-        async function archiveAgent(agentId) {
-            if (!confirm('Archive this agent?')) return;
-            const result = await fetchApi(`${AGENT_API}/agents/${encodeURIComponent(agentId)}?archive=true`, {
-                method: 'DELETE',
-            });
-            if (!result || result.error) {
-                showToast((result && result.error) || 'Failed to archive', 'error');
-                return;
-            }
-            showToast('Agent archived');
-            refreshAgents();
-        }
-
-        function appendBuilderLine(role, text) {
-            const log = document.getElementById('builderLog');
-            const who = role === 'user' ? 'You' : 'Builder';
-            const color = role === 'user' ? 'var(--text-secondary)' : 'var(--text-primary, inherit)';
-            log.insertAdjacentHTML('beforeend',
-                `<div style="margin-bottom:6px; color:${color};"><b>${who}:</b> ${escapeHtml(text)}</div>`);
-            log.scrollTop = log.scrollHeight;
-        }
-
-        function resetBuilderChat() {
-            builderSession = null;
-            builderDraft = null;
-            document.getElementById('builderLog').innerHTML = '';
-            document.getElementById('builderCommitBtn').style.display = 'none';
-        }
-
-        async function sendBuilderTurn() {
-            const input = document.getElementById('builderInput');
-            const message = input.value.trim();
-            if (!message) return;
-            input.value = '';
-            appendBuilderLine('user', message);
-
-            const body = { user_message: message };
-            if (builderSession) body.session_id = builderSession;
-            if (builderDraft) body.draft = builderDraft;
-
-            const result = await fetchApi(`${AGENT_API}/builder/converse`, {
-                method: 'POST', body: JSON.stringify(body),
-            });
-            if (!result) {
-                appendBuilderLine('builder', 'Request failed.');
-                return;
-            }
-            if (result.error) {
-                appendBuilderLine('builder', result.error);
-                return;
-            }
-            builderSession = result.session_id || builderSession;
-            builderDraft = result.updated_draft || builderDraft;
-            appendBuilderLine('builder', result.assistant_message || '(no reply)');
-            document.getElementById('builderCommitBtn').style.display =
-                result.is_ready_to_commit ? 'inline-block' : 'none';
-        }
-
-        async function commitBuilderDraft() {
-            if (!builderSession || !builderDraft) return;
-            const result = await fetchApi(`${AGENT_API}/builder/commit`, {
-                method: 'POST',
-                body: JSON.stringify({ session_id: builderSession, draft: builderDraft }),
-            });
-            if (!result || result.error) {
-                showToast((result && result.error) || 'Commit failed', 'error');
-                return;
-            }
-            showToast('Agent created');
-            resetBuilderChat();
-            refreshAgents();
         }
 
         function escapeHtml(text) {
