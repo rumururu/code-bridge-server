@@ -5,33 +5,87 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Code Bridge Dashboard</title>
     <style>
+        /* ------------------------------------------------------------------
+           Code Bridge console.
+           The product is a bridge: this machine on one bank, the phone on the
+           other. The page has one job — say whether that bridge is up and what
+           crossed it. So it is built like an instrument panel, not a brochure:
+           structural labels are monospace and spaced out like a patch-bay
+           legend, human content is sans, and colour is reserved for signal.
+           Three signals only: link (healthy), pulse (working / needs you),
+           fault (broken). Anything not carrying signal stays grey.
+           ------------------------------------------------------------------ */
         :root {
-            --bg-primary: #f5f5f5;
-            --bg-secondary: #ffffff;
-            --bg-card: #ffffff;
-            --text-primary: #333333;
-            --text-secondary: #666666;
-            --text-muted: #888888;
-            --border-color: #e0e0e0;
-            --accent-color: #007bff;
-            --accent-hover: #0056b3;
-            --success-color: #28a745;
-            --warning-color: #ffc107;
-            --danger-color: #dc3545;
-            --shadow: 0 2px 8px rgba(0,0,0,0.1);
+            color-scheme: light dark;
+
+            --ink: #F1F3F5;
+            --slate: #FFFFFF;
+            --seam: #DBE0E5;
+            --seam-soft: #E8ECEF;
+            --wire: #12181E;
+            --wire-dim: #5C6873;
+            --wire-faint: #8A949E;
+
+            --link: #10896C;
+            --pulse: #B26A00;
+            --fault: #C63238;
+            --signal-bg: rgba(16, 137, 108, 0.10);
+            --fault-bg: rgba(198, 50, 56, 0.09);
+            --pulse-bg: rgba(178, 106, 0, 0.10);
+
+            --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+            --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Apple SD Gothic Neo", sans-serif;
+
+            /* Legacy names the existing markup still references. */
+            --bg-primary: var(--ink);
+            --bg-secondary: var(--slate);
+            --bg-card: var(--slate);
+            --text-primary: var(--wire);
+            --text-secondary: var(--wire-dim);
+            --text-muted: var(--wire-faint);
+            --border-color: var(--seam);
+            --accent-color: var(--link);
+            --accent-hover: #0B6B54;
+            --success-color: var(--link);
+            --warning-color: var(--pulse);
+            --danger-color: var(--fault);
+            --shadow: none;
         }
 
         @media (prefers-color-scheme: dark) {
             :root {
-                --bg-primary: #1a1a1a;
-                --bg-secondary: #2d2d2d;
-                --bg-card: #2d2d2d;
-                --text-primary: #e0e0e0;
-                --text-secondary: #b0b0b0;
-                --text-muted: #808080;
-                --border-color: #404040;
-                --shadow: 0 2px 8px rgba(0,0,0,0.3);
+                --ink: #0E1216;
+                --slate: #161C22;
+                --seam: #242D36;
+                --seam-soft: #1D242B;
+                --wire: #DEE5EC;
+                --wire-dim: #8A96A3;
+                --wire-faint: #66727E;
+
+                --link: #3FBF9F;
+                --pulse: #F5A524;
+                --fault: #F2555A;
+                --signal-bg: rgba(63, 191, 159, 0.12);
+                --fault-bg: rgba(242, 85, 90, 0.12);
+                --pulse-bg: rgba(245, 165, 36, 0.12);
+
+                --accent-hover: #56D3B4;
             }
+        }
+
+        /* One place for every uppercase machine label. */
+        .legend,
+        .card-header h2,
+        .stat-label,
+        .activity-heading,
+        .info-label,
+        .section-desc.legend {
+            font-family: var(--mono);
+            font-size: 10.5px;
+            font-weight: 600;
+            letter-spacing: .09em;
+            text-transform: uppercase;
+            color: var(--wire-faint);
         }
 
         * {
@@ -39,12 +93,118 @@
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: var(--sans);
             margin: 0;
             padding: 0;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            line-height: 1.5;
+            background: var(--ink);
+            color: var(--wire);
+            line-height: 1.55;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        :focus-visible {
+            outline: 2px solid var(--link);
+            outline-offset: 2px;
+            border-radius: 3px;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: .001ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: .001ms !important;
+            }
+        }
+
+        /* ---- Link spine -------------------------------------------------
+           The signature. The product is a bridge, so the page opens with the
+           bridge itself: this machine, the tunnel, the paired phone, and the
+           rule between them. The rule only animates while something is
+           actually crossing — motion here means traffic, not decoration.
+           ------------------------------------------------------------------ */
+        .spine {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr auto 1fr;
+            align-items: center;
+            gap: 0;
+            padding: 22px 26px;
+            margin-bottom: 20px;
+            background: var(--slate);
+            border: 1px solid var(--seam);
+            border-radius: 4px;
+        }
+        .node { text-align: center; }
+        .node-label {
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: .16em;
+            text-transform: uppercase;
+            color: var(--wire-faint);
+        }
+        .node-value {
+            font-family: var(--mono);
+            font-size: 13px;
+            margin-top: 5px;
+            color: var(--wire);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .node-state {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 7px;
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: .1em;
+            text-transform: uppercase;
+            color: var(--wire-faint);
+        }
+        .node-state::before {
+            content: '';
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--wire-faint);
+        }
+        .node-state.up { color: var(--link); }
+        .node-state.up::before { background: var(--link); }
+        .node-state.down { color: var(--fault); }
+        .node-state.down::before { background: var(--fault); }
+        .node-state.idle { color: var(--wire-faint); }
+
+        .span {
+            position: relative;
+            height: 1px;
+            min-width: 48px;
+            background: var(--seam);
+            margin: 0 14px;
+            align-self: center;
+        }
+        .span.up { background: color-mix(in srgb, var(--link) 45%, var(--seam)); }
+        .span.down { background: color-mix(in srgb, var(--fault) 55%, var(--seam)); }
+        .span.busy::after {
+            content: '';
+            position: absolute;
+            top: -1px;
+            left: 0;
+            width: 26px;
+            height: 3px;
+            border-radius: 2px;
+            background: var(--pulse);
+            animation: cross 1.9s linear infinite;
+        }
+        @keyframes cross {
+            from { transform: translateX(0); opacity: 0; }
+            15%  { opacity: 1; }
+            85%  { opacity: 1; }
+            to   { transform: translateX(calc(100% + 100px)); opacity: 0; }
+        }
+        @media (max-width: 720px) {
+            .spine { grid-template-columns: 1fr; gap: 14px; }
+            .span { width: 100%; margin: 0; }
+            .span.busy::after { animation: none; }
         }
 
         /* --- Agent activity (status only; authoring lives on /agents) --- */
@@ -139,9 +299,10 @@
         .activity-empty { color: var(--text-muted); font-size: 13px; padding: 8px 0; }
 
         .header {
-            background: var(--bg-secondary);
-            border-bottom: 1px solid var(--border-color);
-            padding: 16px 24px;
+            background: var(--slate);
+            border-bottom: 1px solid var(--seam);
+            padding: 0 24px;
+            height: 56px;
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -151,19 +312,27 @@
         }
 
         .header h1 {
-            margin: 0;
-            font-size: 1.5rem;
+            font-family: var(--mono);
+            font-size: 13px;
             font-weight: 600;
+            letter-spacing: .18em;
+            text-transform: uppercase;
+            margin: 0;
+            color: var(--wire);
         }
 
         .status-badge {
             display: inline-flex;
             align-items: center;
-            gap: 8px;
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-size: 0.875rem;
-            font-weight: 500;
+            gap: 7px;
+            padding: 4px 10px;
+            border: 1px solid var(--seam);
+            border-radius: 3px;
+            font-family: var(--mono);
+            font-size: 10.5px;
+            letter-spacing: .09em;
+            text-transform: uppercase;
+            font-weight: 600;
         }
 
         .status-badge.online {
@@ -184,9 +353,9 @@
         }
 
         .container {
-            max-width: 1200px;
+            max-width: 1180px;
             margin: 0 auto;
-            padding: 24px;
+            padding: 24px 24px 64px;
         }
 
         .grid {
@@ -195,10 +364,12 @@
             gap: 24px;
         }
 
+        /* Panels, not cards: square shoulders, one hairline, no float. The
+           only thing allowed to look raised is a live signal. */
         .card {
-            background: var(--bg-card);
-            border-radius: 12px;
-            box-shadow: var(--shadow);
+            background: var(--slate);
+            border: 1px solid var(--seam);
+            border-radius: 4px;
             overflow: hidden;
         }
 
@@ -207,17 +378,18 @@
         }
 
         .card-header {
-            padding: 16px 20px;
-            border-bottom: 1px solid var(--border-color);
+            padding: 12px 18px;
+            border-bottom: 1px solid var(--seam);
+            background: var(--seam-soft);
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 12px;
+            min-height: 44px;
         }
 
         .card-header h2 {
             margin: 0;
-            font-size: 1rem;
-            font-weight: 600;
             display: flex;
             align-items: center;
             gap: 8px;
@@ -234,17 +406,19 @@
         }
 
         .btn {
-            padding: 8px 16px;
-            border: none;
-            border-radius: 6px;
-            font-size: 0.875rem;
-            font-weight: 500;
+            font-family: var(--mono);
+            font-size: 11px;
+            letter-spacing: .06em;
+            font-weight: 600;
+            padding: 6px 12px;
+            border-radius: 3px;
+            border: 1px solid var(--seam);
+            background: var(--slate);
+            color: var(--wire);
             cursor: pointer;
-            transition: all 0.2s;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
+            transition: border-color .12s ease, color .12s ease;
         }
+        .btn:hover { border-color: var(--wire-faint); }
 
         .btn-primary {
             background: var(--accent-color);
@@ -1464,7 +1638,7 @@
     <!-- Login Overlay -->
     <div id="loginOverlay" class="login-overlay hidden">
         <div class="login-card">
-            <h2>🔐 Dashboard Login</h2>
+            <h2>Dashboard Login</h2>
             <p class="subtitle">Enter password to access the dashboard</p>
             <form class="login-form" onsubmit="handleLogin(event)">
                 <input type="password" id="loginPassword" placeholder="Password" autocomplete="current-password" required>
@@ -1490,6 +1664,26 @@
     </header>
 
     <main class="container">
+        <!-- The bridge itself: machine, tunnel, phone. -->
+        <section class="spine" id="linkSpine" aria-label="Bridge status">
+            <div class="node">
+                <div class="node-label" data-i18n="spine_machine">This machine</div>
+                <div class="node-value" id="spineMachine">—</div>
+                <div class="node-state" id="spineMachineState">—</div>
+            </div>
+            <div class="span" id="spineLeft"></div>
+            <div class="node">
+                <div class="node-label" data-i18n="spine_tunnel">Tunnel</div>
+                <div class="node-value" id="spineTunnel">—</div>
+                <div class="node-state" id="spineTunnelState">—</div>
+            </div>
+            <div class="span" id="spineRight"></div>
+            <div class="node">
+                <div class="node-label" data-i18n="spine_phone">Paired phones</div>
+                <div class="node-value" id="spinePhone">—</div>
+                <div class="node-state" id="spinePhoneState">—</div>
+            </div>
+        </section>
         <!-- Pairing Banner (shown when no devices paired) -->
         <div id="pairingBanner" class="pairing-banner">
             <div class="pairing-banner-content">
@@ -1540,7 +1734,7 @@
             <!-- Server Status Card -->
             <div class="card">
                 <div class="card-header">
-                    <h2>⚡ Server Status</h2>
+                    <h2>Server Status</h2>
                     <div style="display: flex; align-items: center; gap: 8px;">
                         <span id="serverVersion" style="font-size: 13px; color: var(--text-secondary);">v-</span>
                         <button class="btn btn-secondary btn-sm" onclick="checkUpdate()" data-i18n="check_update">Check Update</button>
@@ -1597,7 +1791,7 @@
             <!-- Security Card -->
             <div class="card">
                 <div class="card-header">
-                    <h2>🔒 <span data-i18n="security">Security</span></h2>
+                    <h2><span data-i18n="security">Security</span></h2>
                 </div>
                 <div class="card-content">
                     <p class="section-desc" data-i18n="security_desc">Select access mode. QR pairing is required by default.</p>
@@ -1639,7 +1833,7 @@
             <!-- Agent activity: status only. Authoring lives on /agents. -->
             <div class="card" style="grid-column: 1 / -1;">
                 <div class="card-header">
-                    <h2>🤖 <span data-i18n="agent_activity">Agent activity</span></h2>
+                    <h2><span data-i18n="agent_activity">Agent activity</span></h2>
                     <div style="display: flex; align-items: center; gap: 8px;">
                         <button class="btn btn-secondary btn-sm" onclick="refreshAgentActivity()" data-i18n="refresh">Refresh</button>
                         <button class="btn btn-sm" onclick="location.href='/agents'" data-i18n="agents_open">Manage agents</button>
@@ -1839,6 +2033,15 @@
                 // Agents (authoring lives on /agents)
                 agents: 'Agents',
                 refresh: 'Refresh',
+                spine_machine: 'This machine',
+                spine_tunnel: 'Tunnel',
+                spine_phone: 'Paired phones',
+                spine_serving: 'serving',
+                spine_open: 'open',
+                spine_closed: 'closed',
+                spine_paired: 'paired',
+                spine_waiting: 'waiting',
+                spine_none_paired: 'none paired',
                 agent_activity: 'Agent activity',
                 agents_open: 'Manage agents',
                 agent_recent_runs: 'Recent runs',
@@ -1909,6 +2112,15 @@
                 // Agents (편집은 /agents 페이지에서)
                 agents: '에이전트',
                 refresh: '새로고침',
+                spine_machine: '이 기계',
+                spine_tunnel: '터널',
+                spine_phone: '연결된 폰',
+                spine_serving: '서비스 중',
+                spine_open: '열림',
+                spine_closed: '닫힘',
+                spine_paired: '대 연결됨',
+                spine_waiting: '대기',
+                spine_none_paired: '연결된 기기 없음',
                 agent_activity: '에이전트 실행현황',
                 agents_open: '에이전트 관리',
                 agent_recent_runs: '최근 실행',
@@ -2474,8 +2686,51 @@
             }
         }
 
+        function renderLinkSpine() {
+            if (!dashboardData) return;
+            const server = dashboardData.server || {};
+            const tunnel = dashboardData.tunnel || {};
+            const clients = dashboardData.clients || [];
+
+            const set = (id, text, state) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.textContent = text;
+                if (state) el.className = `node-state ${state}`;
+            };
+
+            set('spineMachine', server.local_url
+                ? String(server.local_url).replace(/^https?:\/\//, '')
+                : `${server.dashboard_host || '127.0.0.1'}:${server.dashboard_port || 8766}`);
+            set('spineMachineState', t('spine_serving') || 'serving', 'up');
+
+            const tunnelUp = tunnel.running === true;
+            const tunnelUrl = tunnel.url ? String(tunnel.url).replace(/^https?:\/\//, '') : '';
+            const tunnelEl = document.getElementById('spineTunnel');
+            if (tunnelEl) tunnelEl.title = tunnelUrl || '';
+            set('spineTunnel', tunnelUp && tunnelUrl
+                ? `${tunnelUrl.split('.')[0].slice(0, 22)}…`
+                : '—');
+            set('spineTunnelState',
+                tunnelUp ? (t('spine_open') || 'open') : (t('spine_closed') || 'closed'),
+                tunnelUp ? 'up' : 'idle');
+
+            set('spinePhone', clients.length
+                ? clients.map((c) => c.device_name || c.name || c.id).slice(0, 2).join(', ')
+                : (t('spine_none_paired') || 'none paired'));
+            set('spinePhoneState',
+                clients.length ? `${clients.length} ${t('spine_paired') || 'paired'}` : (t('spine_waiting') || 'waiting'),
+                clients.length ? 'up' : 'idle');
+
+            const left = document.getElementById('spineLeft');
+            const right = document.getElementById('spineRight');
+            if (left) left.className = `span ${tunnelUp ? 'up' : ''} ${spineBusy ? 'busy' : ''}`.trim();
+            if (right) right.className = `span ${clients.length ? 'up' : ''} ${spineBusy ? 'busy' : ''}`.trim();
+        }
+
         function updateUI() {
             if (!dashboardData) return;
+            renderLinkSpine();
 
             // Server status
             const statusBadge = document.getElementById('serverStatus');
@@ -3215,6 +3470,10 @@
         // is served on the localhost-only listener.
         const AGENT_API = '/api/dashboard/agent';
 
+        // Drives the spine animation — the rule only moves while something
+        // is genuinely crossing the bridge.
+        let spineBusy = false;
+
         const LIVE_RUN_STATUSES = new Set(['queued', 'starting', 'running']);
         const WAITING_RUN_STATUSES = new Set(['blocked', 'waiting_for_user', 'waiting_user']);
 
@@ -3260,6 +3519,8 @@
             agents.forEach((agent) => { agentNames[agent.id] = agent.name; });
 
             const live = runs.filter((run) => LIVE_RUN_STATUSES.has(run.status));
+            spineBusy = live.length > 0;
+            renderLinkSpine();
             const waiting = runs.filter((run) => WAITING_RUN_STATUSES.has(run.status));
             const failed = runs.filter((run) => run.status === 'failed');
             const enabledSchedules = schedules.filter((s) => s.enabled !== false);
