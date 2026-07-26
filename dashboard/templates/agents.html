@@ -760,7 +760,15 @@
                         <td>${escapeHtml(agent ? agent.name : (task ? task.title : schedule.task_id))}</td>
                         <td>${escapeHtml(describeExpression(schedule.expression))}</td>
                         <td>${escapeHtml(schedule.next_fire_at || '—')}</td>
-                        <td><span class="badge ${enabled ? 'on' : 'off'}">${enabled ? 'enabled' : 'paused'}</span></td>
+                        <td>
+                            <span class="badge ${enabled ? 'on' : 'off'}">${enabled ? 'enabled' : 'paused'}</span>
+                            ${schedule.last_status === 'skipped'
+                                ? `<span class="badge off" title="${escapeHtml(schedule.last_error || '')}">skipped ×${schedule.skip_count || 1}</span>`
+                                : ''}
+                            ${schedule.last_status === 'error'
+                                ? `<span class="badge off" title="${escapeHtml(schedule.last_error || '')}">error</span>`
+                                : ''}
+                        </td>
                         <td style="text-align:right; white-space:nowrap;">
                             <button class="btn btn-secondary btn-xs" onclick="toggleSchedule('${schedule.id}', ${!enabled})">${enabled ? 'Pause' : 'Enable'}</button>
                             <button class="btn btn-secondary btn-xs" onclick="triggerSchedule('${schedule.id}')">Run now</button>

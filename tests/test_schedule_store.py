@@ -498,4 +498,6 @@ class TestSchedulerTick:
         assert after["fire_count"] == 0
         assert after["skip_count"] == 1
         assert after["last_status"] == "skipped"
-        assert after["last_error"] == "previous run still active"
+        # A run parked on a human is reported as such, and only blocks until
+        # the stall grace period — see test_scheduler_stalled_run.py.
+        assert after["last_error"] == "previous run is waiting for approval"

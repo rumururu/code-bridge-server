@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from datetime import datetime, timezone
 from typing import Any
 
 from agent.agent_store import get_agent_store
@@ -28,35 +30,139 @@ from agent.task_orchestrator import (
 logger = logging.getLogger(__name__)
 
 
-_ACTIVE_RUN_STATUSES = {
+# A run in one of these is doing work; firing again would stack two runs on
+# the same task.
+_PROGRESSING_RUN_STATUSES = {
     "queued",
     "starting",
     "running",
+}
+
+# A run in one of these has stopped and is waiting on a human. Unattended, that
+# human never arrives: the run sits there forever and — because it counts as
+# "active" — silently swallows every later firing of the schedule. One
+# unanswered approval used to kill a schedule permanently.
+_WAITING_RUN_STATUSES = {
     "blocked",
     "waiting_for_user",
     "waiting_user",
 }
 
+_ACTIVE_RUN_STATUSES = _PROGRESSING_RUN_STATUSES | _WAITING_RUN_STATUSES
 
-def _has_active_run_for_task(task_id: str) -> bool:
-    """Return True if any non-terminal run still exists for the task."""
+# How long a run may sit waiting on a human before the scheduler gives up on
+# it and lets the schedule move on. Long enough that someone glancing at their
+# phone within the hour still gets to answer; short enough that a schedule
+# recovers on its own overnight.
+_STALL_GRACE_SECONDS = 3600
+
+
+def _stall_grace_seconds() -> int:
+    raw = os.environ.get("CODEBRIDGE_SCHEDULE_STALL_GRACE_SECONDS")
+    if raw is None:
+        return _STALL_GRACE_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _STALL_GRACE_SECONDS
+    return max(0, value)
+
+
+def _runs_for_task(task_id: str) -> list[dict[str, Any]]:
     try:
         store = get_agent_store()
     except Exception:
-        return False
+        return []
     try:
-        runs = store.list_runs(task_id=task_id, limit=5)
+        return store.list_runs(task_id=task_id, limit=5)
     except TypeError:
         # Older signature without task_id filter; fall back to status check.
         runs = store.list_runs(limit=20)
-        runs = [run for run in runs if run.get("task_id") == task_id]
+        return [run for run in runs if run.get("task_id") == task_id]
     except Exception:
         logger.exception("scheduler: failed to inspect task runs")
-        return False
+        return []
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    # Stored timestamps are naive UTC (SQLite CURRENT_TIMESTAMP).
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def _waiting_seconds(run: dict[str, Any]) -> float | None:
+    """How long ``run`` has been parked, or ``None`` if that can't be told."""
+    stamp = _parse_timestamp(run.get("updated_at")) or _parse_timestamp(run.get("started_at"))
+    if stamp is None:
+        return None
+    return (datetime.now(timezone.utc) - stamp).total_seconds()
+
+
+def _abandon_stalled_run(run: dict[str, Any]) -> None:
+    """Fail a run nobody answered, and expire the approvals holding it.
+
+    Without this the run stays "active" forever. Expiring its approvals also
+    keeps the pending queue honest — those prompts are about a run that is no
+    longer going anywhere.
+    """
+    run_id = run.get("id")
+    if not isinstance(run_id, str) or not run_id:
+        return
+    try:
+        from approvals.approval_store import get_approval_store
+
+        approvals = get_approval_store()
+        for approval in approvals.list_pending(run_id=run_id):
+            approvals.mark_expired(approval["id"])
+    except Exception:
+        logger.exception("scheduler: failed to expire approvals for run %s", run_id)
+    try:
+        get_agent_store().update_run_status(run_id, "failed")
+    except Exception:
+        logger.exception("scheduler: failed to abandon stalled run %s", run_id)
+
+
+def _blocking_run_for_task(task_id: str) -> tuple[dict[str, Any] | None, str]:
+    """The run that should stop this firing, and why.
+
+    Returns ``(None, "")`` when the schedule is free to fire. A run waiting on
+    a human past the grace period is abandoned here rather than reported as
+    blocking, which is what lets a schedule recover by itself.
+    """
+    runs = _runs_for_task(task_id)
+    waiting: list[dict[str, Any]] = []
     for run in runs:
-        if run.get("status") in _ACTIVE_RUN_STATUSES:
-            return True
-    return False
+        status = run.get("status")
+        if status in _PROGRESSING_RUN_STATUSES:
+            return run, "previous run still active"
+        if status in _WAITING_RUN_STATUSES:
+            waiting.append(run)
+
+    grace = _stall_grace_seconds()
+    for run in waiting:
+        elapsed = _waiting_seconds(run)
+        if elapsed is not None and elapsed < grace:
+            return run, "previous run is waiting for approval"
+
+    for run in waiting:
+        logger.warning(
+            "scheduler: abandoning run %s — waiting on a human for longer than %ss",
+            run.get("id"),
+            grace,
+        )
+        _abandon_stalled_run(run)
+    return None, ""
+
+
+def _has_active_run_for_task(task_id: str) -> bool:
+    """Return True if any non-terminal run still exists for the task."""
+    return any(run.get("status") in _ACTIVE_RUN_STATUSES for run in _runs_for_task(task_id))
 
 
 async def _fire_schedule(schedule: dict[str, Any]) -> None:
@@ -64,19 +170,22 @@ async def _fire_schedule(schedule: dict[str, Any]) -> None:
     task_id = schedule["task_id"]
     store = get_schedule_store()
 
-    if schedule.get("skip_if_active") and _has_active_run_for_task(task_id):
-        logger.info(
-            "scheduler: skipping schedule %s — task %s still has an active run",
-            schedule_id,
-            task_id,
-        )
-        store.record_fire(
-            schedule_id,
-            run_id=None,
-            status="skipped",
-            error="previous run still active",
-        )
-        return
+    if schedule.get("skip_if_active"):
+        blocking, reason = _blocking_run_for_task(task_id)
+        if blocking is not None:
+            logger.info(
+                "scheduler: skipping schedule %s — task %s: %s",
+                schedule_id,
+                task_id,
+                reason,
+            )
+            store.record_fire(
+                schedule_id,
+                run_id=None,
+                status="skipped",
+                error=reason,
+            )
+            return
 
     try:
         prepared = await asyncio.to_thread(
