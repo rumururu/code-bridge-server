@@ -115,6 +115,16 @@ async def start_dry_run(
 # app to schedule them.
 
 
+@router.get("/runs", response_model=None)
+async def list_runs(
+    agent_id: str | None = None,
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Recent runs — what the dashboard's status view is built from."""
+    return await agents_routes.list_runs(agent_id=agent_id, status=status, limit=limit)
+
+
 @router.get("/tasks", response_model=None)
 async def list_tasks(
     workspace_id: str | None = None,
