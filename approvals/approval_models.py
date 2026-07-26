@@ -25,3 +25,12 @@ class ApprovalDecisionCreate(BaseModel):
     constraints: dict[str, Any] = Field(default_factory=dict)
     approver: dict[str, Any] = Field(default_factory=dict)
 
+    # ``approve_rule`` only: which policy scope the standing rule is written
+    # at — ``global``, ``project:<name>``, ``workspace:<id>`` or ``run:<id>``.
+    # Left unset it is derived from the request (project if it has one, else
+    # the run), deliberately never widening to ``global`` on its own.
+    rule_scope: str | None = None
+    # ``approve_rule`` only: ISO timestamp after which the standing rule stops
+    # applying. Unset means it does not expire.
+    rule_expires_at: str | None = None
+

@@ -25,8 +25,12 @@ from agent.agent_models import (
     BuilderTurn,
     DryRunRequest,
 )
+from approvals.approval_models import ApprovalDecisionCreate
+from policy.policy_models import PolicyRuleCreate
 
 from . import agents as agents_routes
+from . import approvals as approvals_routes
+from . import policies as policies_routes
 from .deps import require_local_access
 
 router = APIRouter(
@@ -154,6 +158,48 @@ async def delete_schedule(schedule_id: str) -> dict[str, Any]:
 @router.post("/schedules/{schedule_id}/trigger", response_model=None)
 async def trigger_schedule_now(schedule_id: str) -> dict[str, Any]:
     return await agents_routes.trigger_schedule_now(schedule_id)
+
+
+# --- Unattended permissions ----------------------------------------------
+#
+# A scheduled run has no client attached, so a tool permission prompt has
+# nobody to answer it and the task parks in waiting_for_user (and, because
+# schedules skip while a task is active, every later fire is skipped too).
+# Standing "allow" policy rules are what make unattended runs possible, so
+# the PC — where you set schedules up — has to be able to see and write them.
+
+
+@router.get("/policies/rules", response_model=None)
+async def list_policy_rules(
+    scope: str | None = None,
+    operation: str | None = None,
+    include_expired: bool = False,
+) -> dict[str, Any]:
+    return await policies_routes.list_policy_rules(
+        scope=scope,
+        operation=operation,
+        include_expired=include_expired,
+    )
+
+
+@router.post("/policies/rules", response_model=None)
+async def create_policy_rule(body: PolicyRuleCreate) -> dict[str, Any]:
+    return await policies_routes.create_policy_rule(body)
+
+
+@router.delete("/policies/rules/{rule_id}", response_model=None)
+async def delete_policy_rule(rule_id: str) -> dict[str, Any]:
+    return await policies_routes.delete_policy_rule(rule_id)
+
+
+@router.get("/approvals/pending", response_model=None)
+async def list_pending_approvals(run_id: str | None = None) -> dict[str, Any]:
+    return await approvals_routes.list_pending_approvals(run_id=run_id)
+
+
+@router.post("/approvals/{approval_id}/decision", response_model=None)
+async def decide_approval(approval_id: str, body: ApprovalDecisionCreate) -> Any:
+    return await approvals_routes.create_approval_decision(approval_id, body)
 
 
 __all__ = ["router"]

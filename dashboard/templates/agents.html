@@ -358,6 +358,53 @@
                     <div id="scheduleList" style="margin-top:16px;"></div>
                 </div>
             </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2>Unattended permissions</h2>
+                    <span class="status" id="ruleCount"></span>
+                </div>
+                <div class="card-body">
+                    <p class="hint">
+                        A scheduled run has nobody to tap "approve", so the first time it wants a
+                        terminal, a file or the browser it stops and waits — and because a schedule
+                        skips while its task is still active, every later run is skipped too. Standing
+                        rules below let named operations through without prompting. Grant the narrowest
+                        scope that works.
+                    </p>
+                    <div class="row">
+                        <div class="field">
+                            <label for="ruleOperation">Operation</label>
+                            <select id="ruleOperation" class="input">
+                                <option value="process.terminal">process.terminal — shell commands</option>
+                                <option value="file.write">file.write — writing files</option>
+                                <option value="file.read">file.read — reading files</option>
+                                <option value="browser.control">browser.control — browser automation</option>
+                                <option value="device.control">device.control — connected phones</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label for="ruleScope">Scope</label>
+                            <input id="ruleScope" class="input" placeholder="global, or project:my_app" value="global">
+                        </div>
+                        <div class="field">
+                            <label for="ruleExpires">Expires (optional)</label>
+                            <input id="ruleExpires" class="input" type="date">
+                        </div>
+                    </div>
+                    <div class="actions">
+                        <button class="btn" onclick="createPolicyRule()">Allow without prompting</button>
+                        <span id="ruleStatus" class="status"></span>
+                    </div>
+
+                    <div id="ruleList" style="margin-top:16px;"></div>
+
+                    <div class="card-header" style="padding-left:0; padding-right:0; margin-top:8px;">
+                        <h2>Waiting for approval</h2>
+                    </div>
+                    <div id="approvalList"></div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -368,6 +415,8 @@
 
         let agents = [];
         let schedules = [];
+        let policyRules = [];
+        let approvals = [];
         let tasksById = {};
         let selectedAgentId = null;
         let steps = [];
@@ -820,21 +869,128 @@
             reloadAll();
         }
 
+        // --- Unattended permissions ------------------------------------------
+
+        function renderPolicyRules() {
+            const host = document.getElementById('ruleList');
+            document.getElementById('ruleCount').textContent =
+                policyRules.length ? `${policyRules.length} standing` : '';
+            if (!policyRules.length) {
+                host.innerHTML = '<div class="empty">No standing rules — every tool use will prompt.</div>';
+                return;
+            }
+            const rows = policyRules.map((rule) => `
+                <tr>
+                    <td>${escapeHtml(rule.operation)}</td>
+                    <td>${escapeHtml(rule.scope)}</td>
+                    <td><span class="badge ${rule.effect === 'allow' ? 'on' : 'off'}">${escapeHtml(rule.effect)}</span></td>
+                    <td>${escapeHtml(rule.expires_at || 'never')}</td>
+                    <td style="text-align:right;">
+                        <button class="btn btn-danger btn-xs" onclick="deletePolicyRule('${rule.id}')">Revoke</button>
+                    </td>
+                </tr>`).join('');
+            host.innerHTML = `<table class="sched">
+                <thead><tr><th>Operation</th><th>Scope</th><th>Effect</th><th>Expires</th><th></th></tr></thead>
+                <tbody>${rows}</tbody></table>`;
+        }
+
+        async function createPolicyRule() {
+            const operation = document.getElementById('ruleOperation').value;
+            const scope = document.getElementById('ruleScope').value.trim() || 'global';
+            const expires = document.getElementById('ruleExpires').value;
+            setStatus('ruleStatus', 'Saving…');
+            const result = await api('/policies/rules', {
+                method: 'POST',
+                body: JSON.stringify({
+                    operation,
+                    scope,
+                    effect: 'allow',
+                    created_by: 'dashboard',
+                    expires_at: expires ? `${expires}T00:00:00` : null,
+                }),
+            });
+            if (!result || result.error) {
+                setStatus('ruleStatus', (result && result.error) || 'Failed', true);
+                return;
+            }
+            setStatus('ruleStatus', '');
+            toast('Standing rule added');
+            reloadAll();
+        }
+
+        async function deletePolicyRule(ruleId) {
+            if (!confirm('Revoke this rule? The operation will prompt again.')) return;
+            const result = await api(`/policies/rules/${encodeURIComponent(ruleId)}`, { method: 'DELETE' });
+            if (!result || result.error) {
+                toast((result && result.error) || 'Revoke failed');
+                return;
+            }
+            toast('Rule revoked');
+            reloadAll();
+        }
+
+        function renderApprovals() {
+            const host = document.getElementById('approvalList');
+            if (!approvals.length) {
+                host.innerHTML = '<div class="empty">Nothing waiting.</div>';
+                return;
+            }
+            const rows = approvals.map((approval) => {
+                const details = approval.details || {};
+                const command = (details.input && (details.input.command || details.input.file_path)) || details.tool_name || '';
+                return `
+                    <tr>
+                        <td>${escapeHtml(approval.operation)}</td>
+                        <td style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(command)}</td>
+                        <td><span class="badge off">${escapeHtml(approval.risk_level || '')}</span></td>
+                        <td style="text-align:right; white-space:nowrap;">
+                            <button class="btn btn-secondary btn-xs" onclick="decideApproval('${approval.id}', 'approve_once')">Approve once</button>
+                            <button class="btn btn-xs" onclick="decideApproval('${approval.id}', 'approve_rule')">Always allow</button>
+                            <button class="btn btn-danger btn-xs" onclick="decideApproval('${approval.id}', 'deny')">Deny</button>
+                        </td>
+                    </tr>`;
+            }).join('');
+            host.innerHTML = `<table class="sched">
+                <thead><tr><th>Operation</th><th>Detail</th><th>Risk</th><th></th></tr></thead>
+                <tbody>${rows}</tbody></table>`;
+        }
+
+        async function decideApproval(approvalId, decision) {
+            const result = await api(`/approvals/${encodeURIComponent(approvalId)}/decision`, {
+                method: 'POST',
+                body: JSON.stringify({ decision, approver: { type: 'dashboard' } }),
+            });
+            if (!result || result.error) {
+                toast((result && result.error) || 'Decision failed');
+                return;
+            }
+            // "Always allow" only stops *future* prompts; the run that is
+            // parked right now still has to be resumed from the app.
+            toast(decision === 'approve_rule' ? 'Allowed from now on' : 'Recorded');
+            reloadAll();
+        }
+
         // --- Bootstrap ------------------------------------------------------
 
         async function reloadAll() {
-            const [agentResult, scheduleResult, taskResult] = await Promise.all([
+            const [agentResult, scheduleResult, taskResult, ruleResult, approvalResult] = await Promise.all([
                 api('/agents?limit=200'),
                 api('/schedules'),
                 api('/tasks?limit=200'),
+                api('/policies/rules'),
+                api('/approvals/pending'),
             ]);
             agents = (agentResult && agentResult.agents) || [];
             schedules = (scheduleResult && scheduleResult.schedules) || [];
+            policyRules = (ruleResult && ruleResult.rules) || [];
+            approvals = (approvalResult && approvalResult.approvals) || [];
             tasksById = {};
             ((taskResult && taskResult.tasks) || []).forEach((task) => { tasksById[task.id] = task; });
             renderAgentList();
             renderAgentPicker();
             renderSchedules();
+            renderPolicyRules();
+            renderApprovals();
         }
 
         syncScheduleKind();

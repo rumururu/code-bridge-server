@@ -73,6 +73,27 @@ def request_approval_for_operation(
     }
 
 
+def standing_rule_scope_for_request(request: dict[str, Any]) -> str:
+    """Narrowest policy scope a standing rule for ``request`` should use.
+
+    Prefer the project the operation happened in, then the workspace, then the
+    run. ``global`` is the last resort and is never chosen to *widen* an
+    approval — a caller that wants it has to ask for it explicitly.
+    """
+    details = request.get("details") or {}
+    if isinstance(details, dict):
+        project_name = details.get("project_name")
+        if isinstance(project_name, str) and project_name.strip() and project_name.strip() != "__global__":
+            return f"project:{project_name.strip()}"
+        workspace_id = details.get("workspace_id")
+        if isinstance(workspace_id, str) and workspace_id.strip():
+            return f"workspace:{workspace_id.strip()}"
+    run_id = request.get("run_id")
+    if isinstance(run_id, str) and run_id.strip():
+        return f"run:{run_id.strip()}"
+    return "global"
+
+
 def decide_approval(
     approval_id: str,
     *,
@@ -81,8 +102,17 @@ def decide_approval(
     reason: str | None = None,
     constraints: dict[str, Any] | None = None,
     approver: dict[str, Any] | None = None,
+    rule_scope: str | None = None,
+    rule_expires_at: str | None = None,
 ) -> dict[str, Any] | None:
-    """Resolve a pending approval request and record an audit event."""
+    """Resolve a pending approval request and record an audit event.
+
+    ``decision="approve_rule"`` additionally writes a standing ``allow`` policy
+    rule, so the same operation stops prompting. That is what makes unattended
+    (scheduled) runs possible: with no client connected there is nobody to
+    answer a permission prompt, and the run would otherwise sit in
+    ``waiting_for_user`` forever.
+    """
     store = get_approval_store()
     request = store.get_request(approval_id)
     if request is None:
@@ -139,6 +169,18 @@ def decide_approval(
     )
     if result is None:
         return None
+
+    standing_rule: dict[str, Any] | None = None
+    if decision == "approve_rule":
+        standing_rule = get_policy_rule_store().create_rule(
+            scope=rule_scope or standing_rule_scope_for_request(request),
+            operation=request["operation"],
+            effect="allow",
+            constraints=constraints or {},
+            created_by=_rule_author(approver),
+            expires_at=rule_expires_at,
+        )
+
     request = store.get_request(approval_id)
     get_audit_store().record_event(
         operation=request["operation"] if request else "approval.decision",
@@ -151,9 +193,24 @@ def decide_approval(
             "reason": reason,
             "constraints": constraints or {},
             "approver": approver or {},
+            # Recorded so an auditor can see the blast radius of the standing
+            # rule this decision created, not just that it was approved once.
+            "standing_rule": standing_rule,
         },
     )
-    return {"approval": request, "decision": result}
+    payload: dict[str, Any] = {"approval": request, "decision": result}
+    if standing_rule is not None:
+        payload["rule"] = standing_rule
+    return payload
+
+
+def _rule_author(approver: dict[str, Any] | None) -> str:
+    if isinstance(approver, dict):
+        for key in ("id", "name", "type"):
+            value = approver.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return "approval_decision"
 
 
 def get_policy_snapshot() -> dict[str, Any]:

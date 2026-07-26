@@ -53,6 +53,8 @@ async def create_approval_decision(
         reason=body.reason,
         constraints=body.constraints,
         approver=body.approver,
+        rule_scope=body.rule_scope,
+        rule_expires_at=body.rule_expires_at,
     )
     if result is None:
         raise HTTPException(status_code=404, detail=f"Approval '{approval_id}' not found")
