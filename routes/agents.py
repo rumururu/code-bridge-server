@@ -401,7 +401,6 @@ def _builder_response(
     assistant_message: str,
     status: str = "completed",
     job_id: str | None = None,
-    fallback: bool = False,
     error: str | None = None,
 ) -> BuilderTurnResponse:
     return BuilderTurnResponse(
@@ -413,62 +412,44 @@ def _builder_response(
         task_draft=session.task_draft,
         status=status,
         job_id=job_id,
-        fallback=fallback,
+        # Kept in the wire format for older clients, but nothing produces a
+        # fallback draft any more — a failed LLM call reports status=failed.
+        fallback=False,
         error=error,
     )
 
 
-def _apply_configurator_fallback(
+def _configurator_failure_response(
     session: BuilderSession,
     *,
-    user_message: str,
     reason: str | None = None,
     job_id: str | None = None,
 ) -> BuilderTurnResponse:
-    before = session.current_draft
-    session.current_draft, session.task_draft = enrich_draft_from_user_intent(
-        session.current_draft,
-        previous_draft=before,
-        task_draft=session.task_draft,
-        user_message=user_message,
-    )
-    if _draft_has_commit_fields(session.current_draft):
-        session.is_ready_to_commit = True
-    message = _configurator_fallback_message(reason=reason, job_id=job_id)
-    session.messages.append({"role": "assistant", "content": message})
+    """Report an LLM failure as a failure.
+
+    This used to synthesise a draft with server-side rules whenever the
+    Configurator LLM timed out or errored. That draft looked like a real
+    answer, so a transport failure read as "the model produced nonsense" —
+    worse than returning nothing. The draft is left untouched and the caller
+    sees status=failed plus the real reason.
+    """
     session.touch()
     return _builder_response(
         session,
-        assistant_message=message,
-        status="fallback",
+        assistant_message=_configurator_failure_message(reason=reason),
+        status="failed",
         job_id=job_id,
-        fallback=True,
         error=reason,
     )
 
 
-def _draft_has_commit_fields(draft: AgentDraft) -> bool:
-    return bool(
-        (draft.name or "").strip()
-        and draft.system_prompt.strip()
-        and draft.provider_id
-        and draft.flow
-    )
-
-
-def _configurator_fallback_message(
-    *,
-    reason: str | None = None,
-    job_id: str | None = None,
-) -> str:
+def _configurator_failure_message(*, reason: str | None = None) -> str:
     parts = [
-        "Configurator LLM 응답이 지연되어 서버 규칙으로 먼저 저장 가능한 초안을 구성했습니다.",
-        "왼쪽 Agent spec을 확인하고 필요한 세부값을 수정할 수 있습니다.",
+        "에이전트 빌더 LLM 호출이 실패했습니다. 초안은 만들지 않았습니다.",
+        "잠시 후 다시 시도하거나, 서버의 LLM 설정을 확인해 주세요.",
     ]
-    if job_id:
-        parts.append("LLM 보강 작업은 백그라운드에서 계속 진행 중입니다.")
     if reason:
-        parts.append(f"상세: {reason}")
+        parts.append(f"원인: {reason}")
     return "\n".join(parts)
 
 
@@ -551,22 +532,20 @@ async def _run_builder_converse_job(job_id: str) -> None:
         job.error = None
     except asyncio.TimeoutError:
         job.error = "Configurator LLM timed out."
-        job.response = _apply_configurator_fallback(
+        job.response = _configurator_failure_response(
             session,
-            user_message=job.user_message,
             reason=job.error,
             job_id=job.id,
         )
-        job.status = "fallback"
+        job.status = "failed"
     except RuntimeError as exc:
         job.error = str(exc)
-        job.response = _apply_configurator_fallback(
+        job.response = _configurator_failure_response(
             session,
-            user_message=job.user_message,
             reason=job.error,
             job_id=job.id,
         )
-        job.status = "fallback"
+        job.status = "failed"
     finally:
         job.touch()
         session.lock.release()
@@ -605,17 +584,12 @@ async def builder_converse(body: BuilderTurn) -> BuilderTurnResponse:
                 timeout=BUILDER_CONVERSE_FAST_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError as exc:
-            return _apply_configurator_fallback(
+            return _configurator_failure_response(
                 session,
-                user_message=body.user_message,
                 reason="Configurator LLM timed out before the fast response window.",
             )
         except RuntimeError as exc:
-            return _apply_configurator_fallback(
-                session,
-                user_message=body.user_message,
-                reason=str(exc),
-            )
+            return _configurator_failure_response(session, reason=str(exc))
 
         return _apply_successful_configurator_response(
             session,
@@ -646,9 +620,13 @@ async def create_builder_converse_job(
     session.touch()
     session.append_user_message(body.user_message)
     job_id = f"builder_job_{uuid.uuid4().hex}"
-    fallback = _apply_configurator_fallback(
+    # Seed the job with a plain "queued" acknowledgement. It used to be seeded
+    # with a rule-built draft so a poll always had something to show; that made
+    # a pending — or failing — LLM call look like it had already answered.
+    queued = _builder_response(
         session,
-        user_message=body.user_message,
+        assistant_message="에이전트 빌더가 응답을 생성하고 있습니다.",
+        status="queued",
         job_id=job_id,
     )
     job = BuilderConverseJob(
@@ -656,7 +634,7 @@ async def create_builder_converse_job(
         session_id=session.session_id,
         user_message=body.user_message,
         status="queued",
-        response=fallback,
+        response=queued,
     )
     BUILDER_CONVERSE_JOBS[job_id] = job
     background_tasks.add_task(_run_builder_converse_job, job_id)

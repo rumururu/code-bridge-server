@@ -539,7 +539,13 @@ class AgentRoutesTest(unittest.TestCase):
             "external_send_requires_run_approval",
         )
 
-    def test_builder_converse_timeout_returns_fallback_draft(self):
+    def test_builder_converse_timeout_reports_failure_without_a_draft(self):
+        """A dead LLM must not be papered over with a rule-built draft.
+
+        Synthesising one made a transport failure look like the model had
+        answered with something useless, which reads worse than an error.
+        """
+
         async def fake_timeout(_session, *, timeout=120.0):
             raise asyncio.TimeoutError()
 
@@ -556,16 +562,19 @@ class AgentRoutesTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["status"], "fallback")
-        self.assertTrue(payload["fallback"])
-        self.assertTrue(payload["updated_draft"]["name"])
-        self.assertEqual(payload["updated_draft"]["provider_id"], "openai")
-        self.assertTrue(payload["updated_draft"]["system_prompt"])
-        self.assertTrue(payload["updated_draft"]["flow"])
-        self.assertTrue(payload["is_ready_to_commit"])
-        self.assertEqual(payload["task_draft"]["schedule"], "every 1h")
+        self.assertEqual(payload["status"], "failed")
+        self.assertFalse(payload["fallback"])
+        self.assertTrue(payload["error"])
+        self.assertFalse(payload["is_ready_to_commit"])
+        # Draft stays empty: nothing was invented on the user's behalf.
+        # `name` is absent entirely because the response omits null fields.
+        self.assertFalse(payload["updated_draft"].get("name"))
+        self.assertFalse(payload["updated_draft"]["flow"])
+        self.assertIsNone(payload.get("task_draft"))
 
-    def test_builder_converse_timeout_concretizes_simple_web_monitor(self):
+    def test_builder_converse_timeout_does_not_concretize_a_web_monitor(self):
+        """Even a request the server could guess at must not be auto-drafted."""
+
         async def fake_timeout(_session, *, timeout=120.0):
             raise asyncio.TimeoutError()
 
@@ -583,18 +592,12 @@ class AgentRoutesTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertTrue(payload["fallback"])
-        self.assertEqual(payload["task_draft"]["schedule"], "every 30m")
-        flow = payload["updated_draft"]["flow"]
-        browser_steps = [step for step in flow if step["type"] == "browser_action"]
-        self.assertEqual(len(browser_steps), 1)
-        actions = browser_steps[0]["actions"]
-        self.assertEqual(actions[0], {"type": "navigate", "url": "https://example.org"})
-        self.assertEqual(actions[1]["kind"], "text_visible")
-        self.assertEqual(actions[1]["value"], "Example Domain")
-        self.assertNotIn("configured_url", json.dumps(flow))
+        self.assertEqual(payload["status"], "failed")
+        self.assertFalse(payload["fallback"])
+        self.assertFalse(payload["updated_draft"]["flow"])
+        self.assertIsNone(payload.get("task_draft"))
 
-    def test_builder_converse_job_returns_fallback_then_completed_result(self):
+    def test_builder_converse_job_seeds_queued_then_returns_result(self):
         draft_payload = {
             "name": "Async Builder Bot",
             "description": "Created by async builder job",
@@ -633,7 +636,9 @@ class AgentRoutesTest(unittest.TestCase):
         initial = response.json()
         self.assertTrue(initial["job_id"].startswith("builder_job_"))
         self.assertEqual(initial["status"], "queued")
-        self.assertTrue(initial["fallback"])
+        # Seeded with a plain acknowledgement, not a pre-built draft.
+        self.assertFalse(initial["fallback"])
+        self.assertFalse(initial["updated_draft"]["flow"])
 
         status_response = self.client.get(
             f"/api/agent/builder/converse/jobs/{initial['job_id']}"
