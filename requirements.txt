@@ -2,11 +2,19 @@ fastapi==0.109.0
 uvicorn[standard]==0.27.0
 websockets==12.0
 pyyaml==6.0.1
-httpx==0.26.0
+httpx>=0.27.1,<0.28  # >=0.27.1 for mcp (claude-agent-sdk), <0.28 keeps starlette 0.35's TestClient working
 python-multipart==0.0.6
 tomli>=2.0.1; python_version < "3.11"
 aiortc>=1.9.0
 numpy>=1.26.0
+
+# Claude provider. The SDK spawns the same `claude` CLI the user already has,
+# so this keeps running on their Claude subscription (no API metering). Its mcp
+# dependency drags in starlette/sse-starlette, which must stay inside the range
+# fastapi 0.109 accepts — hence the two pins below.
+claude-agent-sdk>=0.2.128
+starlette>=0.35.0,<0.36.0
+sse-starlette>=1.6.1,<2.2
 
 # QR code generation for pairing
 qrcode[pil]>=7.4

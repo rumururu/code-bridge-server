@@ -1,19 +1,32 @@
-"""Claude Code session management via SDK WebSocket transport."""
+"""Claude Code session management via the official claude-agent-sdk.
+
+This used to drive the CLI directly: a local WebSocket server plus
+``claude --sdk-url ws://127.0.0.1:…`` so the CLI dialled back in. Claude Code
+now refuses that flag for non-Anthropic hosts ("--sdk-url rejected: host
+127.0.0.1 is not an approved Anthropic endpoint"), so every turn died on a
+15-second connect timeout. The SDK is the supported wrapper around the same
+CLI — it owns the transport and absorbs protocol changes, and it authenticates
+exactly as the CLI does, so this keeps running on the user's Claude
+subscription rather than metered API billing.
+"""
 
 import asyncio
-import json
 import logging
 import os
 import shutil
-import signal
-import subprocess
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator
 
-from websockets.exceptions import ConnectionClosed
-from websockets.server import WebSocketServer, WebSocketServerProtocol, serve
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
+)
 
+from .claude_sdk_events import message_to_event, session_id_of
 from .llm_session import LlmSession
 
 logger = logging.getLogger(__name__)
@@ -43,24 +56,14 @@ class ClaudeSession(LlmSession):
     model: str | None = None
     _claude_path: str = field(default="", init=False)
     _session_id: str | None = field(default=None, init=False)
-    _process: asyncio.subprocess.Process | None = field(default=None, init=False)
-    _stderr_task: asyncio.Task[None] | None = field(default=None, init=False)
-    _process_wait_task: asyncio.Task[None] | None = field(default=None, init=False)
+    _client: ClaudeSDKClient | None = field(default=None, init=False)
+    _pump_task: asyncio.Task[None] | None = field(default=None, init=False)
     _event_queue: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue, init=False)
     _start_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _turn_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _turn_in_progress: bool = field(default=False, init=False)
     _pending_permission_request: dict[str, Any] | None = field(default=None, init=False)
-    _stderr_lines: list[str] = field(default_factory=list, init=False)
-
-    # Internal SDK transport server state.
-    _sdk_server: WebSocketServer | None = field(default=None, init=False)
-    _sdk_url: str | None = field(default=None, init=False)
-    _sdk_token: str | None = field(default=None, init=False)
-    _sdk_connection: WebSocketServerProtocol | None = field(default=None, init=False)
-    _sdk_connected_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _sdk_send_queue: asyncio.Queue[str] = field(default_factory=asyncio.Queue, init=False)
-    _sdk_send_task: asyncio.Task[None] | None = field(default=None, init=False)
+    _pending_permission_future: asyncio.Future[Any] | None = field(default=None, init=False)
 
     # If the stored project path does not exist on disk we start the session
     # in a safe fallback cwd and stash a short note so the LLM receives the
@@ -89,8 +92,8 @@ class ClaudeSession(LlmSession):
 
     @property
     def is_running(self) -> bool:
-        """Whether Claude process is alive."""
-        return self._process is not None and self._process.returncode is None
+        """Whether the SDK client is connected."""
+        return self._client is not None
 
     @property
     def session_id(self) -> str | None:
@@ -152,213 +155,132 @@ class ClaudeSession(LlmSession):
         )
         return fallback, note
 
-    def _build_command(self, permission_mode: str | None = None) -> list[str]:
-        """Build Claude command in SDK mode."""
-        if not self._sdk_url:
-            raise RuntimeError("SDK URL is not initialized")
+    def _build_options(self, permission_mode: str | None = None) -> ClaudeAgentOptions:
+        """Build SDK options for one connection.
 
-        cmd = [
-            self._claude_path,
-            "--print",
-            "--verbose",
-            "--output-format",
-            "stream-json",
-            "--input-format",
-            "stream-json",
-            "--include-partial-messages",
-            "--sdk-url",
-            self._sdk_url,
-            "--append-system-prompt",
-            ASK_USER_SYSTEM_PROMPT,
-        ]
-
-        if self._session_id:
-            cmd.extend(["--resume", self._session_id])
-
-        if isinstance(self.model, str) and self.model.strip():
-            cmd.extend(["--model", self.model.strip()])
+        Replaces the hand-assembled CLI argv. The old command passed
+        ``--sdk-url`` so the CLI would dial back into a WebSocket server this
+        class ran; Claude Code now rejects that flag for non-Anthropic hosts,
+        which killed every Claude turn. The SDK owns the transport instead.
+        """
+        cwd, fallback_note = self._resolve_start_cwd()
+        if fallback_note is not None:
+            self._fallback_note = fallback_note
+            self._fallback_note_delivered = False
 
         resolved_mode = (permission_mode or self.default_permission_mode).strip()
+        options = ClaudeAgentOptions(
+            cwd=cwd,
+            system_prompt={
+                "type": "preset",
+                "preset": "claude_code",
+                "append": ASK_USER_SYSTEM_PROMPT,
+            },
+            can_use_tool=self._on_can_use_tool,
+        )
         if resolved_mode:
-            cmd.extend(["--permission-mode", resolved_mode])
+            options.permission_mode = resolved_mode
+        if isinstance(self.model, str) and self.model.strip():
+            options.model = self.model.strip()
+        if self._session_id:
+            options.resume = self._session_id
+        return options
 
-        return cmd
-
-    @staticmethod
-    def _normalize_line(line: bytes) -> str:
-        return line.decode("utf-8", errors="replace").strip()
-
-    async def _ensure_sdk_server(self) -> None:
-        """Start local WS server that Claude CLI uses for stream-json transport."""
-        if self._sdk_server is not None:
-            return
-
-        self._sdk_token = uuid.uuid4().hex
-        self._sdk_connected_event.clear()
-        self._sdk_send_queue = asyncio.Queue()
-
-        async def _handler(websocket: WebSocketServerProtocol, path: str) -> None:
-            token = path.lstrip("/")
-            if token != self._sdk_token:
-                await websocket.close(code=1008, reason="Invalid token")
-                return
-
-            if self._sdk_connection is not None:
-                await websocket.close(code=1013, reason="Session already connected")
-                return
-
-            self._sdk_connection = websocket
-            self._sdk_connected_event.set()
-            self._sdk_send_task = asyncio.create_task(self._sdk_sender_loop(websocket))
-
-            try:
-                async for raw_payload in websocket:
-                    payload = raw_payload.decode("utf-8", errors="replace") if isinstance(raw_payload, bytes) else str(raw_payload)
-                    for line in payload.splitlines():
-                        line = line.strip()
-                        if not line:
-                            continue
-                        await self._handle_sdk_line(line)
-            except ConnectionClosed:
-                pass
-            finally:
-                if self._sdk_send_task and not self._sdk_send_task.done():
-                    self._sdk_send_task.cancel()
-                    try:
-                        await self._sdk_send_task
-                    except asyncio.CancelledError:
-                        pass
-                self._sdk_send_task = None
-                self._sdk_connection = None
-                self._sdk_connected_event.clear()
-
-        self._sdk_server = await serve(_handler, "127.0.0.1", 0)
-        socket = self._sdk_server.sockets[0]
-        port = socket.getsockname()[1]
-        self._sdk_url = f"ws://127.0.0.1:{port}/{self._sdk_token}"
-
-    async def _sdk_sender_loop(self, websocket: WebSocketServerProtocol) -> None:
-        """Send queued JSON-lines to Claude SDK WebSocket."""
-        while True:
-            line = await self._sdk_send_queue.get()
-            await websocket.send(line)
-
-    async def _handle_sdk_line(self, line: str) -> None:
-        """Parse one SDK transport line and enqueue normalized event."""
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            await self._event_queue.put({"type": "output", "text": line})
-            return
-
-        if not isinstance(event, dict):
-            return
-
-        session_id = event.get("session_id")
-        if isinstance(session_id, str) and session_id.strip():
-            self._session_id = session_id
-
-        await self._event_queue.put(event)
-
-    async def _ensure_process(self) -> None:
-        """Start Claude process if missing/dead."""
-        if not self._claude_path:
-            raise RuntimeError("Claude CLI not found")
-
+    async def _ensure_client(self, permission_mode: str | None = None) -> None:
+        """Connect the SDK client if it is not already live."""
         async with self._start_lock:
             if self.is_running:
                 return
 
             self._turn_in_progress = False
             self._pending_permission_request = None
-            self._stderr_lines.clear()
+            self._pending_permission_future = None
             self._event_queue = asyncio.Queue()
 
-            await self._ensure_sdk_server()
-            cmd = self._build_command()
-
-            # Resolve a safe cwd. When the stored project path is missing we
-            # fall back to the user's home so Claude CLI can still spawn, and
-            # remember a note to pass along on the next user message.
-            cwd, fallback_note = self._resolve_start_cwd()
-            if fallback_note is not None:
-                self._fallback_note = fallback_note
-                self._fallback_note_delivered = False
-            import logging as _lg
-            _lg.getLogger("llm.claude_session").warning(
-                "[claude_session] start project_path=%r cwd=%r fallback=%s",
+            options = self._build_options(permission_mode)
+            logger.warning(
+                "[claude_session] connect project_path=%r cwd=%r resume=%s",
                 self.project_path,
-                cwd,
-                "yes" if fallback_note else "no",
+                options.cwd,
+                "yes" if options.resume else "no",
             )
 
-            self._process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                env=os.environ.copy(),
-            )
-
-            self._stderr_task = asyncio.create_task(self._read_stderr())
-            self._process_wait_task = asyncio.create_task(self._wait_for_process_exit())
-
+            client = ClaudeSDKClient(options=options)
             try:
-                await asyncio.wait_for(self._sdk_connected_event.wait(), timeout=15.0)
-            except asyncio.TimeoutError:
-                await self.close()
-                raise RuntimeError("Claude SDK transport connection timed out")
+                await client.connect()
+            except Exception as exc:  # noqa: BLE001 - surfaced to the caller as an error event
+                raise RuntimeError(f"Claude SDK connect failed: {exc}") from exc
 
-    async def _read_stderr(self) -> None:
-        """Read stderr for diagnostics."""
-        process = self._process
-        if process is None or process.stderr is None:
+            self._client = client
+            self._pump_task = asyncio.create_task(self._pump_messages())
+
+    async def _pump_messages(self) -> None:
+        """Feed converted SDK messages into the turn queue.
+
+        One long-lived reader per connection: ``send_message`` and the
+        permission responders all consume ``_event_queue``, so the permission
+        callback (which the SDK invokes on its own task) and the message
+        stream stay in one ordered channel.
+        """
+        client = self._client
+        if client is None:
             return
-
         try:
-            while True:
-                raw_line = await process.stderr.readline()
-                if not raw_line:
-                    break
-                text = self._normalize_line(raw_line)
-                if text:
-                    self._stderr_lines.append(text)
+            async for message in client.receive_messages():
+                session_id = session_id_of(message)
+                if session_id:
+                    self._session_id = session_id
+                await self._event_queue.put(message_to_event(message))
         except asyncio.CancelledError:
             raise
-        except (OSError, IOError):
-            # Process terminated or pipe closed - expected during shutdown
-            pass
-        except (UnicodeDecodeError, ValueError, RuntimeError) as exc:
-            logger.warning("Unexpected error reading stderr: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - reported to the active turn
+            logger.warning("[claude_session] message pump ended: %s", exc)
+            await self._event_queue.put(
+                {"type": "session_closed", "returncode": None, "stderr": str(exc)}
+            )
 
-    async def _wait_for_process_exit(self) -> None:
-        """Watch process exit and emit session_closed event."""
-        process = self._process
-        if process is None:
-            return
-        returncode = await process.wait()
-        stderr_text = "\n".join(self._stderr_lines).strip()
-        await self._event_queue.put(
-            {
-                "type": "session_closed",
-                "returncode": returncode,
-                "stderr": stderr_text,
-            }
-        )
+    async def _on_can_use_tool(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        context: ToolPermissionContext,
+    ) -> PermissionResultAllow | PermissionResultDeny:
+        """Bridge the SDK's permission callback to the app's approval round-trip.
 
-    async def _send_sdk_payload(self, payload: dict[str, Any]) -> None:
-        """Send one JSON payload to Claude through SDK websocket."""
-        if not self.is_running:
-            raise RuntimeError("Claude session process is not running")
+        The SDK expects a returned decision; the app expects a
+        ``control_request`` event and answers later over its own websocket.
+        Park the callback on a future, publish the request, and let
+        ``approve_pending_permissions_and_retry`` / ``deny_pending_permissions``
+        resolve it.
+        """
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[PermissionResultAllow | PermissionResultDeny] = loop.create_future()
+        request_id = uuid.uuid4().hex
+        event = {
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": tool_name,
+                "input": tool_input,
+                "tool_use_id": context.tool_use_id,
+            },
+        }
+        self._pending_permission_future = future
+        await self._event_queue.put(event)
+        return await future
 
-        if self._sdk_connection is None:
-            await asyncio.wait_for(self._sdk_connected_event.wait(), timeout=10.0)
-            if self._sdk_connection is None:
-                raise RuntimeError("Claude SDK transport is not connected")
-
-        line = json.dumps(payload, ensure_ascii=False) + "\n"
-        await self._sdk_send_queue.put(line)
+    def _settle_pending_permission(
+        self,
+        decision: PermissionResultAllow | PermissionResultDeny,
+    ) -> bool:
+        """Hand a decision back to the parked ``can_use_tool`` callback."""
+        future = self._pending_permission_future
+        if future is None or future.done():
+            return False
+        future.set_result(decision)
+        self._pending_permission_future = None
+        return True
 
     @staticmethod
     def _enrich_with_call_id(event: dict[str, Any]) -> dict[str, Any]:
@@ -459,11 +381,7 @@ class ClaudeSession(LlmSession):
                 await self.close()
                 self.default_permission_mode = permission_mode
 
-            with open("/tmp/cb_debug.log", "a") as f:
-                f.write(f"[claude_session] send_message enter path={self.project_path!r} running={self.is_running}\n")
-            await self._ensure_process()
-            with open("/tmp/cb_debug.log", "a") as f:
-                f.write(f"[claude_session] _ensure_process returned running={self.is_running}\n")
+            await self._ensure_client(permission_mode)
 
             if self._turn_in_progress:
                 yield {"type": "error", "error": {"message": "Another Claude turn is already in progress"}}
@@ -482,15 +400,11 @@ class ClaudeSession(LlmSession):
                 self._turn_in_progress = True
                 self._pending_permission_request = None
 
-                await self._send_sdk_payload(
-                    {
-                        "type": "user",
-                        "session_id": self._session_id or "",
-                        "message": {"role": "user", "content": content},
-                        "parent_tool_use_id": None,
-                        "uuid": str(uuid.uuid4()),
-                    }
-                )
+                client = self._client
+                if client is None:
+                    yield {"type": "error", "error": {"message": "Claude session is not connected"}}
+                    return
+                await client.query(content)
 
                 async for event in self._stream_until_pause_or_result():
                     yield event
@@ -522,9 +436,8 @@ class ClaudeSession(LlmSession):
             yield {"type": "error", "error": {"message": "No pending permission request"}}
             return
 
-        request_id = pending.get("request_id")
         request = pending.get("request", {})
-        if not isinstance(request_id, str) or not isinstance(request, dict):
+        if not isinstance(request, dict):
             yield {"type": "error", "error": {"message": "Invalid pending permission request state"}}
             return
 
@@ -532,33 +445,19 @@ class ClaudeSession(LlmSession):
         if not isinstance(tool_input, dict):
             tool_input = {}
 
-        tool_use_id = request.get("tool_use_id")
-        tool_use_id_value = tool_use_id if isinstance(tool_use_id, str) else None
-
+        decision: PermissionResultAllow | PermissionResultDeny
         if allow:
-            response_payload: dict[str, Any] = {"behavior": "allow", "updatedInput": tool_input}
-            if tool_use_id_value:
-                response_payload["toolUseID"] = tool_use_id_value
+            decision = PermissionResultAllow(updated_input=tool_input)
         else:
-            response_payload = {"behavior": "deny", "message": deny_message, "interrupt": False}
-            if tool_use_id_value:
-                response_payload["toolUseID"] = tool_use_id_value
+            decision = PermissionResultDeny(message=deny_message, interrupt=False)
 
-        try:
-            await self._send_sdk_payload(
-                {
-                    "type": "control_response",
-                    "response": {
-                        "subtype": "success",
-                        "request_id": request_id,
-                        "response": response_payload,
-                    },
-                }
-            )
-        except (RuntimeError, OSError) as exc:
+        if not self._settle_pending_permission(decision):
             self._turn_in_progress = False
             self._pending_permission_request = None
-            yield {"type": "error", "error": {"message": str(exc)}}
+            yield {
+                "type": "error",
+                "error": {"message": "Permission request is no longer awaiting a decision"},
+            }
             return
 
         self._pending_permission_request = None
@@ -579,76 +478,66 @@ class ClaudeSession(LlmSession):
             yield event
 
     async def close(self) -> None:
-        """Close process and internal SDK transport server."""
-        process = self._process
-        if process and process.returncode is None:
+        """Disconnect the SDK client and stop the message pump."""
+        pump = self._pump_task
+        if pump is not None and not pump.done():
+            pump.cancel()
             try:
-                process.send_signal(signal.SIGTERM)
-            except ProcessLookupError:
+                await pump
+            except asyncio.CancelledError:
                 pass
+        self._pump_task = None
+
+        # Release a parked permission callback so the SDK's own task cannot
+        # outlive the connection waiting on a decision that will never come.
+        self._settle_pending_permission(
+            PermissionResultDeny(message="Session closed.", interrupt=True)
+        )
+
+        client = self._client
+        self._client = None
+        if client is not None:
             try:
-                await asyncio.wait_for(process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                await process.wait()
+                await client.disconnect()
+            except Exception as exc:  # noqa: BLE001 - teardown is best effort
+                logger.debug("Error disconnecting Claude SDK client: %s", exc)
 
-        for task in (self._stderr_task, self._process_wait_task, self._sdk_send_task):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        if self._sdk_connection is not None:
-            try:
-                await self._sdk_connection.close()
-            except ConnectionClosed:
-                # Already closed - expected
-                pass
-            except (OSError, RuntimeError, ConnectionError) as exc:
-                logger.debug("Error closing SDK connection: %s", exc)
-            self._sdk_connection = None
-        self._sdk_connected_event.clear()
-
-        if self._sdk_server is not None:
-            self._sdk_server.close()
-            await self._sdk_server.wait_closed()
-            self._sdk_server = None
-        self._sdk_url = None
-        self._sdk_token = None
-
-        self._process = None
-        self._stderr_task = None
-        self._process_wait_task = None
-        self._sdk_send_task = None
         self._turn_in_progress = False
         self._pending_permission_request = None
+        self._pending_permission_future = None
 
     async def abort_current_turn(self) -> bool:
-        """Abort the current turn by sending SIGINT to the Claude process.
+        """Interrupt the running turn.
 
-        Returns True if abort signal was sent, False if no turn in progress.
+        Returns True if an interrupt was delivered, False if nothing was running.
         """
         if not self._turn_in_progress:
             return False
 
-        process = self._process
-        if process is None or process.returncode is not None:
+        client = self._client
+        if client is None:
             self._turn_in_progress = False
             return False
 
-        try:
-            process.send_signal(signal.SIGINT)
+        # A turn parked on a permission prompt has no model work to interrupt —
+        # deny it instead so the SDK callback unblocks and the turn unwinds.
+        if self._settle_pending_permission(
+            PermissionResultDeny(message="Turn aborted by user.", interrupt=True)
+        ):
             self._turn_in_progress = False
             self._pending_permission_request = None
             return True
-        except ProcessLookupError:
+
+        try:
+            await client.interrupt()
+        except Exception as exc:  # noqa: BLE001 - reported via the return value
+            logger.debug("Claude interrupt failed: %s", exc)
             self._turn_in_progress = False
             return False
+
+        self._turn_in_progress = False
+        self._pending_permission_request = None
+        return True
 
     async def set_model(self, model: str | None) -> None:
         """Set default model for subsequent turns.
@@ -662,7 +551,15 @@ class ClaudeSession(LlmSession):
             return
 
         self.model = next_model
-        if self.is_running:
+        client = self._client
+        if client is None:
+            return
+        try:
+            # The SDK changes the model on the live session; the old transport
+            # had to restart the CLI to re-pass --model.
+            await client.set_model(next_model)
+        except Exception as exc:  # noqa: BLE001 - fall back to a reconnect
+            logger.debug("Live model switch failed, reconnecting: %s", exc)
             await self.close()
 
 
