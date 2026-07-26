@@ -9,16 +9,20 @@ _DASHBOARD_HTML: str | None = None
 _AGENTS_HTML: str | None = None
 
 
-def render_dashboard_html() -> str:
-    """Render the main dashboard HTML page.
+def render_dashboard_html(view: str = "status") -> str:
+    """Render the console page for one view.
 
-    Loads the HTML template from templates/dashboard.html.
-    The template is cached in memory after first load.
+    ``/dashboard`` and ``/settings`` are the same document with a different
+    body view. Splitting them into two templates would mean two copies of the
+    same 1500 lines of handlers — and the moment one card moved, the other
+    page would start calling getElementById on a node that is not there.
+    Here every element stays in the DOM and CSS decides what the page is for.
     """
     global _DASHBOARD_HTML
     if _DASHBOARD_HTML is None:
         _DASHBOARD_HTML = (_TEMPLATE_DIR / "dashboard.html").read_text(encoding="utf-8")
-    return _DASHBOARD_HTML
+    resolved = "settings" if view == "settings" else "status"
+    return _DASHBOARD_HTML.replace("__VIEW__", resolved)
 
 
 def render_agents_html() -> str:

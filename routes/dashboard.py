@@ -109,6 +109,17 @@ async def get_dashboard() -> HTMLResponse:
 
 
 @router.get(
+    "/settings",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+    dependencies=[Depends(require_local_access)],
+)
+async def get_settings_page() -> HTMLResponse:
+    """Serve the settings view of the console."""
+    return HTMLResponse(content=render_dashboard_html("settings"))
+
+
+@router.get(
     "/agents",
     response_class=HTMLResponse,
     include_in_schema=False,

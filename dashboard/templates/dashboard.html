@@ -81,7 +81,7 @@
         .info-label,
         .section-desc.legend {
             font-family: var(--mono);
-            font-size: 10.5px;
+            font-size: 12px;
             font-weight: 600;
             letter-spacing: .09em;
             text-transform: uppercase;
@@ -98,7 +98,8 @@
             padding: 0;
             background: var(--ink);
             color: var(--wire);
-            line-height: 1.55;
+            line-height: 1.6;
+            font-size: 15px;
             -webkit-font-smoothing: antialiased;
         }
 
@@ -115,6 +116,65 @@
                 transition-duration: .001ms !important;
             }
         }
+
+        /* ---- Brand + navigation ------------------------------------------
+           Three surfaces, one bar: what is happening (dashboard), what you
+           built (agents), how it is configured (settings). The mark is drawn,
+           not an app icon dropped in — a span and two piers, which is what the
+           product is.
+           ------------------------------------------------------------------ */
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+            color: inherit;
+        }
+        .brand-mark {
+            width: 26px;
+            height: 26px;
+            flex: 0 0 auto;
+            color: var(--link);
+        }
+        .nav {
+            display: flex;
+            align-items: stretch;
+            gap: 2px;
+            margin-left: 26px;
+            height: 100%;
+        }
+        .nav a {
+            display: inline-flex;
+            align-items: center;
+            padding: 0 15px;
+            font-family: var(--mono);
+            font-size: 12.5px;
+            font-weight: 600;
+            letter-spacing: .1em;
+            text-transform: uppercase;
+            color: var(--wire-faint);
+            text-decoration: none;
+            border-bottom: 2px solid transparent;
+        }
+        .nav a:hover { color: var(--wire); }
+        .nav a[aria-current="page"] {
+            color: var(--wire);
+            border-bottom-color: var(--link);
+        }
+        .header-left { display: flex; align-items: center; height: 100%; min-width: 0; }
+        .header-right { display: flex; align-items: center; gap: 10px; }
+
+        @media (max-width: 760px) {
+            .header { height: auto; padding: 10px 16px; flex-wrap: wrap; gap: 8px; }
+            .header-left { width: 100%; flex-wrap: wrap; }
+            .nav { margin-left: 0; width: 100%; overflow-x: auto; }
+            .nav a { padding: 8px 12px; }
+        }
+
+        /* Two views out of one document: every element stays in the DOM, so
+           the existing handlers never meet a missing node. */
+        body[data-view="status"] [data-view="settings"] { display: none !important; }
+        body[data-view="settings"] [data-view="status"] { display: none !important; }
 
         /* ---- Link spine -------------------------------------------------
            The signature. The product is a bridge, so the page opens with the
@@ -136,15 +196,15 @@
         .node { text-align: center; }
         .node-label {
             font-family: var(--mono);
-            font-size: 10px;
-            letter-spacing: .16em;
+            font-size: 12px;
+            letter-spacing: .12em;
             text-transform: uppercase;
             color: var(--wire-faint);
         }
         .node-value {
             font-family: var(--mono);
-            font-size: 13px;
-            margin-top: 5px;
+            font-size: 16px;
+            margin-top: 6px;
             color: var(--wire);
             overflow: hidden;
             text-overflow: ellipsis;
@@ -156,8 +216,8 @@
             gap: 6px;
             margin-top: 7px;
             font-family: var(--mono);
-            font-size: 10px;
-            letter-spacing: .1em;
+            font-size: 12px;
+            letter-spacing: .08em;
             text-transform: uppercase;
             color: var(--wire-faint);
         }
@@ -220,13 +280,13 @@
             padding: 12px 14px;
             background: var(--bg-secondary);
         }
-        .stat-value { font-size: 26px; font-weight: 650; line-height: 1.1; }
+        .stat-value { font-size: 32px; font-weight: 650; line-height: 1.1; }
         .stat-label {
-            font-size: 11px;
+            font-size: 12px;
             text-transform: uppercase;
             letter-spacing: .05em;
             color: var(--text-muted);
-            margin-top: 4px;
+            margin-top: 5px;
         }
         .stat.is-alert { border-color: var(--danger-color); }
         .stat.is-alert .stat-value { color: var(--danger-color); }
@@ -265,9 +325,9 @@
             display: flex;
             align-items: baseline;
             gap: 10px;
-            padding: 7px 0;
+            padding: 9px 0;
             border-bottom: 1px solid var(--border-color);
-            font-size: 13px;
+            font-size: 14.5px;
         }
         .run-row:last-child { border-bottom: none; }
         .run-dot {
@@ -295,8 +355,8 @@
             text-overflow: ellipsis;
             white-space: nowrap;
         }
-        .run-when { color: var(--text-muted); font-size: 12px; flex: 0 0 auto; }
-        .activity-empty { color: var(--text-muted); font-size: 13px; padding: 8px 0; }
+        .run-when { color: var(--text-muted); font-size: 13px; flex: 0 0 auto; }
+        .activity-empty { color: var(--text-muted); font-size: 14px; padding: 8px 0; }
 
         .header {
             background: var(--slate);
@@ -313,12 +373,13 @@
 
         .header h1 {
             font-family: var(--mono);
-            font-size: 13px;
-            font-weight: 600;
-            letter-spacing: .18em;
+            font-size: 15px;
+            font-weight: 650;
+            letter-spacing: .16em;
             text-transform: uppercase;
             margin: 0;
             color: var(--wire);
+            white-space: nowrap;
         }
 
         .status-badge {
@@ -329,7 +390,7 @@
             border: 1px solid var(--seam);
             border-radius: 3px;
             font-family: var(--mono);
-            font-size: 10.5px;
+            font-size: 12px;
             letter-spacing: .09em;
             text-transform: uppercase;
             font-weight: 600;
@@ -407,10 +468,10 @@
 
         .btn {
             font-family: var(--mono);
-            font-size: 11px;
+            font-size: 12.5px;
             letter-spacing: .06em;
             font-weight: 600;
-            padding: 6px 12px;
+            padding: 7px 13px;
             border-radius: 3px;
             border: 1px solid var(--seam);
             background: var(--slate);
@@ -1634,7 +1695,7 @@
         }
     </style>
 </head>
-<body>
+<body data-view="__VIEW__">
     <!-- Login Overlay -->
     <div id="loginOverlay" class="login-overlay hidden">
         <div class="login-card">
@@ -1649,8 +1710,22 @@
     </div>
 
     <header class="header">
-        <h1>Code Bridge Dashboard</h1>
-        <div style="display: flex; align-items: center; gap: 12px;">
+        <div class="header-left">
+            <a class="brand" href="/dashboard">
+                <svg class="brand-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M2 15c4.5 0 6-7 10-7s5.5 7 10 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                    <path d="M6 15v5M18 15v5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                    <path d="M2 20h20" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".45"/>
+                </svg>
+                <h1>Code Bridge</h1>
+            </a>
+            <nav class="nav" aria-label="Sections">
+                <a href="/dashboard" id="navDashboard" data-i18n="nav_dashboard">Dashboard</a>
+                <a href="/agents" data-i18n="nav_agents">Agents</a>
+                <a href="/settings" id="navSettings" data-i18n="nav_settings">Settings</a>
+            </nav>
+        </div>
+        <div class="header-right">
             <div class="lang-selector">
                 <button class="lang-btn active" onclick="setLanguage('en')">EN</button>
                 <button class="lang-btn" onclick="setLanguage('ko')">한국어</button>
@@ -1665,7 +1740,7 @@
 
     <main class="container">
         <!-- The bridge itself: machine, tunnel, phone. -->
-        <section class="spine" id="linkSpine" aria-label="Bridge status">
+        <section class="spine" data-view="status" id="linkSpine" aria-label="Bridge status">
             <div class="node">
                 <div class="node-label" data-i18n="spine_machine">This machine</div>
                 <div class="node-value" id="spineMachine">—</div>
@@ -1685,7 +1760,7 @@
             </div>
         </section>
         <!-- Pairing Banner (shown when no devices paired) -->
-        <div id="pairingBanner" class="pairing-banner">
+        <div id="pairingBanner" class="pairing-banner" data-view="status">
             <div class="pairing-banner-content">
                 <span class="pairing-banner-icon">📱</span>
                 <div class="pairing-banner-text">
@@ -1710,7 +1785,7 @@
 
         <div class="grid">
             <!-- Connection Info Card -->
-            <div class="card">
+            <div class="card" data-view="settings">
                 <div class="card-header">
                     <h2 data-i18n="connection_info">Connection Info</h2>
                     <button class="btn btn-secondary btn-sm" onclick="updateFirebaseServerInfo()" data-i18n="update_firebase">Update Firebase</button>
@@ -1732,7 +1807,7 @@
             </div>
 
             <!-- Server Status Card -->
-            <div class="card">
+            <div class="card" data-view="status">
                 <div class="card-header">
                     <h2>Server Status</h2>
                     <div style="display: flex; align-items: center; gap: 8px;">
@@ -1789,7 +1864,7 @@
             </div>
 
             <!-- Security Card -->
-            <div class="card">
+            <div class="card" data-view="settings">
                 <div class="card-header">
                     <h2><span data-i18n="security">Security</span></h2>
                 </div>
@@ -1831,7 +1906,7 @@
             </div>
 
             <!-- Agent activity: status only. Authoring lives on /agents. -->
-            <div class="card" style="grid-column: 1 / -1;">
+            <div class="card" data-view="status" style="grid-column: 1 / -1;">
                 <div class="card-header">
                     <h2><span data-i18n="agent_activity">Agent activity</span></h2>
                     <div style="display: flex; align-items: center; gap: 8px;">
@@ -1856,7 +1931,7 @@
             </div>
 
             <!-- Paired Devices Card -->
-            <div class="card">
+            <div class="card" data-view="status">
                 <div class="card-header">
                     <h2>Paired Devices</h2>
                     <button class="btn-add" onclick="showPairingModal()" title="Add Device">+</button>
@@ -1867,7 +1942,7 @@
             </div>
 
             <!-- Available LLM Card -->
-            <div class="card">
+            <div class="card" data-view="status">
                 <div class="card-header">
                     <h2>Available LLM</h2>
                 </div>
@@ -1878,7 +1953,7 @@
             </div>
 
             <!-- Accessible Folders Card -->
-            <div class="card">
+            <div class="card" data-view="settings">
                 <div class="card-header">
                     <h2>Accessible Folders</h2>
                     <button class="btn-add" onclick="showAddFolderModal()" title="Add Folder">+</button>
@@ -1889,7 +1964,7 @@
             </div>
 
             <!-- Test Devices Card -->
-            <div class="card">
+            <div class="card" data-view="status">
                 <div class="card-header">
                     <h2>Test Devices</h2>
                 </div>
@@ -1899,7 +1974,7 @@
             </div>
 
             <!-- Server Logs Card (Bottom Full Width) -->
-            <div class="card full-width">
+            <div data-view="status" class="card full-width">
                 <div class="card-header">
                     <h2>Server Logs</h2>
                     <div class="card-actions">
@@ -2033,6 +2108,9 @@
                 // Agents (authoring lives on /agents)
                 agents: 'Agents',
                 refresh: 'Refresh',
+                nav_dashboard: 'Dashboard',
+                nav_agents: 'Agents',
+                nav_settings: 'Settings',
                 spine_machine: 'This machine',
                 spine_tunnel: 'Tunnel',
                 spine_phone: 'Paired phones',
@@ -2112,6 +2190,9 @@
                 // Agents (편집은 /agents 페이지에서)
                 agents: '에이전트',
                 refresh: '새로고침',
+                nav_dashboard: '대시보드',
+                nav_agents: '에이전트',
+                nav_settings: '설정',
                 spine_machine: '이 기계',
                 spine_tunnel: '터널',
                 spine_phone: '연결된 폰',
@@ -3620,6 +3701,12 @@
 
         // Initialize
         async function init() {
+            // Mark the section we are on. Doing it from the body attribute
+            // keeps the nav honest if the route ever changes.
+            const view = document.body.dataset.view === 'settings' ? 'settings' : 'status';
+            const active = document.getElementById(view === 'settings' ? 'navSettings' : 'navDashboard');
+            if (active) active.setAttribute('aria-current', 'page');
+
             // Apply i18n translations
             applyTranslations();
             updateLangButtons();
