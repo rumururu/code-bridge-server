@@ -808,6 +808,38 @@
             renderSteps();
         }
 
+        function successPolicyValue(step) {
+            const policy = step.on_success;
+            if (!policy) return 'continue';
+            if (typeof policy === 'string') return policy;
+            if (policy.type === 'goto_step') return `goto:${policy.target_step_id || ''}`;
+            return policy.type || 'continue';
+        }
+
+        function setSuccessPolicy(index, value) {
+            steps[index].on_success = value.startsWith('goto:')
+                ? { type: 'goto_step', target_step_id: value.slice(5) }
+                : value;
+            renderSteps();
+        }
+
+        function successOptions(step, index) {
+            const current = successPolicyValue(step);
+            const options = [
+                ['continue', 'Go to the next step'],
+                ['end', 'Finish the run here'],
+            ];
+            steps.forEach((candidate, candidateIndex) => {
+                if (candidateIndex === index) return;
+                const id = stepId(candidate, candidateIndex);
+                options.push([`goto:${id}`, `Jump to "${candidate.name || id}"`]);
+            });
+            return options
+                .map(([value, label]) =>
+                    `<option value="${escapeHtml(value)}"${value === current ? ' selected' : ''}>${escapeHtml(label)}</option>`)
+                .join('');
+        }
+
         function failureOptions(step, index) {
             const current = failurePolicyValue(step);
             const options = [
@@ -897,10 +929,16 @@
                         <label>${isShell ? 'What this script does' : 'What happens in this step'}</label>
                         <textarea class="input" rows="2" oninput="updateStep(${index}, 'description', this.value)">${escapeHtml(step.description || '')}</textarea>
                     </div>
+                    <div class="field">
+                        <label>Success criteria</label>
+                        <input class="input" value="${escapeHtml(step.success_criteria || '')}" oninput="updateStep(${index}, 'success_criteria', this.value)">
+                    </div>
                     <div class="row" style="margin-bottom:0;">
                         <div class="field" style="margin-bottom:0;">
-                            <label>Success criteria</label>
-                            <input class="input" value="${escapeHtml(step.success_criteria || '')}" oninput="updateStep(${index}, 'success_criteria', this.value)">
+                            <label>If it succeeds</label>
+                            <select class="input" onchange="setSuccessPolicy(${index}, this.value)">
+                                ${successOptions(step, index)}
+                            </select>
                         </div>
                         <div class="field" style="margin-bottom:0;">
                             <label>If it fails</label>

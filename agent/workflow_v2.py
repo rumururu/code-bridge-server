@@ -121,6 +121,7 @@ def normalize_workflow_step(
     step["tool_hint"] = _clean_optional_text(step.get("tool_hint"))
     step["success_criteria"] = _clean_text(step.get("success_criteria"))
     step["on_failure"] = normalize_failure_policy(step.get("on_failure"))
+    step["on_success"] = normalize_success_policy(step.get("on_success"))
     step["actions"] = normalize_actions(step.get("actions"))
     if step_type == "shell":
         script_id = _clean_optional_text(step.get("script_id"))
@@ -315,6 +316,58 @@ def _validate_failure_targets(steps: list[dict[str, Any]]) -> None:
     step_ids = {step["id"] for step in steps}
     for step in steps:
         _validate_policy_targets(step["on_failure"], step_ids)
+        _validate_policy_targets(step["on_success"], step_ids)
+
+
+def normalize_success_policy(raw_policy: Any) -> dict[str, Any]:
+    """What happens after a step succeeds.
+
+    Defaults to ``continue`` — the behaviour every workflow had before this
+    existed. ``end`` is what makes a diagnosis step reachable only through
+    ``on_failure: goto_step``: without it a step placed after the work always
+    runs, so an escalation that exists for failures also runs on every clean
+    night and bills for it.
+    """
+    if raw_policy is None:
+        return {"type": "continue"}
+
+    if isinstance(raw_policy, str):
+        value = raw_policy.strip()
+        lowered = value.casefold()
+        if lowered in {"continue", "next"}:
+            return {"type": "continue"}
+        if lowered in {"end", "stop", "done"}:
+            return {"type": "end"}
+        if lowered.startswith("goto_step:") or lowered.startswith("goto:"):
+            target = value.split(":", 1)[1].strip()
+            if not target:
+                raise WorkflowNormalizationError("goto success policy requires a target")
+            return {"type": "goto_step", "target_step_id": target}
+        raise WorkflowNormalizationError(f"unknown success policy: {raw_policy}")
+
+    if not isinstance(raw_policy, dict):
+        raise WorkflowNormalizationError("success policy must be a string or object")
+
+    raw_type = raw_policy.get("type") or raw_policy.get("action")
+    if not isinstance(raw_type, str) or not raw_type.strip():
+        raise WorkflowNormalizationError("success policy type is required")
+    policy_type = raw_type.strip().casefold()
+    if policy_type == "goto":
+        policy_type = "goto_step"
+    if policy_type in {"continue", "next"}:
+        return {"type": "continue"}
+    if policy_type in {"end", "stop", "done"}:
+        return {"type": "end"}
+    if policy_type == "goto_step":
+        target = (
+            raw_policy.get("target_step_id")
+            or raw_policy.get("step_id")
+            or raw_policy.get("target")
+        )
+        if not isinstance(target, str) or not target.strip():
+            raise WorkflowNormalizationError("goto success policy requires a target")
+        return {"type": "goto_step", "target_step_id": target.strip()}
+    raise WorkflowNormalizationError(f"unknown success policy: {raw_type}")
 
 
 def _validate_policy_targets(policy: dict[str, Any], step_ids: set[str]) -> None:

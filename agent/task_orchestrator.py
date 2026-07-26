@@ -968,7 +968,12 @@ async def _execute_workflow_orchestration(
                 },
             )
             steps[step_index] = store.get_task_step(step["id"]) or step
-            step_index += 1
+            next_index = _apply_workflow_success_policy(
+                task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+            )
+            if next_index is None:
+                return
+            step_index = next_index
             continue
         workflow_type = str(step_input.get("workflow_type") or "llm")
         if workflow_type == "browser_action":
@@ -998,7 +1003,12 @@ async def _execute_workflow_orchestration(
                 step_index = next_index
                 continue
             steps[step_index] = store.get_task_step(step["id"]) or step
-            step_index += 1
+            next_index = _apply_workflow_success_policy(
+                task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+            )
+            if next_index is None:
+                return
+            step_index = next_index
             continue
         if _is_app_action_workflow_type(workflow_type):
             completed = await _execute_app_action_workflow_step(
@@ -1027,7 +1037,12 @@ async def _execute_workflow_orchestration(
                 step_index = next_index
                 continue
             steps[step_index] = store.get_task_step(step["id"]) or step
-            step_index += 1
+            next_index = _apply_workflow_success_policy(
+                task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+            )
+            if next_index is None:
+                return
+            step_index = next_index
             continue
         if workflow_type == "shell":
             completed = await _execute_shell_workflow_step(
@@ -1053,7 +1068,12 @@ async def _execute_workflow_orchestration(
                 step_index = next_index
                 continue
             steps[step_index] = store.get_task_step(step["id"]) or step
-            step_index += 1
+            next_index = _apply_workflow_success_policy(
+                task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+            )
+            if next_index is None:
+                return
+            step_index = next_index
             continue
         if workflow_type in {
             "manual_handoff",
@@ -1075,7 +1095,12 @@ async def _execute_workflow_orchestration(
                 output={"result": "condition step completed without branching"},
             )
             steps[step_index] = store.get_task_step(step["id"]) or step
-            step_index += 1
+            next_index = _apply_workflow_success_policy(
+                task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+            )
+            if next_index is None:
+                return
+            step_index = next_index
             continue
 
         completed = await _execute_llm_workflow_step(
@@ -1106,34 +1131,16 @@ async def _execute_workflow_orchestration(
             step_index = next_index
             continue
         steps[step_index] = store.get_task_step(step["id"]) or step
-        step_index += 1
-
-    # A run that carried on past a failed step is not a clean run. Reporting it
-    # as completed would put a green dot on a night where a phone never ran,
-    # which is exactly the silence the status view exists to break.
-    failed_steps = [
-        step for step in store.list_task_steps(task_id) if step.get("status") == "failed"
-    ]
-    if failed_steps:
-        _finish_workflow_execution(
-            task_id=task_id,
-            run_id=run_id,
-            status="failed",
-            error={
-                "message": (
-                    f"{len(failed_steps)} step(s) failed; the workflow continued past them."
-                ),
-                "failed_step_ids": [step["id"] for step in failed_steps],
-            },
+        next_index = _apply_workflow_success_policy(
+            task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
         )
-        return
+        if next_index is None:
+            return
+        step_index = next_index
 
-    _finish_workflow_execution(
-        task_id=task_id,
-        run_id=run_id,
-        status="completed",
-        result={"message": "Workflow completed."},
-    )
+    # A run that carried on past a failed step is not a clean run: reporting it
+    # as completed would put a green dot on a night where a phone never ran.
+    _finish_workflow_from_steps(task_id=task_id, run_id=run_id)
 
 
 async def _execute_llm_workflow_step(
@@ -1779,6 +1786,90 @@ def _is_app_action_workflow_type(workflow_type: str) -> bool:
         "mobile_action",
         "device_action",
     }
+
+
+def _apply_workflow_success_policy(
+    *,
+    task_id: str,
+    run_id: str,
+    steps: list[dict[str, Any]],
+    completed_index: int,
+) -> int | None:
+    """Where execution goes after a step succeeds.
+
+    Returns the next index, or ``None`` when the workflow is finished here.
+    Default is the next step, which is what every workflow did before this
+    existed. ``end`` is what lets a diagnosis step be reachable only through
+    ``on_failure: goto_step`` instead of running on every clean night.
+    """
+    store = get_agent_store()
+    step = steps[completed_index]
+    step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+    policy = step_input.get("on_success")
+    if not isinstance(policy, dict):
+        return completed_index + 1
+    policy_type = str(policy.get("type") or "continue")
+
+    if policy_type == "goto_step":
+        target = policy.get("target_step_id") or policy.get("step_id") or policy.get("target")
+        target_index = _workflow_step_index(steps, target) if isinstance(target, str) else None
+        if target_index is None:
+            _finish_workflow_execution(
+                task_id=task_id,
+                run_id=run_id,
+                status="failed",
+                error={"message": f"on_success goto_step target not found: {target}"},
+            )
+            return None
+        store.append_event(
+            run_id=run_id,
+            event_type="task.step.goto",
+            app_event={
+                "task_id": task_id,
+                "step_id": step["id"],
+                "target_step_id": target,
+                "reason": "on_success",
+            },
+        )
+        return target_index
+
+    if policy_type == "end":
+        _finish_workflow_from_steps(task_id=task_id, run_id=run_id)
+        return None
+
+    return completed_index + 1
+
+
+def _finish_workflow_from_steps(*, task_id: str, run_id: str) -> None:
+    """Close a workflow, reporting failure if any step failed along the way.
+
+    Shared by the natural end of the loop and by ``on_success: end`` so both
+    routes tell the same truth: carrying on past a failure, or stopping early
+    after one, is still a failed run.
+    """
+    store = get_agent_store()
+    failed_steps = [
+        step for step in store.list_task_steps(task_id) if step.get("status") == "failed"
+    ]
+    if failed_steps:
+        _finish_workflow_execution(
+            task_id=task_id,
+            run_id=run_id,
+            status="failed",
+            error={
+                "message": (
+                    f"{len(failed_steps)} step(s) failed; the workflow continued past them."
+                ),
+                "failed_step_ids": [step["id"] for step in failed_steps],
+            },
+        )
+        return
+    _finish_workflow_execution(
+        task_id=task_id,
+        run_id=run_id,
+        status="completed",
+        result={"message": "Workflow completed."},
+    )
 
 
 def _apply_workflow_failure_policy(
@@ -2916,6 +3007,7 @@ def _plan_workflow_steps(
                     "script_args": workflow_step.get("script_args") or [],
                     "success_criteria": workflow_step.get("success_criteria") or "",
                     "on_failure": workflow_step.get("on_failure") or {"type": "abort"},
+                    "on_success": workflow_step.get("on_success") or {"type": "continue"},
                     "retry_state": {"attempts": 0},
                 },
             }
