@@ -345,3 +345,37 @@ class ScriptDraftingTest(unittest.TestCase):
 
     def test_suggested_name_never_empty(self):
         self.assertEqual(self.routes._suggested_name("!!!"), "script")
+
+
+class LlmStepResultTest(unittest.TestCase):
+    """A completed LLM step has to carry what the model said.
+
+    The escalation step exists to answer "why did the script fail". It was
+    storing only "Workflow step completed." — the answer lived in the event
+    log, which is not where anyone reading a run looks.
+    """
+
+    def _sink(self):
+        from agent.task_orchestrator import AgentTaskRunSink
+
+        return AgentTaskRunSink(run_id="run_1")
+
+    def test_complete_event_is_captured(self):
+        sink = self._sink()
+        asyncio.run(sink.send_json({"type": "complete", "content": "  tapped the wrong row  "}))
+        self.assertEqual(sink.result_text, "tapped the wrong row")
+
+    def test_result_event_is_captured(self):
+        sink = self._sink()
+        asyncio.run(sink.send_json({"type": "result", "result": "exit 1, home tab missing"}))
+        self.assertEqual(sink.result_text, "exit 1, home tab missing")
+
+    def test_blank_content_is_ignored(self):
+        sink = self._sink()
+        asyncio.run(sink.send_json({"type": "complete", "content": "   "}))
+        self.assertIsNone(sink.result_text)
+
+    def test_unrelated_events_leave_it_alone(self):
+        sink = self._sink()
+        asyncio.run(sink.send_json({"type": "assistant", "message": {"content": "thinking"}}))
+        self.assertIsNone(sink.result_text)

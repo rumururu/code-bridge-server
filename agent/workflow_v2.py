@@ -152,6 +152,12 @@ def normalize_failure_policy(raw_policy: Any) -> dict[str, Any]:
             return {"type": "ask_user", "resume": "same_step"}
         if lowered == "abort":
             return {"type": "abort"}
+        if lowered in {"continue", "skip"}:
+            # Independent work in one workflow: three phones, or a cleanup that
+            # is allowed to fail. Without this the only ways past a failed step
+            # were abort, wait for a human, or jump — and a jump skips whatever
+            # sits between here and the target.
+            return {"type": "continue"}
         if lowered == "retry_once":
             return {"type": "retry", "max_attempts": 1, "then": {"type": "abort"}}
         if lowered.startswith("goto_step:") or lowered.startswith("goto:"):
@@ -174,6 +180,9 @@ def normalize_failure_policy(raw_policy: Any) -> dict[str, Any]:
         policy_type = "goto_step"
     policy["type"] = policy_type
     policy.pop("action", None)
+
+    if policy_type in {"continue", "skip"}:
+        return {"type": "continue"}
 
     if policy_type == "abort":
         return _normalize_abort_policy(policy)

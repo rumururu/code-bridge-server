@@ -80,6 +80,10 @@ class AgentTaskRunSink:
         self.agent_run_id = run_id
         self.permission_required = False
         self.error_message: str | None = None
+        # What the model actually said. Without it a completed LLM step reads
+        # "Workflow step completed." and the answer — the diagnosis you asked
+        # it for — is only in the event log.
+        self.result_text: str | None = None
         # decision_marker emit state (TASK_005)
         self._last_reasoning_event_id: str | None = None
         self._last_reasoning_decision_text: str | None = None
@@ -93,6 +97,14 @@ class AgentTaskRunSink:
         if event_type == "error":
             message = data.get("message")
             self.error_message = str(message) if message is not None else "Unknown error"
+        if event_type == "complete":
+            content = data.get("content")
+            if isinstance(content, str) and content.strip():
+                self.result_text = content.strip()
+        elif event_type == "result":
+            content = data.get("result")
+            if isinstance(content, str) and content.strip():
+                self.result_text = content.strip()
 
         provider_id_raw = data.get("provider_id")
         provider_id = provider_id_raw if isinstance(provider_id_raw, str) else None
@@ -1096,6 +1108,26 @@ async def _execute_workflow_orchestration(
         steps[step_index] = store.get_task_step(step["id"]) or step
         step_index += 1
 
+    # A run that carried on past a failed step is not a clean run. Reporting it
+    # as completed would put a green dot on a night where a phone never ran,
+    # which is exactly the silence the status view exists to break.
+    failed_steps = [
+        step for step in store.list_task_steps(task_id) if step.get("status") == "failed"
+    ]
+    if failed_steps:
+        _finish_workflow_execution(
+            task_id=task_id,
+            run_id=run_id,
+            status="failed",
+            error={
+                "message": (
+                    f"{len(failed_steps)} step(s) failed; the workflow continued past them."
+                ),
+                "failed_step_ids": [step["id"] for step in failed_steps],
+            },
+        )
+        return
+
     _finish_workflow_execution(
         task_id=task_id,
         run_id=run_id,
@@ -1175,11 +1207,16 @@ async def _execute_llm_workflow_step(
         )
         return False
 
+    output: dict[str, Any] = {"message": "Workflow step completed."}
+    if sink.result_text:
+        # Truncated: a step output row is read in a list, and the full turn is
+        # still in the event log if anyone needs all of it.
+        output["result"] = _truncate_workflow_evidence(sink.result_text, 4000)
     _complete_step(
         task=store.get_task(task_id) or {"id": task_id},
         step_id=step_id,
         run_id=run_id,
-        output={"message": "Workflow step completed."},
+        output=output,
     )
     return True
 
@@ -1833,6 +1870,22 @@ def _apply_terminal_or_branch_policy(
     policy_type = str(policy.get("type") or "abort")
     if policy_type == "goto":
         policy_type = "goto_step"
+
+    if policy_type == "continue":
+        # The step stays failed — this is not a pass. The run carries on so
+        # that work which does not depend on it still happens, and the failure
+        # is visible on the step and in the timeline.
+        get_agent_store().append_event(
+            run_id=run_id,
+            event_type="task.step.continued_after_failure",
+            app_event={
+                "task_id": task_id,
+                "step_id": failed_step["id"],
+                "workflow_step_id": (failed_step.get("input") or {}).get("workflow_step_id"),
+                "error": error,
+            },
+        )
+        return failed_index + 1
 
     if policy_type == "goto_step":
         target = policy.get("target_step_id") or policy.get("step_id") or policy.get("target")

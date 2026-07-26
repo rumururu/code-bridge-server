@@ -1459,6 +1459,8 @@
                 if (!(shell.stderr || '').trim() && !(shell.stdout || '').trim()) {
                     body += '<div class="log-label">printed nothing</div>';
                 }
+            } else if (output.result) {
+                body = `<pre class="log-pane">${escapeHtml(output.result)}</pre>`;
             } else if (output.checkpoint) {
                 body = `<div class="log-label">waiting</div><pre class="log-pane">${escapeHtml(output.checkpoint.prompt || '')}</pre>`;
             } else if (Object.keys(output).length) {
