@@ -22,6 +22,7 @@ DRY_RUN_SUPPORT_SCHEMA_VERSION = 2026060100
 AUDIT_REDACTED_CATEGORIES_SCHEMA_VERSION = 2026060500
 EVENT_PAIRING_COLUMNS_SCHEMA_VERSION = 2026060601
 BROWSER_SESSIONS_SCHEMA_VERSION = 2026061000
+AGENT_SCRIPTS_SCHEMA_VERSION = 2026072600
 
 _PSEUDO_AGENTS = [
     {
@@ -730,6 +731,35 @@ def _migrate_legacy_foundation(conn: sqlite3.Connection) -> None:
         pass
 
 
+
+
+def _migrate_agent_scripts(conn: sqlite3.Connection) -> None:
+    """Registry of shell scripts a workflow step is allowed to run.
+
+    Steps reference a script by id, never by command line: a workflow that
+    could carry an arbitrary command would be remote code execution behind
+    whatever standing policy rule let it run unattended. Registering a script
+    is a deliberate, auditable act; running one is then just a lookup.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS agent_scripts (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            path TEXT NOT NULL,
+            interpreter TEXT NOT NULL DEFAULT 'bash',
+            default_args_json TEXT NOT NULL DEFAULT '[]',
+            timeout_seconds INTEGER NOT NULL DEFAULT 3600,
+            created_by TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_scripts_path
+        ON agent_scripts(path);
+    """)
+
+
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (
         LEGACY_FOUNDATION_SCHEMA_VERSION,
@@ -772,7 +802,13 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
         "browser_sessions",
         _migrate_browser_sessions,
     ),
+    (
+        AGENT_SCRIPTS_SCHEMA_VERSION,
+        "agent_scripts",
+        _migrate_agent_scripts,
+    ),
 )
+
 
 
 def _run_schema_migrations(conn: sqlite3.Connection) -> None:

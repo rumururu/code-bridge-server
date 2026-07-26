@@ -136,7 +136,8 @@ class WorkflowV2NormalizationTest(unittest.TestCase):
 
     def test_unknown_step_and_action_types_are_rejected(self) -> None:
         with self.assertRaisesRegex(WorkflowNormalizationError, "unknown step type"):
-            normalize_workflow([{"type": "shell", "name": "Run"}])
+            # "shell" used to be the example here; it is a real step type now.
+            normalize_workflow([{"type": "teleport", "name": "Run"}])
 
         with self.assertRaisesRegex(WorkflowNormalizationError, "unknown action type"):
             normalize_workflow(

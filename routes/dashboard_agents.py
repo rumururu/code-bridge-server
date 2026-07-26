@@ -26,11 +26,13 @@ from agent.agent_models import (
     DryRunRequest,
 )
 from approvals.approval_models import ApprovalDecisionCreate
+from agent.script_models import ScriptRegister, ScriptUpdate
 from policy.policy_models import PolicyRuleCreate
 
 from . import agents as agents_routes
 from . import approvals as approvals_routes
 from . import policies as policies_routes
+from . import scripts as scripts_routes
 from .deps import require_local_access
 
 router = APIRouter(
@@ -190,6 +192,31 @@ async def create_policy_rule(body: PolicyRuleCreate) -> dict[str, Any]:
 @router.delete("/policies/rules/{rule_id}", response_model=None)
 async def delete_policy_rule(rule_id: str) -> dict[str, Any]:
     return await policies_routes.delete_policy_rule(rule_id)
+
+
+# Registering a script is dashboard-only: pairing a phone must not hand out
+# the ability to point a workflow at any executable on the machine. Listing is
+# on the shared router so the phone can still read what a run is doing.
+
+
+@router.get("/scripts", response_model=None)
+async def list_scripts(limit: int = Query(default=100, ge=1, le=200)) -> dict[str, Any]:
+    return await scripts_routes.list_scripts(limit=limit)
+
+
+@router.post("/scripts", response_model=None)
+async def register_script(body: ScriptRegister) -> dict[str, Any]:
+    return await scripts_routes.register_script(body)
+
+
+@router.patch("/scripts/{script_id}", response_model=None)
+async def update_script(script_id: str, body: ScriptUpdate) -> dict[str, Any]:
+    return await scripts_routes.update_script(script_id, body)
+
+
+@router.delete("/scripts/{script_id}", response_model=None)
+async def delete_script(script_id: str) -> dict[str, Any]:
+    return await scripts_routes.delete_script(script_id)
 
 
 @router.get("/approvals/pending", response_model=None)

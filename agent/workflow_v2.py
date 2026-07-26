@@ -18,6 +18,11 @@ class WorkflowNormalizationError(ValueError):
 
 ALLOWED_STEP_TYPES = {
     "llm",
+    # Runs a registered script (see agent.script_store). Deterministic: no
+    # model call, no tokens, no permission prompt — vetting happened at
+    # registration. Its exit code and output become evidence for later steps,
+    # so a failure can escalate to an LLM step via on_failure: goto_step.
+    "shell",
     "mcp_tool",
     "browser_action",
     "app_action",
@@ -117,6 +122,14 @@ def normalize_workflow_step(
     step["success_criteria"] = _clean_text(step.get("success_criteria"))
     step["on_failure"] = normalize_failure_policy(step.get("on_failure"))
     step["actions"] = normalize_actions(step.get("actions"))
+    if step_type == "shell":
+        script_id = _clean_optional_text(step.get("script_id"))
+        if not script_id:
+            raise WorkflowNormalizationError(
+                f"step {index}: shell steps need a script_id — register the script first"
+            )
+        step["script_id"] = script_id
+        step["script_args"] = [str(item) for item in (step.get("script_args") or [])]
     return step
 
 

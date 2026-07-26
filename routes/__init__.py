@@ -21,6 +21,7 @@ from .git import router as git_router
 from .terminal import router as terminal_router
 from .dashboard import router as dashboard_router
 from .dashboard_agents import router as dashboard_agents_router
+from .scripts import router as scripts_router
 from .dashboard_auth import router as dashboard_auth_router
 from .filesystem import router as filesystem_router
 from .mermaid import router as mermaid_router
@@ -63,6 +64,7 @@ _SHARED_ROUTERS = (
     scrcpy_proxy_router,
     filesystem_router,
     secrets_router,
+    scripts_router,
 )
 
 # Routers that must NEVER be reachable on the tunnel-exposed API listener,

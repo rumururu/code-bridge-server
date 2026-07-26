@@ -730,6 +730,20 @@ async def _execute_single_workflow_task_step(
             "status": "completed" if completed else "failed",
         }
 
+    if workflow_type == "shell":
+        completed = await _execute_shell_workflow_step(
+            task_id=task_id,
+            run_id=run_id,
+            provider_id=provider_id,
+            project_path=project_path,
+            step=step,
+        )
+        return {
+            "task": store.get_task(task_id),
+            "step": store.get_task_step(step_id),
+            "status": "completed" if completed else "failed",
+        }
+
     if workflow_type in {"manual_handoff", "mcp_tool", "approval_gate"}:
         _wait_for_user_step(
             task_id=task_id,
@@ -1003,6 +1017,32 @@ async def _execute_workflow_orchestration(
             steps[step_index] = store.get_task_step(step["id"]) or step
             step_index += 1
             continue
+        if workflow_type == "shell":
+            completed = await _execute_shell_workflow_step(
+                task_id=task_id,
+                run_id=run_id,
+                provider_id=provider_id,
+                project_path=project_path,
+                step=step,
+            )
+            if not completed:
+                next_index = _apply_workflow_failure_policy(
+                    task_id=task_id,
+                    run_id=run_id,
+                    steps=steps,
+                    failed_index=step_index,
+                    error={
+                        "message": f"Shell step '{step.get('title')}' did not complete."
+                    },
+                )
+                if next_index is None:
+                    return
+                steps = store.list_task_steps(task_id)
+                step_index = next_index
+                continue
+            steps[step_index] = store.get_task_step(step["id"]) or step
+            step_index += 1
+            continue
         if workflow_type in {
             "manual_handoff",
             "mcp_tool",
@@ -1142,6 +1182,101 @@ async def _execute_llm_workflow_step(
         output={"message": "Workflow step completed."},
     )
     return True
+
+
+async def _execute_shell_workflow_step(
+    *,
+    task_id: str,
+    run_id: str,
+    provider_id: str,
+    project_path: str,
+    step: dict[str, Any],
+) -> bool:
+    """Run the registered script this step names.
+
+    No model, no tokens, no approval — the vetting happened when the script was
+    registered. On failure the exit code and output stay on the step, so an
+    ``on_failure: goto_step`` escalation hands an LLM step something concrete
+    to diagnose instead of "the script failed".
+    """
+    from agent.script_store import get_script_store
+    from agent.shell_step_executor import run_registered_script
+
+    store = get_agent_store()
+    step_id = str(step["id"])
+    step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+    script_id = step_input.get("script_id")
+
+    store.update_task_step(step_id, {"status": "running"})
+
+    script = get_script_store().get(str(script_id)) if script_id else None
+    if script is None:
+        error = {
+            "message": f"registered script not found: {script_id}",
+            "type": "ScriptNotFound",
+        }
+        _fail_step(
+            task=store.get_task(task_id) or {"id": task_id},
+            step_id=step_id,
+            run_id=run_id,
+            error={"shell": {"status": "failed", "error": error}},
+        )
+        store.append_event(
+            run_id=run_id,
+            event_type="task.step.shell.failed",
+            provider_id=provider_id,
+            app_event={"task_id": task_id, "step_id": step_id, "error": error},
+        )
+        return False
+
+    store.append_event(
+        run_id=run_id,
+        event_type="task.step.shell.started",
+        provider_id=provider_id,
+        app_event={
+            "task_id": task_id,
+            "step_id": step_id,
+            "workflow_step_id": step_input.get("workflow_step_id"),
+            "script_id": script["id"],
+            "script_name": script["name"],
+        },
+    )
+
+    result = await run_registered_script(
+        script,
+        extra_args=[str(item) for item in (step_input.get("script_args") or [])],
+        cwd=project_path or None,
+    )
+    output = {"shell": result.to_output()}
+
+    if result.completed:
+        _complete_step(
+            task=store.get_task(task_id) or {"id": task_id},
+            step_id=step_id,
+            run_id=run_id,
+            output=output,
+        )
+        store.append_event(
+            run_id=run_id,
+            event_type="task.step.shell.completed",
+            provider_id=provider_id,
+            app_event={"task_id": task_id, "step_id": step_id, "output": output},
+        )
+        return True
+
+    _fail_step(
+        task=store.get_task(task_id) or {"id": task_id},
+        step_id=step_id,
+        run_id=run_id,
+        error=output,
+    )
+    store.append_event(
+        run_id=run_id,
+        event_type="task.step.shell.failed",
+        provider_id=provider_id,
+        app_event={"task_id": task_id, "step_id": step_id, "output": output},
+    )
+    return False
 
 
 async def _execute_app_action_workflow_step(
@@ -1914,6 +2049,13 @@ def _workflow_step_message(
     return "\n".join(lines)
 
 
+# Failed steps are evidence too — usually the most important kind. A workflow
+# that escalates (``on_failure: goto_step: diagnose``) sends an LLM step to work
+# out *why* the previous step broke; excluding the failed step left that LLM
+# with nothing and it (correctly) refused to guess.
+_EVIDENCE_STEP_STATUSES = {"completed", "failed"}
+
+
 def _previous_completed_workflow_steps(
     steps: list[dict[str, Any]],
     *,
@@ -1923,7 +2065,7 @@ def _previous_completed_workflow_steps(
     current_id = current_step.get("id")
     previous: list[dict[str, Any]] = []
     for step in steps:
-        if step.get("status") != "completed":
+        if step.get("status") not in _EVIDENCE_STEP_STATUSES:
             continue
         if current_sequence is not None and step.get("sequence") is not None:
             try:
@@ -1957,6 +2099,31 @@ def _workflow_previous_evidence(steps: list[dict[str, Any]]) -> str:
 
 def _workflow_step_output_summary(output: dict[str, Any]) -> list[str]:
     lines: list[str] = []
+    shell = output.get("shell")
+    if isinstance(shell, dict):
+        # The whole point of a shell step's evidence is the escalation case:
+        # the next step is often an LLM asked to work out *why* this failed, so
+        # give it the exit code and the tail of both streams rather than a
+        # status word.
+        lines.append(f"shell.status: {shell.get('status')}")
+        lines.append(f"shell.exit_code: {shell.get('exit_code')}")
+        if shell.get("timed_out"):
+            lines.append("shell.timed_out: true")
+        command = shell.get("command")
+        if isinstance(command, list) and command:
+            lines.append("shell.command: " + " ".join(str(part) for part in command))
+        for stream in ("stdout", "stderr"):
+            text = shell.get(stream)
+            if isinstance(text, str) and text.strip():
+                lines.append(
+                    f"shell.{stream}: "
+                    + _truncate_workflow_evidence(text.strip(), 2000)
+                )
+        error = shell.get("error")
+        if isinstance(error, str) and error:
+            lines.append(f"shell.error: {error}")
+        elif isinstance(error, dict) and error.get("message"):
+            lines.append(f"shell.error: {error['message']}")
     browser_action = output.get("browser_action")
     if isinstance(browser_action, dict):
         lines.append(f"browser_action.status: {browser_action.get('status')}")
@@ -2692,6 +2859,8 @@ def _plan_workflow_steps(
                     "device_id": workflow_step.get("device_id"),
                     "android_device_id": workflow_step.get("android_device_id"),
                     "actions": workflow_step.get("actions") or [],
+                    "script_id": workflow_step.get("script_id"),
+                    "script_args": workflow_step.get("script_args") or [],
                     "success_criteria": workflow_step.get("success_criteria") or "",
                     "on_failure": workflow_step.get("on_failure") or {"type": "abort"},
                     "retry_state": {"attempts": 0},
