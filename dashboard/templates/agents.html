@@ -361,6 +361,95 @@
 
             <div class="card">
                 <div class="card-header">
+                    <h2>Scripts</h2>
+                    <span class="status" id="scriptCount"></span>
+                </div>
+                <div class="card-body">
+                    <p class="hint">
+                        A shell step runs one of these — no model, no tokens, no approval prompt.
+                        Steps reference a script by name, never by command line, so registering is
+                        the moment the script is vetted. The path is checked now, not at 3am inside
+                        a scheduled run.
+                    </p>
+                    <div class="row">
+                        <div class="field">
+                            <label for="scriptName">Name</label>
+                            <input id="scriptName" class="input" maxlength="80" placeholder="smalldev exchange cycle">
+                        </div>
+                        <div class="field" style="flex:2;">
+                            <label for="scriptPath">Absolute path</label>
+                            <input id="scriptPath" class="input" placeholder="/Users/you/Library/Scripts/cycle.sh">
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="field">
+                            <label for="scriptInterpreter">Interpreter</label>
+                            <select id="scriptInterpreter" class="input">
+                                <option value="bash">bash</option>
+                                <option value="sh">sh</option>
+                                <option value="zsh">zsh</option>
+                                <option value="python3">python3</option>
+                                <option value="node">node</option>
+                                <option value="direct">direct (executable)</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label for="scriptArgs">Default args (space separated)</label>
+                            <input id="scriptArgs" class="input" placeholder="optional">
+                        </div>
+                        <div class="field">
+                            <label for="scriptTimeout">Timeout (seconds)</label>
+                            <input id="scriptTimeout" class="input" type="number" min="1" value="3600">
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label for="scriptDescription">Description</label>
+                        <input id="scriptDescription" class="input" placeholder="What this script does">
+                    </div>
+                    <div class="actions">
+                        <button class="btn" onclick="registerScript()">Register</button>
+                        <button class="btn btn-secondary" onclick="openScriptWriter()">Write one with the LLM</button>
+                        <span id="scriptStatus" class="status"></span>
+                    </div>
+
+                    <div id="scriptList" style="margin-top:16px;"></div>
+
+                    <div id="scriptWriter" style="display:none; margin-top:16px; border-top:1px solid var(--border-color); padding-top:16px;">
+                        <div class="field">
+                            <label for="scriptWriterPrompt">Describe what the script should do</label>
+                            <textarea id="scriptWriterPrompt" class="input" rows="3"
+                                      placeholder="Every 2 hours, open the smalldev app on device R59N3035LQL, join any pending test, and report what it joined"></textarea>
+                        </div>
+                        <div class="actions">
+                            <button class="btn" id="scriptWriterBtn" onclick="draftScript()">Draft it</button>
+                            <button class="btn btn-secondary" onclick="closeScriptWriter()">Cancel</button>
+                            <span id="scriptWriterStatus" class="status"></span>
+                        </div>
+                        <div id="scriptDraftPanel" style="display:none; margin-top:12px;">
+                            <p class="hint">
+                                Read it before you register it. Nothing is written to disk or registered
+                                until you say so — this is a draft, and the model has not run anything.
+                            </p>
+                            <div class="field">
+                                <label for="scriptDraftName">Name</label>
+                                <input id="scriptDraftName" class="input" maxlength="80">
+                            </div>
+                            <div class="field">
+                                <label for="scriptDraftBody">Script</label>
+                                <textarea id="scriptDraftBody" class="input" rows="16" style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px;"></textarea>
+                            </div>
+                            <div class="actions">
+                                <button class="btn" onclick="saveDraftedScript()">Save and register</button>
+                                <button class="btn btn-secondary" onclick="draftScript()">Redraft</button>
+                                <span id="scriptDraftStatus" class="status"></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
                     <h2>Unattended permissions</h2>
                     <span class="status" id="ruleCount"></span>
                 </div>
@@ -415,6 +504,7 @@
 
         let agents = [];
         let schedules = [];
+        let scripts = [];
         let policyRules = [];
         let approvals = [];
         let tasksById = {};
@@ -542,16 +632,98 @@
             showTab('editor');
         }
 
+        function stepId(step, index) {
+            return step.id || `step_${index + 1}`;
+        }
+
+        function failurePolicyValue(step) {
+            const policy = step.on_failure;
+            if (!policy) return 'ask_user';
+            if (typeof policy === 'string') return policy;
+            if (policy.type === 'goto_step') return `goto:${policy.target_step_id || ''}`;
+            if (policy.type === 'retry') return 'retry_once';
+            return policy.type || 'ask_user';
+        }
+
+        function setFailurePolicy(index, value) {
+            if (value.startsWith('goto:')) {
+                steps[index].on_failure = {
+                    type: 'goto_step',
+                    target_step_id: value.slice(5),
+                };
+            } else if (value === 'retry_once') {
+                steps[index].on_failure = 'retry_once';
+            } else {
+                steps[index].on_failure = value;
+            }
+            renderSteps();
+        }
+
+        function failureOptions(step, index) {
+            const current = failurePolicyValue(step);
+            const options = [
+                ['ask_user', 'Ask me and wait'],
+                ['abort', 'Stop the workflow'],
+                ['retry_once', 'Retry once, then stop'],
+            ];
+            // Every *other* step is a jump target — this is how a script step
+            // escalates to an LLM step that works out why it broke.
+            steps.forEach((candidate, candidateIndex) => {
+                if (candidateIndex === index) return;
+                const id = stepId(candidate, candidateIndex);
+                options.push([`goto:${id}`, `Go to "${candidate.name || id}"`]);
+            });
+            return options
+                .map(([value, label]) =>
+                    `<option value="${escapeHtml(value)}"${value === current ? ' selected' : ''}>${escapeHtml(label)}</option>`)
+                .join('');
+        }
+
+        function scriptOptions(step) {
+            const current = step.script_id || '';
+            const rows = scripts
+                .map((script) =>
+                    `<option value="${script.id}"${script.id === current ? ' selected' : ''}>${escapeHtml(script.name)}</option>`)
+                .join('');
+            return `<option value="">(pick a registered script)</option>${rows}`;
+        }
+
         function renderSteps() {
             const host = document.getElementById('stepList');
             if (!steps.length) {
                 host.innerHTML = '<div class="empty">No steps yet.</div>';
                 return;
             }
-            host.innerHTML = steps.map((step, index) => `
+            host.innerHTML = steps.map((step, index) => {
+                const type = step.type || 'llm';
+                const isShell = type === 'shell';
+                const body = isShell
+                    ? `
+                    <div class="row">
+                        <div class="field">
+                            <label>Script</label>
+                            <select class="input" onchange="updateStepAndRender(${index}, 'script_id', this.value)">
+                                ${scriptOptions(step)}
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label>Extra args (space separated)</label>
+                            <input class="input" value="${escapeHtml((step.script_args || []).join(' '))}"
+                                   placeholder="e.g. R59N3035LQL"
+                                   oninput="updateStepArgs(${index}, this.value)">
+                        </div>
+                    </div>
+                    ${scripts.length ? '' : '<div class="empty">Register a script below first.</div>'}`
+                    : `
+                    <div class="field">
+                        <label>Tool hint</label>
+                        <input class="input" value="${escapeHtml(step.tool_hint || '')}" placeholder="optional"
+                               oninput="updateStep(${index}, 'tool_hint', this.value)">
+                    </div>`;
+                return `
                 <div class="step">
                     <div class="step-head">
-                        <span class="step-index">Step ${index + 1}</span>
+                        <span class="step-index">Step ${index + 1} · ${escapeHtml(stepId(step, index))}</span>
                         <span>
                             <button class="btn btn-secondary btn-xs" onclick="moveStep(${index}, -1)" ${index === 0 ? 'disabled' : ''}>↑</button>
                             <button class="btn btn-secondary btn-xs" onclick="moveStep(${index}, 1)" ${index === steps.length - 1 ? 'disabled' : ''}>↓</button>
@@ -564,24 +736,54 @@
                             <input class="input" value="${escapeHtml(step.name || '')}" oninput="updateStep(${index}, 'name', this.value)">
                         </div>
                         <div class="field">
-                            <label>Tool hint</label>
-                            <input class="input" value="${escapeHtml(step.tool_hint || '')}" placeholder="optional" oninput="updateStep(${index}, 'tool_hint', this.value)">
+                            <label>Type</label>
+                            <select class="input" onchange="updateStepAndRender(${index}, 'type', this.value)">
+                                <option value="llm"${type === 'llm' ? ' selected' : ''}>LLM — the model decides and acts</option>
+                                <option value="shell"${isShell ? ' selected' : ''}>Script — runs a registered script, no tokens</option>
+                            </select>
                         </div>
                     </div>
+                    ${body}
                     <div class="field">
-                        <label>What happens in this step</label>
+                        <label>${isShell ? 'What this script does' : 'What happens in this step'}</label>
                         <textarea class="input" rows="2" oninput="updateStep(${index}, 'description', this.value)">${escapeHtml(step.description || '')}</textarea>
                     </div>
-                    <div class="field" style="margin-bottom:0;">
-                        <label>Success criteria</label>
-                        <input class="input" value="${escapeHtml(step.success_criteria || '')}" oninput="updateStep(${index}, 'success_criteria', this.value)">
+                    <div class="row" style="margin-bottom:0;">
+                        <div class="field" style="margin-bottom:0;">
+                            <label>Success criteria</label>
+                            <input class="input" value="${escapeHtml(step.success_criteria || '')}" oninput="updateStep(${index}, 'success_criteria', this.value)">
+                        </div>
+                        <div class="field" style="margin-bottom:0;">
+                            <label>If it fails</label>
+                            <select class="input" onchange="setFailurePolicy(${index}, this.value)">
+                                ${failureOptions(step, index)}
+                            </select>
+                        </div>
                     </div>
-                </div>`).join('');
+                </div>`;
+            }).join('');
         }
 
         function addStep() {
-            steps.push({ name: '', description: '', tool_hint: '', success_criteria: '' });
+            steps.push({
+                id: `step_${steps.length + 1}`,
+                type: 'llm',
+                name: '',
+                description: '',
+                tool_hint: '',
+                success_criteria: '',
+            });
             renderSteps();
+        }
+
+        function updateStepAndRender(index, field, value) {
+            steps[index][field] = value;
+            renderSteps();
+        }
+
+        function updateStepArgs(index, raw) {
+            const trimmed = raw.trim();
+            steps[index].script_args = trimmed ? trimmed.split(/\s+/) : [];
         }
 
         function updateStep(index, field, value) {
@@ -604,14 +806,29 @@
 
         function collectSteps() {
             return steps
-                .filter((step) => (step.name || '').trim() || (step.description || '').trim())
-                .map((step) => ({
-                    ...step,
-                    name: (step.name || '').trim(),
-                    description: (step.description || '').trim(),
-                    tool_hint: (step.tool_hint || '').trim() || null,
-                    success_criteria: (step.success_criteria || '').trim(),
-                }));
+                .filter((step) =>
+                    (step.name || '').trim() || (step.description || '').trim() || step.script_id)
+                .map((step, index) => {
+                    const collected = {
+                        ...step,
+                        id: stepId(step, index),
+                        type: step.type || 'llm',
+                        name: (step.name || '').trim(),
+                        description: (step.description || '').trim(),
+                        success_criteria: (step.success_criteria || '').trim(),
+                    };
+                    if (collected.type === 'shell') {
+                        // tool_hint is an LLM concept; sending it on a script
+                        // step just adds noise to the stored definition.
+                        delete collected.tool_hint;
+                        collected.script_args = step.script_args || [];
+                    } else {
+                        collected.tool_hint = (step.tool_hint || '').trim() || null;
+                        delete collected.script_id;
+                        delete collected.script_args;
+                    }
+                    return collected;
+                });
         }
 
         async function saveAgent() {
@@ -877,6 +1094,134 @@
             reloadAll();
         }
 
+        // --- Scripts ----------------------------------------------------------
+
+        function renderScripts() {
+            const host = document.getElementById('scriptList');
+            document.getElementById('scriptCount').textContent =
+                scripts.length ? `${scripts.length} registered` : '';
+            if (!scripts.length) {
+                host.innerHTML = '<div class="empty">No scripts registered — shell steps have nothing to run.</div>';
+                return;
+            }
+            const rows = scripts.map((script) => `
+                <tr>
+                    <td>${escapeHtml(script.name)}</td>
+                    <td style="max-width:320px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                        title="${escapeHtml(script.path)}">${escapeHtml(script.path)}</td>
+                    <td>${escapeHtml(script.interpreter)}</td>
+                    <td>${escapeHtml(String(script.timeout_seconds))}s</td>
+                    <td style="text-align:right;">
+                        <button class="btn btn-danger btn-xs" onclick="deleteScript('${script.id}')">Remove</button>
+                    </td>
+                </tr>`).join('');
+            host.innerHTML = `<table class="sched">
+                <thead><tr><th>Name</th><th>Path</th><th>Run with</th><th>Timeout</th><th></th></tr></thead>
+                <tbody>${rows}</tbody></table>`;
+        }
+
+        async function registerScript() {
+            const name = document.getElementById('scriptName').value.trim();
+            const path = document.getElementById('scriptPath').value.trim();
+            if (!name || !path) {
+                setStatus('scriptStatus', 'Name and absolute path are required', true);
+                return;
+            }
+            setStatus('scriptStatus', 'Registering…');
+            const argsRaw = document.getElementById('scriptArgs').value.trim();
+            const result = await api('/scripts', {
+                method: 'POST',
+                body: JSON.stringify({
+                    name,
+                    path,
+                    description: document.getElementById('scriptDescription').value.trim() || null,
+                    interpreter: document.getElementById('scriptInterpreter').value,
+                    default_args: argsRaw ? argsRaw.split(/\s+/) : [],
+                    timeout_seconds: Number(document.getElementById('scriptTimeout').value) || 3600,
+                    created_by: 'dashboard',
+                }),
+            });
+            if (!result || result.error) {
+                setStatus('scriptStatus', (result && result.error) || 'Failed', true);
+                return;
+            }
+            setStatus('scriptStatus', '');
+            ['scriptName', 'scriptPath', 'scriptArgs', 'scriptDescription'].forEach((id) => {
+                document.getElementById(id).value = '';
+            });
+            toast('Script registered');
+            reloadAll();
+        }
+
+        async function deleteScript(scriptId) {
+            if (!confirm('Remove this script? Steps that reference it will fail.')) return;
+            const result = await api(`/scripts/${encodeURIComponent(scriptId)}`, { method: 'DELETE' });
+            if (!result || result.error) {
+                toast((result && result.error) || 'Remove failed');
+                return;
+            }
+            toast('Script removed');
+            reloadAll();
+        }
+
+        function openScriptWriter() {
+            document.getElementById('scriptWriter').style.display = '';
+            document.getElementById('scriptWriterPrompt').focus();
+        }
+
+        function closeScriptWriter() {
+            document.getElementById('scriptWriter').style.display = 'none';
+            document.getElementById('scriptDraftPanel').style.display = 'none';
+            setStatus('scriptWriterStatus', '');
+        }
+
+        async function draftScript() {
+            const intent = document.getElementById('scriptWriterPrompt').value.trim();
+            if (!intent) {
+                setStatus('scriptWriterStatus', 'Describe what it should do first', true);
+                return;
+            }
+            const button = document.getElementById('scriptWriterBtn');
+            button.disabled = true;
+            setStatus('scriptWriterStatus', 'Drafting…');
+            const result = await api('/scripts/draft', {
+                method: 'POST',
+                body: JSON.stringify({ intent }),
+            });
+            button.disabled = false;
+            if (!result || result.error) {
+                setStatus('scriptWriterStatus', (result && result.error) || 'Draft failed', true);
+                return;
+            }
+            setStatus('scriptWriterStatus', '');
+            document.getElementById('scriptDraftPanel').style.display = '';
+            document.getElementById('scriptDraftName').value = result.name || '';
+            document.getElementById('scriptDraftBody').value = result.body || '';
+        }
+
+        async function saveDraftedScript() {
+            const name = document.getElementById('scriptDraftName').value.trim();
+            const body = document.getElementById('scriptDraftBody').value;
+            if (!name || !body.trim()) {
+                setStatus('scriptDraftStatus', 'Name and body are required', true);
+                return;
+            }
+            setStatus('scriptDraftStatus', 'Saving…');
+            const result = await api('/scripts/save-draft', {
+                method: 'POST',
+                body: JSON.stringify({ name, body }),
+            });
+            if (!result || result.error) {
+                setStatus('scriptDraftStatus', (result && result.error) || 'Save failed', true);
+                return;
+            }
+            setStatus('scriptDraftStatus', '');
+            toast('Script saved and registered');
+            closeScriptWriter();
+            document.getElementById('scriptWriterPrompt').value = '';
+            reloadAll();
+        }
+
         // --- Unattended permissions ------------------------------------------
 
         function renderPolicyRules() {
@@ -981,22 +1326,25 @@
         // --- Bootstrap ------------------------------------------------------
 
         async function reloadAll() {
-            const [agentResult, scheduleResult, taskResult, ruleResult, approvalResult] = await Promise.all([
+            const [agentResult, scheduleResult, taskResult, ruleResult, approvalResult, scriptResult] = await Promise.all([
                 api('/agents?limit=200'),
                 api('/schedules'),
                 api('/tasks?limit=200'),
                 api('/policies/rules'),
                 api('/approvals/pending'),
+                api('/scripts'),
             ]);
             agents = (agentResult && agentResult.agents) || [];
             schedules = (scheduleResult && scheduleResult.schedules) || [];
             policyRules = (ruleResult && ruleResult.rules) || [];
+            scripts = (scriptResult && scriptResult.scripts) || [];
             approvals = (approvalResult && approvalResult.approvals) || [];
             tasksById = {};
             ((taskResult && taskResult.tasks) || []).forEach((task) => { tasksById[task.id] = task; });
             renderAgentList();
             renderAgentPicker();
             renderSchedules();
+            renderScripts();
             renderPolicyRules();
             renderApprovals();
         }

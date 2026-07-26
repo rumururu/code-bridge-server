@@ -26,7 +26,12 @@ from agent.agent_models import (
     DryRunRequest,
 )
 from approvals.approval_models import ApprovalDecisionCreate
-from agent.script_models import ScriptRegister, ScriptUpdate
+from agent.script_models import (
+    ScriptDraftRequest,
+    ScriptDraftSave,
+    ScriptRegister,
+    ScriptUpdate,
+)
 from policy.policy_models import PolicyRuleCreate
 
 from . import agents as agents_routes
@@ -207,6 +212,18 @@ async def list_scripts(limit: int = Query(default=100, ge=1, le=200)) -> dict[st
 @router.post("/scripts", response_model=None)
 async def register_script(body: ScriptRegister) -> dict[str, Any]:
     return await scripts_routes.register_script(body)
+
+
+@router.post("/scripts/draft", response_model=None)
+async def draft_script(body: ScriptDraftRequest) -> dict[str, Any]:
+    """Ask the LLM for a script. Returns text only — nothing is saved or run."""
+    return await scripts_routes.draft_script(body)
+
+
+@router.post("/scripts/save-draft", response_model=None)
+async def save_drafted_script(body: ScriptDraftSave) -> dict[str, Any]:
+    """Write the reviewed draft into the managed dir and register it."""
+    return await scripts_routes.save_drafted_script(body)
 
 
 @router.patch("/scripts/{script_id}", response_model=None)

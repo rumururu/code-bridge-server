@@ -285,3 +285,63 @@ class EscalationEvidenceTest(unittest.TestCase):
         )
         self.assertIn("exit_code: 4", evidence)
         self.assertIn("login button not found", evidence)
+
+
+class ScriptDraftingTest(unittest.TestCase):
+    """Drafting writes nothing and registers nothing until a human says so.
+
+    "Write me a script" must not be equivalent to "run whatever you just
+    wrote": the draft is text the caller reviews and can edit first.
+    """
+
+    def setUp(self) -> None:
+        from routes import scripts as scripts_routes
+
+        self.routes = scripts_routes
+
+    def test_code_fences_are_stripped(self):
+        # Models add ```bash fences even when told not to.
+        self.assertEqual(
+            self.routes._strip_code_fences("```bash\n#!/bin/bash\necho hi\n```"),
+            "#!/bin/bash\necho hi",
+        )
+
+    def test_unfenced_text_is_untouched(self):
+        self.assertEqual(
+            self.routes._strip_code_fences("#!/bin/bash\necho hi"), "#!/bin/bash\necho hi"
+        )
+
+    def test_slug_keeps_non_ascii_names_distinct(self):
+        # Stripping non-ASCII collapsed every Korean name onto the same slug.
+        first = self.routes._slugify("스몰뎁 사이클")
+        second = self.routes._slugify("나무트리 사이클")
+        self.assertNotEqual(first, second)
+        self.assertIn("스몰뎁", first)
+
+    def test_slug_cannot_escape_the_managed_directory(self):
+        slug = self.routes._slugify("../../etc/passwd")
+        self.assertNotIn("/", slug)
+
+    def test_blank_name_still_produces_a_filename(self):
+        self.assertEqual(self.routes._slugify("   "), "script")
+
+    def test_generated_scripts_do_not_share_the_server_scripts_dir(self):
+        # On a script install the server tree *is* ~/.code-bridge, and its
+        # scripts/ holds the server's own tooling. Writing drafts there mixes
+        # generated files with shipped code.
+        self.assertNotEqual(self.routes._MANAGED_SCRIPTS_DIR.name, "scripts")
+
+    def test_suggested_name_is_short_not_the_whole_intent(self):
+        name = self.routes._suggested_name(
+            "Take the android device serial as $1, check it is connected with adb and report"
+        )
+        self.assertLessEqual(len(name.split()), 5)
+        self.assertNotIn(",", name)
+
+    def test_suggested_name_handles_non_ascii(self):
+        self.assertTrue(
+            self.routes._suggested_name("스몰뎁 앱에서 대기 중인 테스트에 참여").startswith("스몰뎁")
+        )
+
+    def test_suggested_name_never_empty(self):
+        self.assertEqual(self.routes._suggested_name("!!!"), "script")

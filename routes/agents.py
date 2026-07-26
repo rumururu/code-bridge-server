@@ -146,11 +146,49 @@ def _require_agent(agent_id: str) -> dict[str, Any]:
     return agent
 
 
+def _with_script_names(flow: Any) -> Any:
+    """Annotate shell steps with the name of the script they run.
+
+    The stored definition only holds ``script_id``. Clients showing a workflow
+    would otherwise render "step 1" with no hint that it shells out, or print a
+    raw id at the user — neither says what is about to run on their machine.
+    """
+    if not isinstance(flow, list):
+        return flow
+    ids = {
+        step.get("script_id")
+        for step in flow
+        if isinstance(step, dict) and step.get("type") == "shell" and step.get("script_id")
+    }
+    if not ids:
+        return flow
+    from agent.script_store import get_script_store
+
+    store = get_script_store()
+    names: dict[str, dict[str, Any]] = {}
+    for script_id in ids:
+        script = store.get(str(script_id))
+        if script:
+            names[str(script_id)] = script
+    annotated = []
+    for step in flow:
+        if isinstance(step, dict) and step.get("type") == "shell":
+            script = names.get(str(step.get("script_id")))
+            step = {
+                **step,
+                "script_name": script["name"] if script else None,
+                "script_path": script["path"] if script else None,
+            }
+        annotated.append(step)
+    return annotated
+
+
 def _agent_with_next_fire(agent: dict[str, Any]) -> dict[str, Any]:
     next_fire = compute_next_fire_at(str(agent["id"]))
     activation = _store().get_agent_activation_summary(str(agent["id"]))
     return {
         **agent,
+        "flow_json": _with_script_names(agent.get("flow_json")),
         "next_fire_at": next_fire.isoformat() if next_fire else None,
         "activation": activation,
     }
