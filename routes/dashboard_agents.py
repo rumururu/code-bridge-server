@@ -92,6 +92,26 @@ async def builder_converse(body: BuilderTurn) -> Any:
     return await agents_routes.builder_converse(body)
 
 
+@router.post("/builder/converse/jobs", response_model=None)
+async def create_builder_converse_job(
+    body: BuilderTurn,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    """Start a turn that may outlast the synchronous window.
+
+    The Configurator regularly takes longer than the fast path allows, and
+    the synchronous route answers a timeout with a failure the user reads as
+    "it is broken". The app already polls this job; the dashboard had no
+    mirror for it, so the PC was the only place the builder appeared to fail.
+    """
+    return await agents_routes.create_builder_converse_job(body, background_tasks)
+
+
+@router.get("/builder/converse/jobs/{job_id}", response_model=None)
+async def get_builder_converse_job(job_id: str) -> dict[str, Any]:
+    return await agents_routes.get_builder_converse_job(job_id)
+
+
 @router.post("/builder/commit", response_model=None)
 async def builder_commit(body: BuilderCommitRequest) -> Any:
     """Persist the agent the builder conversation has been assembling."""

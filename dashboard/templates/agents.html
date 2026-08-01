@@ -202,20 +202,25 @@
         .roster-meta .ok { color: var(--link); }
 
         /* --- Create flow ---------------------------------------------------- */
-        .stepper { display: flex; gap: 0; margin: 0 0 20px; }
-        .stepper-node {
-            flex: 1 1 0; padding: 8px 0 0; border-top: 2px solid var(--seam);
-            font-family: var(--mono); font-size: 11px; letter-spacing: .08em;
-            text-transform: uppercase; color: var(--text-muted);
+        /* The definition and the conversation that shapes it sit side by side,
+           so a reply and what it changed are visible at the same time. */
+        .build-layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 420px;
+            gap: 16px;
+            padding: 16px 24px 48px;
+            align-items: start;
         }
-        .stepper-node[data-state="done"] { border-top-color: var(--link); color: var(--link); }
-        .stepper-node[data-state="now"] { border-top-color: var(--accent-color); color: var(--text-primary); font-weight: 650; }
-
-        .flow-step { display: none; }
-        .flow-step[data-active="1"] { display: block; }
-        .flow-q { font-size: 19px; font-weight: 640; margin: 0 0 4px; letter-spacing: -.01em; }
-        .flow-nav { display: flex; gap: 8px; align-items: center; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--border-color); }
-        .flow-nav .spacer { flex: 1; }
+        @media (max-width: 1040px) {
+            .build-layout { grid-template-columns: minmax(0, 1fr); }
+            .build-chat { order: -1; }
+        }
+        .build-chat { position: sticky; top: 72px; }
+        .build-chat-body { display: flex; flex-direction: column; gap: 10px; }
+        .build-chat .chat-log { flex: 1; min-height: 300px; max-height: 52vh; overflow-y: auto; }
+        .chat-compose { display: flex; flex-direction: column; gap: 8px; }
+        .chat-actions { display: flex; align-items: center; gap: 8px; }
+        .chat-actions .spacer { flex: 1; }
 
         .note {
             border-left: 2px solid var(--warning-color); background: var(--pulse-bg);
@@ -619,116 +624,89 @@
     </div>
 
     <!-- ================= CREATE / EDIT ================= -->
-    <div class="view view-single" id="viewCreate">
-        <div class="stepper" id="createStepper">
-            <div class="stepper-node" data-node="1">1 &nbsp;<span data-i18n="flow_purpose">Purpose</span></div>
-            <div class="stepper-node" data-node="2">2 &nbsp;<span data-i18n="flow_steps">Steps</span></div>
-            <div class="stepper-node" data-node="3">3 &nbsp;<span data-i18n="flow_review">Review</span></div>
-        </div>
+    <!-- ================= BUILD (conversation) ================= -->
+    <div class="view" id="viewCreate">
+        <div class="build-layout">
 
-        <div class="card">
-            <div class="card-header">
-                <h2 id="editorTitle">New agent</h2>
-                <span id="editorStatus" class="status"></span>
-            </div>
-            <div class="card-body">
+            <div class="card build-def">
+                <div class="card-header">
+                    <h2 id="editorTitle">New agent</h2>
+                    <span id="editorStatus" class="status"></span>
+                </div>
+                <div class="card-body">
+                    <p class="hint" data-i18n="hint_definition">This is the agent as it stands. Say what you want on the right and it fills in here; edit anything directly.</p>
 
-                <!-- 1 ---------------------------------------------------- -->
-                <div class="flow-step" id="flow1" data-active="1">
-                    <p class="flow-q" data-i18n="q_purpose">What is this agent for?</p>
-                    <p class="hint" data-i18n="hint_purpose">Name it after the job, not the tool. You can hand the whole thing to the Configurator instead &mdash; it drafts the steps from a sentence.</p>
-
-                    <div class="tabs" style="margin: 12px 0 14px;">
-                        <div class="tab active" id="tabEditor" onclick="showTab('editor')" data-i18n="tab_fill">Fill it in</div>
-                        <div class="tab" id="tabBuilder" onclick="showTab('builder')" data-i18n="tab_configurator">Let the Configurator draft it</div>
-                    </div>
-
-                    <div id="paneEditor">
-                        <input type="hidden" id="agentId">
-                        <div class="row">
-                            <div class="field">
-                                <label for="agentName" data-i18n="name">Name</label>
-                                <input id="agentName" data-i18n-ph="ph_agent_name" class="input" maxlength="80" placeholder="Nightly build check">
-                            </div>
-                            <div class="field">
-                                <label for="agentDescription" data-i18n="description">Description</label>
-                                <input id="agentDescription" data-i18n-ph="ph_agent_desc" class="input" placeholder="What this agent is for">
-                            </div>
+                    <input type="hidden" id="agentId">
+                    <div class="row">
+                        <div class="field">
+                            <label for="agentName" data-i18n="name">Name</label>
+                            <input id="agentName" class="input" maxlength="80" data-i18n-ph="ph_agent_name" placeholder="Nightly build check" oninput="markDefEdited()">
                         </div>
                         <div class="field">
-                            <label for="agentPrompt" data-i18n="system_prompt">System prompt</label>
-                            <textarea id="agentPrompt" data-i18n-ph="ph_prompt" class="input" rows="4" placeholder="You are ..."></textarea>
+                            <label for="agentDescription" data-i18n="description">Description</label>
+                            <input id="agentDescription" class="input" data-i18n-ph="ph_agent_desc" placeholder="What this agent is for" oninput="markDefEdited()">
                         </div>
-                        <details>
-                            <summary style="cursor:pointer; color: var(--text-secondary); font-size:13px; margin-bottom:8px;" data-i18n="model_settings">Model settings</summary>
-                            <div class="row">
-                                <div class="field">
-                                    <label for="agentProvider" data-i18n="provider">Provider</label>
-                                    <select id="agentProvider" class="input">
-                                        <option value="">(default)</option>
-                                        <option value="anthropic">anthropic</option>
-                                        <option value="openai">openai</option>
-                                        <option value="google">google</option>
-                                    </select>
-                                </div>
-                                <div class="field">
-                                    <label for="agentModel" data-i18n="model">Model</label>
-                                    <input id="agentModel" data-i18n-ph="ph_model" class="input" placeholder="model id (optional)">
-                                </div>
+                    </div>
+                    <div class="field">
+                        <label for="agentPrompt" data-i18n="system_prompt">System prompt</label>
+                        <textarea id="agentPrompt" class="input" rows="4" data-i18n-ph="ph_prompt" placeholder="You are ..." oninput="markDefEdited()"></textarea>
+                    </div>
+                    <details>
+                        <summary style="cursor:pointer; color: var(--text-secondary); font-size:13px; margin-bottom:8px;" data-i18n="model_settings">Model settings</summary>
+                        <div class="row">
+                            <div class="field">
+                                <label for="agentProvider" data-i18n="provider">Provider</label>
+                                <select id="agentProvider" class="input">
+                                    <option value="">(default)</option>
+                                    <option value="anthropic">anthropic</option>
+                                    <option value="openai">openai</option>
+                                    <option value="google">google</option>
+                                </select>
                             </div>
-                        </details>
-                    </div>
-
-                    <div id="paneBuilder" style="display:none;">
-                        <p class="hint" data-i18n="hint_builder">Same Configurator the app talks to. It drafts the agent for you; press Create agent when it says it is ready.</p>
-                        <div id="builderLog" class="chat-log"></div>
-                        <div class="row" style="margin-top:8px;">
-                            <input id="builderInput" data-i18n-ph="ph_builder" class="input" placeholder="e.g. Check my site every morning and report failures"
-                                   onkeydown="if(event.key==='Enter'){sendBuilderTurn();}">
-                            <button class="btn" style="flex:0 0 auto;" id="builderSendBtn" onclick="sendBuilderTurn()" data-i18n="send">Send</button>
-                            <button class="btn btn-secondary" style="flex:0 0 auto;" onclick="resetBuilder()" data-i18n="reset">Reset</button>
+                            <div class="field">
+                                <label for="agentModel" data-i18n="model">Model</label>
+                                <input id="agentModel" class="input" data-i18n-ph="ph_model" placeholder="model id (optional)">
+                            </div>
                         </div>
-                        <div class="actions">
-                            <button class="btn" id="builderCommitBtn" onclick="commitBuilderDraft()" style="display:none;" data-i18n="create_agent">Create agent</button>
-                            <span id="builderStatus" class="status"></span>
-                        </div>
-                    </div>
+                    </details>
 
-                    <div class="flow-nav">
-                        <span class="spacer"></span>
-                        <button class="btn" onclick="goFlow(2)" data-i18n="next_steps">Next: steps</button>
+                    <div class="card-header" style="padding-left:0; padding-right:0;">
+                        <h2 data-i18n="flow_steps">Steps</h2>
+                        <button class="btn btn-secondary btn-xs" onclick="addStep()" data-i18n="add_step">Add step</button>
                     </div>
-                </div>
-
-                <!-- 2 ---------------------------------------------------- -->
-                <div class="flow-step" id="flow2">
-                    <p class="flow-q" data-i18n="q_steps">What should it do, in order?</p>
-                    <p class="hint"><span data-i18n="hint_steps_1">Steps run top to bottom. A </span><strong>shell</strong><span data-i18n="hint_steps_2"> step runs a registered script &mdash; no model, no tokens, no approval prompt. An agent with no steps has nothing to execute when a schedule fires it.</span></p>
                     <div id="stepScriptWarning"></div>
-                    <div class="actions" style="margin-top:0;">
-                        <button class="btn btn-secondary" onclick="addStep()" data-i18n="add_step">Add step</button>
-                    </div>
                     <div id="stepList"></div>
-                    <div class="flow-nav">
-                        <button class="btn btn-secondary" onclick="goFlow(1)" data-i18n="back">Back</button>
-                        <span class="spacer"></span>
-                        <button class="btn" onclick="goFlow(3)" data-i18n="next_review">Next: review</button>
+
+                    <div id="reviewSummary" style="margin-top:14px;"></div>
+
+                    <div class="actions">
+                        <button class="btn" id="saveBtn" onclick="saveAgent()" data-i18n="create_agent">Create agent</button>
                     </div>
                 </div>
-
-                <!-- 3 ---------------------------------------------------- -->
-                <div class="flow-step" id="flow3">
-                    <p class="flow-q" data-i18n="q_review">Ready to create?</p>
-                    <p class="hint" data-i18n="hint_review">This is what will exist after you press create, and what will still be missing before it can run on its own.</p>
-                    <div id="reviewSummary"></div>
-                    <div class="flow-nav">
-                        <button class="btn btn-secondary" onclick="goFlow(2)" data-i18n="back">Back</button>
-                        <span class="spacer"></span>
-                        <button class="btn" id="saveBtn" onclick="saveAgent()">Create agent</button>
-                    </div>
-                </div>
-
             </div>
+
+            <div class="card build-chat">
+                <div class="card-header">
+                    <h2 data-i18n="configurator">Configurator</h2>
+                    <span id="builderStatus" class="status"></span>
+                </div>
+                <div class="card-body build-chat-body">
+                    <div id="builderLog" class="chat-log"></div>
+                    <div id="builderApply"></div>
+                    <div class="chat-compose">
+                        <textarea id="builderInput" class="input" rows="2"
+                                  data-i18n-ph="ph_builder"
+                                  placeholder="e.g. Check my site every morning and report failures"
+                                  onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();sendBuilderTurn();}"></textarea>
+                        <div class="chat-actions">
+                            <button class="btn btn-secondary btn-xs" onclick="resetBuilder()" data-i18n="reset">Reset</button>
+                            <span class="spacer"></span>
+                            <button class="btn" id="builderSendBtn" onclick="sendBuilderTurn()" data-i18n="send">Send</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
         </div>
     </div>
 
@@ -977,6 +955,20 @@
                 op_file_read: 'file.read — reading files',
                 op_browser: 'browser.control — browser automation',
                 op_device: 'device.control — connected phones',
+                configurator: 'Configurator',
+                hint_definition: 'This is the agent as it stands. Say what you want on the right and it fills in here; edit anything directly.',
+                chat_opening: 'What should this agent do? One sentence is enough — I will draft the name, the prompt and the steps with you.',
+                apply_offer: 'This reply would change:',
+                apply_now: 'Apply',
+                kept_edits: 'Fields you edited by hand are left alone.',
+                f_agentName: 'name', f_agentDescription: 'description',
+                f_agentPrompt: 'system prompt', f_agentModel: 'model',
+                edit_agent: 'Edit agent', no_reply: '(no reply)',
+                saving: 'Saving…', saved: 'Saved', save_failed: 'Save failed',
+                turn_failed: 'The turn failed', no_steps_yet: 'No steps yet.',
+                turn_timed_out: 'This is taking too long. Try again.',
+                name_required: 'Name is required', thinking: 'Configurator is thinking…',
+                agent_created: 'Agent created', agent_updated: 'Agent updated',
             },
             ko: {
                 nav_dashboard: '대시보드', nav_agents: '에이전트', nav_settings: '설정',
@@ -1057,6 +1049,20 @@
                 op_file_read: 'file.read — 파일 읽기',
                 op_browser: 'browser.control — 브라우저 자동화',
                 op_device: 'device.control — 연결된 폰',
+                configurator: 'Configurator',
+                hint_definition: '지금까지의 에이전트입니다. 오른쪽에 원하는 바를 말하면 여기 채워집니다. 직접 고쳐도 됩니다.',
+                chat_opening: '어떤 일을 맡기고 싶으신가요? 한 문장으로 말씀하시면 이름·프롬프트·단계까지 같이 잡아 드립니다.',
+                apply_offer: '이번 답변이 바꾸려는 것:',
+                apply_now: '반영하기',
+                kept_edits: '직접 고친 항목은 대화가 덮어쓰지 않습니다.',
+                f_agentName: '이름', f_agentDescription: '설명',
+                f_agentPrompt: '시스템 프롬프트', f_agentModel: '모델',
+                edit_agent: '에이전트 수정', no_reply: '(응답 없음)',
+                saving: '저장 중…', saved: '저장됨', save_failed: '저장 실패',
+                turn_failed: '요청 처리에 실패했습니다', no_steps_yet: '아직 단계가 없습니다.',
+                turn_timed_out: '응답이 너무 오래 걸립니다. 다시 시도해 주세요.',
+                name_required: '이름을 입력하세요', thinking: 'Configurator가 생각 중…',
+                agent_created: '에이전트를 만들었습니다', agent_updated: '에이전트를 수정했습니다',
                 ph_agent_name: '야간 빌드 점검',
                 ph_agent_desc: '이 에이전트가 무엇을 위한 것인지',
                 ph_prompt: '너는 ...',
@@ -1117,7 +1123,9 @@
             renderRunList();
             const agent = agents.find((candidate) => candidate.id === selectedAgentId);
             if (agent) renderDetail(agent);
-            if (currentView === 'create') goFlow(flowStep);
+            const saveBtn = document.getElementById('saveBtn');
+            if (saveBtn) saveBtn.textContent = t(selectedAgentId ? 'save_changes' : 'create_agent');
+            if (currentView === 'create') refreshBuildPanels();
         }
 
         function applyTranslations() {
@@ -1194,12 +1202,80 @@
             return div.innerHTML;
         }
 
-        function showTab(which) {
-            const editor = which === 'editor';
-            document.getElementById('paneEditor').style.display = editor ? '' : 'none';
-            document.getElementById('paneBuilder').style.display = editor ? 'none' : '';
-            document.getElementById('tabEditor').className = 'tab' + (editor ? ' active' : '');
-            document.getElementById('tabBuilder').className = 'tab' + (editor ? '' : ' active');
+        // The definition on the left and the conversation on the right are one
+        // thing being built, not two ways of building it. A turn proposes; the
+        // form is where it lands. Anything typed by hand is never overwritten
+        // by a later turn — losing an edit you just made to a reply you did not
+        // ask for is how a chat-driven form stops being trustworthy.
+        const DEF_FIELDS = ['agentName', 'agentDescription', 'agentPrompt', 'agentModel'];
+        let handEdited = new Set();
+        let pendingDraft = null;
+
+        function markDefEdited(event) {
+            const id = (event && event.target && event.target.id) || (window.event && window.event.target && window.event.target.id);
+            if (id) handEdited.add(id);
+        }
+
+        function draftToFields(draft) {
+            return {
+                agentName: draft.name || '',
+                agentDescription: draft.description || '',
+                agentPrompt: draft.system_prompt || '',
+                agentModel: draft.model || '',
+            };
+        }
+
+        // What a turn would change, ignoring fields the user has taken over.
+        function draftDelta(draft) {
+            if (!draft) return { fields: [], stepCount: null };
+            const wanted = draftToFields(draft);
+            const fields = DEF_FIELDS.filter((id) => {
+                if (handEdited.has(id)) return false;
+                const current = document.getElementById(id).value || '';
+                return (wanted[id] || '') !== current && (wanted[id] || '') !== '';
+            });
+            const flow = Array.isArray(draft.flow) ? draft.flow : null;
+            const stepCount = flow && JSON.stringify(flow) !== JSON.stringify(steps) ? flow.length : null;
+            return { fields, stepCount };
+        }
+
+        function applyDraft(draft) {
+            if (!draft) return;
+            const wanted = draftToFields(draft);
+            DEF_FIELDS.forEach((id) => {
+                if (handEdited.has(id)) return;
+                if (wanted[id]) document.getElementById(id).value = wanted[id];
+            });
+            if (draft.provider_id) document.getElementById('agentProvider').value = draft.provider_id;
+            if (Array.isArray(draft.flow) && draft.flow.length) {
+                steps = draft.flow.map((step) => ({ ...step }));
+                renderSteps();
+            }
+            renderStepScriptWarning();
+            renderReview();
+            renderBuilderApply();
+        }
+
+        // A turn that changed nothing needs no banner; one that did says what,
+        // and applying is a decision rather than something that already happened
+        // while you were reading the reply.
+        function renderBuilderApply() {
+            const host = document.getElementById('builderApply');
+            if (!host) return;
+            const delta = draftDelta(pendingDraft);
+            const held = DEF_FIELDS.filter((id) => handEdited.has(id));
+            if (!delta.fields.length && delta.stepCount === null) {
+                host.innerHTML = held.length
+                    ? `<div class="note">${escapeHtml(t('kept_edits'))}</div>`
+                    : '';
+                return;
+            }
+            const bits = delta.fields.map((id) => t('f_' + id));
+            if (delta.stepCount !== null) bits.push(`${t('flow_steps')} ${delta.stepCount}`);
+            host.innerHTML = `<div class="note">
+                ${escapeHtml(t('apply_offer'))} <strong>${escapeHtml(bits.join(', '))}</strong>
+                <button type="button" class="linklike" onclick="applyDraft(pendingDraft)">${escapeHtml(t('apply_now'))}</button>
+            </div>`;
         }
 
         // --- Views ----------------------------------------------------------
@@ -1210,7 +1286,6 @@
         // form already on screen — looked like it did nothing.
 
         let currentView = 'manage';
-        let flowStep = 1;
 
         function setView(name, here) {
             currentView = name;
@@ -1231,8 +1306,9 @@
 
         function goCreate() {
             newAgent();
-            goFlow(1);
-            setView('create', 'New agent');
+            resetBuilder();
+            setView('create', t('new_agent'));
+            refreshBuildPanels();
             const name = document.getElementById('agentName');
             if (name) name.focus();
         }
@@ -1247,20 +1323,18 @@
 
         function editSelectedAgent() {
             if (!selectedAgentId) return;
-            goFlow(1);
-            setView('create', document.getElementById('agentName').value || 'Edit agent');
+            // Editing starts from a clean conversation: the last session was
+            // about a different agent, and carrying it over would let a stale
+            // draft overwrite this one.
+            resetBuilder();
+            setView('create', document.getElementById('agentName').value || t('edit_agent'));
+            refreshBuildPanels();
         }
 
-        function goFlow(step) {
-            flowStep = step;
-            [1, 2, 3].forEach((n) => {
-                const pane = document.getElementById('flow' + n);
-                if (pane) pane.dataset.active = n === step ? '1' : '0';
-                const node = document.querySelector(`.stepper-node[data-node="${n}"]`);
-                if (node) node.dataset.state = n < step ? 'done' : (n === step ? 'now' : '');
-            });
-            if (step === 2) renderStepScriptWarning();
-            if (step === 3) renderReview();
+        function refreshBuildPanels() {
+            renderStepScriptWarning();
+            renderReview();
+            renderBuilderApply();
         }
 
         // --- Readiness ------------------------------------------------------
@@ -1491,7 +1565,7 @@
             document.getElementById('agentProvider').value = '';
             document.getElementById('editorTitle').textContent = t('new_agent');
             setStatus('editorStatus', '');
-            document.getElementById('saveBtn').textContent = 'Create agent';
+            document.getElementById('saveBtn').textContent = t('create_agent');
             renderSteps();
             renderAgentList();
         }
@@ -1513,7 +1587,7 @@
             steps = Array.isArray(agent.flow_json) ? agent.flow_json.map((step) => ({ ...step })) : [];
             document.getElementById('editorTitle').textContent = agent.name || agent.id;
             setStatus('editorStatus', '');
-            document.getElementById('saveBtn').textContent = 'Save changes';
+            document.getElementById('saveBtn').textContent = t('save_changes');
             renderSteps();
             renderAgentList();
             renderRunList();
@@ -1613,7 +1687,7 @@
         function renderSteps() {
             const host = document.getElementById('stepList');
             if (!steps.length) {
-                host.innerHTML = '<div class="empty">No steps yet.</div>';
+                host.innerHTML = `<div class="empty">${escapeHtml(t('no_steps_yet'))}</div>`;
                 return;
             }
             host.innerHTML = steps.map((step, index) => {
@@ -1762,7 +1836,7 @@
         async function saveAgent() {
             const name = document.getElementById('agentName').value.trim();
             if (!name) {
-                setStatus('editorStatus', 'Name is required', true);
+                setStatus('editorStatus', t('name_required'), true);
                 return;
             }
             const id = document.getElementById('agentId').value.trim();
@@ -1774,17 +1848,41 @@
                 model: document.getElementById('agentModel').value.trim() || null,
                 flow_json: collectSteps(),
             };
-            setStatus('editorStatus', 'Saving…');
-            const result = id
-                ? await api(`/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) })
-                : await api('/agents', { method: 'POST', body: JSON.stringify(body) });
+            setStatus('editorStatus', t('saving'));
+
+            // A new agent that came out of a conversation goes through the
+            // builder's commit, which also seeds its memory and can create the
+            // task the draft asked for — POST /agents does neither. The form
+            // still wins on every field it shows, so an edit made by hand is
+            // not undone by committing the draft it was edited away from.
+            let result;
+            if (!id && builderSession && builderDraft) {
+                const merged = {
+                    ...builderDraft,
+                    name: body.name,
+                    description: body.description,
+                    system_prompt: body.system_prompt,
+                    provider_id: body.provider_id,
+                    model: body.model,
+                    flow: body.flow_json,
+                };
+                result = await api('/builder/commit', {
+                    method: 'POST',
+                    body: JSON.stringify({ session_id: builderSession, draft: merged }),
+                });
+            } else {
+                result = id
+                    ? await api(`/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) })
+                    : await api('/agents', { method: 'POST', body: JSON.stringify(body) });
+            }
             if (!result || result.error) {
-                setStatus('editorStatus', (result && result.error) || 'Save failed', true);
+                setStatus('editorStatus', (result && result.error) || t('save_failed'), true);
                 return;
             }
-            setStatus('editorStatus', 'Saved');
-            toast(id ? 'Agent updated' : 'Agent created');
+            setStatus('editorStatus', t('saved'));
+            toast(id ? t('agent_updated') : t('agent_created'));
             const saved = result.agent || result;
+            resetBuilder();
             await reloadAll();
             if (saved && saved.id) await selectAgent(saved.id);
             // Creating is done; the roster is where you see what is still missing.
@@ -1818,9 +1916,35 @@
         function resetBuilder() {
             builderSession = null;
             builderDraft = null;
-            document.getElementById('builderLog').innerHTML = '';
-            document.getElementById('builderCommitBtn').style.display = 'none';
+            pendingDraft = null;
+            handEdited = new Set();
+            const log = document.getElementById('builderLog');
+            log.innerHTML = `<div class="chat-line builder"><span class="who">configurator</span>${escapeHtml(t('chat_opening'))}</div>`;
+            const apply = document.getElementById('builderApply');
+            if (apply) apply.innerHTML = '';
             setStatus('builderStatus', '');
+        }
+
+        const BUILDER_POLL_MS = 2000;
+        const BUILDER_POLL_LIMIT = 90;  // ~3 minutes, then say so rather than hang.
+
+        async function runBuilderTurn(body) {
+            const started = await api('/builder/converse/jobs', {
+                method: 'POST', body: JSON.stringify(body),
+            });
+            if (!started || started.error) return started;
+            if (!started.job_id) return started;  // Server answered inline.
+
+            for (let attempt = 0; attempt < BUILDER_POLL_LIMIT; attempt += 1) {
+                if (started.status === 'completed' || started.status === 'failed') break;
+                await new Promise((resolve) => setTimeout(resolve, BUILDER_POLL_MS));
+                const polled = await api(`/builder/converse/jobs/${encodeURIComponent(started.job_id)}`);
+                if (!polled || polled.error) return polled;
+                if (polled.status === 'completed') return polled;
+                if (polled.status === 'failed') return { error: polled.error || t('turn_failed') };
+                setStatus('builderStatus', `${t('thinking')} ${(attempt + 1) * 2}s`);
+            }
+            return { error: t('turn_timed_out') };
         }
 
         async function sendBuilderTurn() {
@@ -1832,13 +1956,17 @@
 
             const button = document.getElementById('builderSendBtn');
             button.disabled = true;
-            setStatus('builderStatus', 'Configurator is thinking…');
+            setStatus('builderStatus', t('thinking'));
 
             const body = { user_message: message };
             if (builderSession) body.session_id = builderSession;
             if (builderDraft) body.draft = builderDraft;
 
-            const result = await api('/builder/converse', { method: 'POST', body: JSON.stringify(body) });
+            // The Configurator regularly runs past the synchronous window, and
+            // that route reports the timeout as a failed turn — which reads as
+            // a broken feature rather than a slow one. The app already polls a
+            // job for exactly this reason; do the same here.
+            const result = await runBuilderTurn(body);
             button.disabled = false;
 
             if (!result || result.error) {
@@ -1849,28 +1977,11 @@
             setStatus('builderStatus', '');
             builderSession = result.session_id || builderSession;
             builderDraft = result.updated_draft || builderDraft;
-            appendBuilderLine('builder', result.assistant_message || '(no reply)');
-            document.getElementById('builderCommitBtn').style.display =
-                result.is_ready_to_commit ? 'inline-block' : 'none';
-        }
-
-        async function commitBuilderDraft() {
-            if (!builderSession || !builderDraft) return;
-            setStatus('builderStatus', 'Creating…');
-            const result = await api('/builder/commit', {
-                method: 'POST',
-                body: JSON.stringify({ session_id: builderSession, draft: builderDraft }),
-            });
-            if (!result || result.error) {
-                setStatus('builderStatus', (result && result.error) || 'Commit failed', true);
-                return;
-            }
-            setStatus('builderStatus', '');
-            toast('Agent created');
-            resetBuilder();
-            await reloadAll();
-            const created = result.agent;
-            if (created && created.id) await selectAgent(created.id);
+            pendingDraft = result.updated_draft || pendingDraft;
+            appendBuilderLine('builder', result.assistant_message || t('no_reply'));
+            // Fields the user has not touched follow the conversation on their
+            // own; the rest is offered rather than taken.
+            applyDraft(pendingDraft);
         }
 
         // --- Schedules ------------------------------------------------------
@@ -2483,7 +2594,6 @@
         applyTranslations();
         updateLangButtons();
         newAgent();
-        goFlow(1);
         setView('manage');
         reloadAll();
     </script>
