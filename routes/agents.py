@@ -183,13 +183,43 @@ def _with_script_names(flow: Any) -> Any:
     return annotated
 
 
+_ACTIVE_RUN_STATUSES = ("queued", "starting", "running")
+
+
+def _agent_run_activity(agent_id: str) -> dict[str, Any]:
+    """When this agent last ran, and whether it is running now.
+
+    The client renders "no runs yet" from ``last_fire_at``, so an agent that
+    has run sixty times still reads as never-used until this is filled in —
+    the run history existed, it just never reached the phone.
+    """
+    store = _store()
+    try:
+        runs = store.list_runs(agent_id=agent_id, limit=50)
+    except Exception:
+        return {"last_fire_at": None, "active_run_count": 0}
+
+    active = sum(1 for run in runs if run.get("status") in _ACTIVE_RUN_STATUSES)
+    stamps = [
+        str(run.get("started_at") or run.get("created_at") or "")
+        for run in runs
+        if run.get("started_at") or run.get("created_at")
+    ]
+    return {
+        "last_fire_at": max(stamps) if stamps else None,
+        "active_run_count": active,
+    }
+
+
 def _agent_with_next_fire(agent: dict[str, Any]) -> dict[str, Any]:
-    next_fire = compute_next_fire_at(str(agent["id"]))
-    activation = _store().get_agent_activation_summary(str(agent["id"]))
+    agent_id = str(agent["id"])
+    next_fire = compute_next_fire_at(agent_id)
+    activation = _store().get_agent_activation_summary(agent_id)
     return {
         **agent,
         "flow_json": _with_script_names(agent.get("flow_json")),
         "next_fire_at": next_fire.isoformat() if next_fire else None,
+        **_agent_run_activity(agent_id),
         "activation": activation,
     }
 

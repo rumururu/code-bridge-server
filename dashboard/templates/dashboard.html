@@ -2279,7 +2279,7 @@
             updateLangButtons();
             // Re-render dynamic content
             if (dashboardData) {
-                renderClients(dashboardData.clients || []);
+                renderClients((dashboardData.pairing || {}).clients || []);
             }
         }
 
@@ -2771,7 +2771,10 @@
             if (!dashboardData) return;
             const server = dashboardData.server || {};
             const tunnel = dashboardData.tunnel || {};
-            const clients = dashboardData.clients || [];
+            // Paired devices live under `pairing`, not at the top level —
+            // reading the wrong key made the spine claim "none paired" with a
+            // phone connected.
+            const clients = (dashboardData.pairing || {}).clients || [];
 
             const set = (id, text, state) => {
                 const el = document.getElementById(id);
