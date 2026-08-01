@@ -72,7 +72,6 @@ from agent.agent_store import (
 from agent.browser_action_adapter import get_browser_runtime_readiness
 from agent.browser_session_store import get_browser_session_store
 from agent.capability_registry import refresh_capability_registry
-from agent.prompt_composer import compose_system_prompt
 from agent.schedule_store import compute_next_fire_at, get_schedule_store
 from agent.scheduler import get_scheduler
 from agent.task_orchestrator import (
@@ -1191,27 +1190,26 @@ async def delete_agent_memory(
 
 
 @router.get(
-    "/agents/{agent_id}/preview-prompt",
+    "/agents/{agent_id}/schedules",
     dependencies=[Depends(verify_api_key)],
     response_model=None,
 )
-async def preview_agent_prompt(
-    agent_id: str,
-    task_goal: str | None = None,
-) -> dict[str, Any]:
-    agent = _require_agent(agent_id)
+async def list_agent_schedules(agent_id: str) -> dict[str, Any]:
+    """Schedules that fire this agent.
+
+    A schedule hangs off a task, and a task names its agent — three hops the
+    client should not have to make to answer "when does this run".
+    """
+    _require_agent(agent_id)
     store = _store()
-    memories = store.list_memories(agent_id, limit=100) or []
-    workflow_steps = agent.get("flow_json") or []
-    memory_count = store.count_memories(agent_id)
-    return {
-        "composed_prompt": compose_system_prompt(
-            {**agent, "memories": memories},
-            task_goal=task_goal,
-        ),
-        "memory_count": memory_count if memory_count is not None else len(memories),
-        "workflow_steps": len(workflow_steps) if isinstance(workflow_steps, list) else 0,
-    }
+    schedule_store = get_schedule_store()
+    schedules: list[dict[str, Any]] = []
+    for task in store.list_tasks(limit=200):
+        if task.get("assigned_agent_id") != agent_id:
+            continue
+        for schedule in schedule_store.list_for_task(str(task["id"])):
+            schedules.append({**schedule, "task_title": task.get("title")})
+    return {"schedules": schedules}
 
 
 @router.post("/runs", dependencies=[Depends(verify_api_key)], response_model=None)

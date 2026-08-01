@@ -5,32 +5,62 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Code Bridge — Agents</title>
     <style>
+        /* Same instrument-panel tokens as the dashboard. These two pages are
+           one console; the Agents page was still on stock bootstrap blue,
+           which made it read as a different product. */
         :root {
-            --bg-primary: #f5f5f5;
-            --bg-secondary: #ffffff;
-            --bg-card: #ffffff;
-            --text-primary: #333333;
-            --text-secondary: #666666;
-            --text-muted: #888888;
-            --border-color: #e0e0e0;
-            --accent-color: #007bff;
-            --accent-hover: #0056b3;
-            --success-color: #28a745;
-            --warning-color: #ffc107;
-            --danger-color: #dc3545;
-            --shadow: 0 2px 8px rgba(0,0,0,0.1);
+            color-scheme: light dark;
+
+            --ink: #F1F3F5;
+            --slate: #FFFFFF;
+            --seam: #DBE0E5;
+            --seam-soft: #E8ECEF;
+            --wire: #12181E;
+            --wire-dim: #5C6873;
+            --wire-faint: #8A949E;
+
+            --link: #10896C;
+            --pulse: #B26A00;
+            --fault: #C63238;
+            --signal-bg: rgba(16, 137, 108, 0.10);
+            --fault-bg: rgba(198, 50, 56, 0.09);
+            --pulse-bg: rgba(178, 106, 0, 0.10);
+
+            --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+            --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Apple SD Gothic Neo", sans-serif;
+
+            --bg-primary: var(--ink);
+            --bg-secondary: var(--slate);
+            --bg-card: var(--slate);
+            --text-primary: var(--wire);
+            --text-secondary: var(--wire-dim);
+            --text-muted: var(--wire-faint);
+            --border-color: var(--seam);
+            --accent-color: var(--link);
+            --accent-hover: #0B6B54;
+            --success-color: var(--link);
+            --warning-color: var(--pulse);
+            --danger-color: var(--fault);
+            --shadow: none;
         }
 
         @media (prefers-color-scheme: dark) {
             :root {
-                --bg-primary: #1a1a1a;
-                --bg-secondary: #2d2d2d;
-                --bg-card: #2d2d2d;
-                --text-primary: #e0e0e0;
-                --text-secondary: #b0b0b0;
-                --text-muted: #808080;
-                --border-color: #404040;
-                --shadow: 0 2px 8px rgba(0,0,0,0.3);
+                --ink: #0E1216;
+                --slate: #161C22;
+                --seam: #242D36;
+                --seam-soft: #1D242B;
+                --wire: #E6EAEE;
+                --wire-dim: #96A1AC;
+                --wire-faint: #6B7681;
+
+                --link: #3FBE9A;
+                --pulse: #D9922B;
+                --fault: #E4646A;
+                --signal-bg: rgba(63, 190, 154, 0.12);
+                --fault-bg: rgba(228, 100, 106, 0.12);
+                --pulse-bg: rgba(217, 146, 43, 0.12);
+                --accent-hover: #5FD3B2;
             }
         }
 
@@ -106,6 +136,112 @@
         @media (max-width: 900px) {
             .layout { grid-template-columns: minmax(0, 1fr); }
         }
+
+        /* --- Views ---------------------------------------------------------
+           Manage, create and setup are separate places, not panels stacked on
+           one scroll. Creating an agent is something you do once; watching one
+           is something you do every day. */
+        .view { display: none; }
+        .view[data-active="1"] { display: block; }
+        .view-single { padding: 16px 24px 48px; max-width: 880px; }
+
+        .crumb {
+            display: flex; align-items: center; gap: 10px;
+            padding: 14px 24px 0;
+            font-family: var(--mono); font-size: 12px;
+            letter-spacing: .08em; text-transform: uppercase; color: var(--text-muted);
+        }
+        .crumb button {
+            background: none; border: 0; padding: 0; cursor: pointer;
+            font: inherit; color: var(--accent-color); letter-spacing: inherit;
+        }
+        .crumb button:hover { text-decoration: underline; }
+
+        /* --- Readiness rail (signature) -------------------------------------
+           Four things decide whether an unattended agent does anything at all:
+           it has steps, its shell steps point at registered scripts, something
+           fires it, and it may act without a human to approve. Miss any one and
+           the agent still looks fine and silently does nothing — which is
+           exactly the failure this console kept hiding. So the chain is the
+           thing you see first, and each dim segment is a link to the fix. */
+        .rail { display: flex; gap: 3px; margin: 6px 0 0; }
+        .rail-seg {
+            flex: 1 1 0; height: 3px; border-radius: 2px;
+            background: var(--seam); position: relative;
+        }
+        .rail-seg[data-on="1"] { background: var(--link); }
+        .rail-seg[data-on="0"] { background: var(--wire-faint); opacity: .35; }
+
+        .rail-full { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 0; }
+        .rail-chip {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 5px 10px; border-radius: 999px;
+            border: 1px solid var(--border-color);
+            background: transparent; cursor: default;
+            font-family: var(--mono); font-size: 11.5px; letter-spacing: .04em;
+            color: var(--text-muted);
+        }
+        .rail-chip[data-on="1"] { color: var(--link); border-color: var(--link); background: var(--signal-bg); }
+        .rail-chip[data-on="0"] { cursor: pointer; color: var(--text-secondary); border-style: dashed; }
+        .rail-chip[data-on="0"]:hover { color: var(--warning-color); border-color: var(--warning-color); background: var(--pulse-bg); }
+        .rail-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: 0 0 auto; }
+
+        /* --- Roster --------------------------------------------------------- */
+        .roster-item {
+            padding: 11px 12px; border-radius: 8px; cursor: pointer;
+            border: 1px solid transparent;
+        }
+        .roster-item:hover { background: var(--seam-soft); }
+        .roster-item[data-selected="1"] { border-color: var(--accent-color); background: var(--signal-bg); }
+        .roster-name { font-weight: 620; font-size: 14px; }
+        .roster-meta {
+            font-family: var(--mono); font-size: 11.5px; color: var(--text-muted);
+            margin-top: 2px; display: flex; gap: 8px; flex-wrap: wrap;
+        }
+        .roster-meta .fault { color: var(--danger-color); }
+        .roster-meta .ok { color: var(--link); }
+
+        /* --- Create flow ---------------------------------------------------- */
+        .stepper { display: flex; gap: 0; margin: 0 0 20px; }
+        .stepper-node {
+            flex: 1 1 0; padding: 8px 0 0; border-top: 2px solid var(--seam);
+            font-family: var(--mono); font-size: 11px; letter-spacing: .08em;
+            text-transform: uppercase; color: var(--text-muted);
+        }
+        .stepper-node[data-state="done"] { border-top-color: var(--link); color: var(--link); }
+        .stepper-node[data-state="now"] { border-top-color: var(--accent-color); color: var(--text-primary); font-weight: 650; }
+
+        .flow-step { display: none; }
+        .flow-step[data-active="1"] { display: block; }
+        .flow-q { font-size: 19px; font-weight: 640; margin: 0 0 4px; letter-spacing: -.01em; }
+        .flow-nav { display: flex; gap: 8px; align-items: center; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--border-color); }
+        .flow-nav .spacer { flex: 1; }
+
+        .note {
+            border-left: 2px solid var(--warning-color); background: var(--pulse-bg);
+            padding: 9px 12px; border-radius: 0 6px 6px 0; margin: 10px 0;
+            font-size: 13px; color: var(--text-secondary);
+        }
+        .note.blocking { border-left-color: var(--danger-color); background: var(--fault-bg); }
+        .note a, .note button.linklike {
+            color: var(--accent-color); background: none; border: 0; padding: 0;
+            font: inherit; cursor: pointer; text-decoration: underline;
+        }
+
+        .banner {
+            margin: 14px 24px 0; padding: 11px 14px; border-radius: 8px;
+            border: 1px solid var(--warning-color); background: var(--pulse-bg);
+            display: flex; align-items: center; gap: 12px; font-size: 14px;
+        }
+        .banner .spacer { flex: 1; }
+
+        .lang-selector { display: inline-flex; gap: 2px; margin-right: 6px; }
+        .lang-btn {
+            padding: 4px 10px; border: 0; background: transparent; cursor: pointer;
+            color: var(--text-muted); font-size: 12px; font-weight: 550; border-radius: 4px;
+        }
+        .lang-btn:hover { color: var(--text-primary); }
+        .lang-btn.active { color: var(--text-primary); background: var(--seam-soft); }
 
         .card {
             background: var(--bg-card);
@@ -227,6 +363,20 @@
         }
         table.sched th { font-size: 11px; text-transform: uppercase; color: var(--text-muted); font-weight: 600; }
 
+        /* The interval is editable in place; the dotted underline is what says
+           so, since an unmarked cell reads as static text. */
+        .sched-repeat { cursor: pointer; border-bottom: 1px dotted var(--text-muted); }
+        .sched-repeat:hover { color: var(--accent, inherit); border-bottom-style: solid; }
+        .sched-repeat-input {
+            width: 68px;
+            padding: 2px 4px;
+            font: inherit;
+            color: inherit;
+            background: var(--bg-elevated, transparent);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+        }
+
         .empty { color: var(--text-muted); font-size: 14px; padding: 8px 0; }
         .status { font-size: 12px; color: var(--text-secondary); align-self: center; }
         .status.error { color: var(--danger-color); }
@@ -346,298 +496,380 @@
                 <h1>Code Bridge</h1>
             </a>
             <nav class="nav" aria-label="Sections">
-                <a href="/dashboard">Dashboard</a>
-                <a href="/agents" aria-current="page">Agents</a>
-                <a href="/settings">Settings</a>
+                <a href="/dashboard" data-i18n="nav_dashboard">Dashboard</a>
+                <a href="/agents" aria-current="page" data-i18n="nav_agents">Agents</a>
+                <a href="/settings" data-i18n="nav_settings">Settings</a>
             </nav>
         </div>
         <div class="header-actions">
-            <button class="btn btn-secondary" onclick="reloadAll()">Refresh</button>
-            <button class="btn" onclick="newAgent()">New agent</button>
+            <div class="lang-selector">
+                <button class="lang-btn active" data-lang="en" onclick="setLanguage('en')">EN</button>
+                <button class="lang-btn" data-lang="ko" onclick="setLanguage('ko')">한국어</button>
+            </div>
+            <button class="btn btn-secondary" onclick="goSetup()" data-i18n="setup_link">Scripts &amp; permissions</button>
+            <button class="btn btn-secondary" onclick="reloadAll()" data-i18n="refresh">Refresh</button>
+            <button class="btn" onclick="goCreate()" data-i18n="new_agent">New agent</button>
         </div>
     </div>
 
-    <div class="layout">
-        <div>
-            <div class="card">
-                <div class="card-header"><h2>Agents</h2><span id="agentCount" class="status"></span></div>
-                <div class="card-body">
-                    <div id="agentList"><div class="empty">Loading…</div></div>
+    <div class="crumb" id="crumb" style="display:none;">
+        <button type="button" onclick="goManage()" data-i18n="back_all">&larr; All agents</button>
+        <span id="crumbHere"></span>
+    </div>
+
+    <div class="banner" id="approvalBanner" style="display:none;">
+        <span id="approvalBannerText"></span>
+        <span class="spacer"></span>
+        <button class="btn btn-secondary btn-xs" onclick="goSetup('approvals')" data-i18n="review">Review</button>
+    </div>
+
+    <!-- ================= MANAGE ================= -->
+    <div class="view" id="viewManage" data-active="1">
+        <div class="layout">
+            <div>
+                <div class="card">
+                    <div class="card-header"><h2 data-i18n="agents">Agents</h2><span id="agentCount" class="status"></span></div>
+                    <div class="card-body">
+                        <div id="agentList"><div class="empty">Loading&hellip;</div></div>
+                    </div>
+                </div>
+            </div>
+
+            <div>
+                <div class="card" id="detailCard">
+                    <div class="card-header">
+                        <div class="tabs">
+                            <div class="tab active" id="tabSteps" onclick="showDetail('steps')" data-i18n="tab_what">What it does</div>
+                            <div class="tab" id="tabSchedule" onclick="showDetail('schedule')" data-i18n="tab_schedule">Schedule</div>
+                            <div class="tab" id="tabRuns" onclick="showDetail('runs')" data-i18n="tab_runs">Runs</div>
+                        </div>
+                        <span id="detailTitle" class="status"></span>
+                    </div>
+
+                    <div class="card-body" id="detailBody">
+                        <div id="detailEmpty" class="empty" data-i18n="detail_empty">Pick an agent on the left, or create one.</div>
+
+                        <div id="detailPanes" style="display:none;">
+                            <div id="detailReadiness"></div>
+
+                            <div id="paneSteps">
+                                <div id="stepsSummary"></div>
+                                <div class="actions">
+                                    <button class="btn btn-secondary" onclick="editSelectedAgent()" data-i18n="edit_definition">Edit definition</button>
+                                    <button class="btn btn-danger" id="archiveBtn" onclick="archiveAgent()" data-i18n="archive">Archive</button>
+                                </div>
+                            </div>
+
+                            <div id="paneSchedule" style="display:none;">
+                                <p class="hint" data-i18n="hint_schedule">A schedule fires a task, and the task runs this agent. Created here, it shows up on the phone too.</p>
+                                <div class="row">
+                                    <div class="field">
+                                        <label for="schedAgent" data-i18n="sched_agent">Agent</label>
+                                        <select id="schedAgent" class="input"></select>
+                                    </div>
+                                    <div class="field">
+                                        <label for="schedKind" data-i18n="sched_repeat">Repeat</label>
+                                        <select id="schedKind" class="input" onchange="syncScheduleKind()">
+                                            <option value="daily_at" data-i18n="sched_daily">Daily at</option>
+                                            <option value="interval" data-i18n="sched_interval">Every N minutes</option>
+                                        </select>
+                                    </div>
+                                    <div class="field" id="schedTimeField">
+                                        <label for="schedTime" data-i18n="sched_time">Time (HH:MM)</label>
+                                        <input id="schedTime" class="input" placeholder="09:00" value="09:00">
+                                    </div>
+                                    <div class="field" id="schedMinutesField" style="display:none;">
+                                        <label for="schedMinutes" data-i18n="sched_minutes">Minutes</label>
+                                        <input id="schedMinutes" class="input" type="number" min="1" value="60">
+                                    </div>
+                                </div>
+                                <div class="field">
+                                    <label for="schedGoal" data-i18n="sched_goal">What should it do on each run?</label>
+                                    <input id="schedGoal" data-i18n-ph="ph_sched_goal" class="input" placeholder="Summarise last night's build log and report failures">
+                                </div>
+                                <div class="actions">
+                                    <button class="btn" onclick="createSchedule()" data-i18n="add_schedule">Add schedule</button>
+                                    <span id="schedStatus" class="status"></span>
+                                </div>
+                                <div id="scheduleList" style="margin-top:16px;"></div>
+                                <span id="scheduleCount" class="status" style="display:none;"></span>
+                            </div>
+
+                            <div id="paneRuns" style="display:none;">
+                                <p class="hint" data-i18n="hint_runs">
+                                    What each run actually did. A script step keeps its exit code and the
+                                    tail of everything it printed, so a failure is readable here instead of
+                                    on a terminal you are not sitting at.
+                                </p>
+                                <div class="row" style="align-items: flex-start;">
+                                    <div style="flex: 0 0 280px;">
+                                        <div id="runList"></div>
+                                    </div>
+                                    <div style="flex: 1; min-width: 0;">
+                                        <div id="runDetail"><div class="empty" data-i18n="pick_run">Pick a run.</div></div>
+                                    </div>
+                                </div>
+                                <span id="runResultsFor" class="status" style="display:none;"></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= CREATE / EDIT ================= -->
+    <div class="view view-single" id="viewCreate">
+        <div class="stepper" id="createStepper">
+            <div class="stepper-node" data-node="1">1 &nbsp;<span data-i18n="flow_purpose">Purpose</span></div>
+            <div class="stepper-node" data-node="2">2 &nbsp;<span data-i18n="flow_steps">Steps</span></div>
+            <div class="stepper-node" data-node="3">3 &nbsp;<span data-i18n="flow_review">Review</span></div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h2 id="editorTitle">New agent</h2>
+                <span id="editorStatus" class="status"></span>
+            </div>
+            <div class="card-body">
+
+                <!-- 1 ---------------------------------------------------- -->
+                <div class="flow-step" id="flow1" data-active="1">
+                    <p class="flow-q" data-i18n="q_purpose">What is this agent for?</p>
+                    <p class="hint" data-i18n="hint_purpose">Name it after the job, not the tool. You can hand the whole thing to the Configurator instead &mdash; it drafts the steps from a sentence.</p>
+
+                    <div class="tabs" style="margin: 12px 0 14px;">
+                        <div class="tab active" id="tabEditor" onclick="showTab('editor')" data-i18n="tab_fill">Fill it in</div>
+                        <div class="tab" id="tabBuilder" onclick="showTab('builder')" data-i18n="tab_configurator">Let the Configurator draft it</div>
+                    </div>
+
+                    <div id="paneEditor">
+                        <input type="hidden" id="agentId">
+                        <div class="row">
+                            <div class="field">
+                                <label for="agentName" data-i18n="name">Name</label>
+                                <input id="agentName" data-i18n-ph="ph_agent_name" class="input" maxlength="80" placeholder="Nightly build check">
+                            </div>
+                            <div class="field">
+                                <label for="agentDescription" data-i18n="description">Description</label>
+                                <input id="agentDescription" data-i18n-ph="ph_agent_desc" class="input" placeholder="What this agent is for">
+                            </div>
+                        </div>
+                        <div class="field">
+                            <label for="agentPrompt" data-i18n="system_prompt">System prompt</label>
+                            <textarea id="agentPrompt" data-i18n-ph="ph_prompt" class="input" rows="4" placeholder="You are ..."></textarea>
+                        </div>
+                        <details>
+                            <summary style="cursor:pointer; color: var(--text-secondary); font-size:13px; margin-bottom:8px;" data-i18n="model_settings">Model settings</summary>
+                            <div class="row">
+                                <div class="field">
+                                    <label for="agentProvider" data-i18n="provider">Provider</label>
+                                    <select id="agentProvider" class="input">
+                                        <option value="">(default)</option>
+                                        <option value="anthropic">anthropic</option>
+                                        <option value="openai">openai</option>
+                                        <option value="google">google</option>
+                                    </select>
+                                </div>
+                                <div class="field">
+                                    <label for="agentModel" data-i18n="model">Model</label>
+                                    <input id="agentModel" data-i18n-ph="ph_model" class="input" placeholder="model id (optional)">
+                                </div>
+                            </div>
+                        </details>
+                    </div>
+
+                    <div id="paneBuilder" style="display:none;">
+                        <p class="hint" data-i18n="hint_builder">Same Configurator the app talks to. It drafts the agent for you; press Create agent when it says it is ready.</p>
+                        <div id="builderLog" class="chat-log"></div>
+                        <div class="row" style="margin-top:8px;">
+                            <input id="builderInput" data-i18n-ph="ph_builder" class="input" placeholder="e.g. Check my site every morning and report failures"
+                                   onkeydown="if(event.key==='Enter'){sendBuilderTurn();}">
+                            <button class="btn" style="flex:0 0 auto;" id="builderSendBtn" onclick="sendBuilderTurn()" data-i18n="send">Send</button>
+                            <button class="btn btn-secondary" style="flex:0 0 auto;" onclick="resetBuilder()" data-i18n="reset">Reset</button>
+                        </div>
+                        <div class="actions">
+                            <button class="btn" id="builderCommitBtn" onclick="commitBuilderDraft()" style="display:none;" data-i18n="create_agent">Create agent</button>
+                            <span id="builderStatus" class="status"></span>
+                        </div>
+                    </div>
+
+                    <div class="flow-nav">
+                        <span class="spacer"></span>
+                        <button class="btn" onclick="goFlow(2)" data-i18n="next_steps">Next: steps</button>
+                    </div>
+                </div>
+
+                <!-- 2 ---------------------------------------------------- -->
+                <div class="flow-step" id="flow2">
+                    <p class="flow-q" data-i18n="q_steps">What should it do, in order?</p>
+                    <p class="hint"><span data-i18n="hint_steps_1">Steps run top to bottom. A </span><strong>shell</strong><span data-i18n="hint_steps_2"> step runs a registered script &mdash; no model, no tokens, no approval prompt. An agent with no steps has nothing to execute when a schedule fires it.</span></p>
+                    <div id="stepScriptWarning"></div>
+                    <div class="actions" style="margin-top:0;">
+                        <button class="btn btn-secondary" onclick="addStep()" data-i18n="add_step">Add step</button>
+                    </div>
+                    <div id="stepList"></div>
+                    <div class="flow-nav">
+                        <button class="btn btn-secondary" onclick="goFlow(1)" data-i18n="back">Back</button>
+                        <span class="spacer"></span>
+                        <button class="btn" onclick="goFlow(3)" data-i18n="next_review">Next: review</button>
+                    </div>
+                </div>
+
+                <!-- 3 ---------------------------------------------------- -->
+                <div class="flow-step" id="flow3">
+                    <p class="flow-q" data-i18n="q_review">Ready to create?</p>
+                    <p class="hint" data-i18n="hint_review">This is what will exist after you press create, and what will still be missing before it can run on its own.</p>
+                    <div id="reviewSummary"></div>
+                    <div class="flow-nav">
+                        <button class="btn btn-secondary" onclick="goFlow(2)" data-i18n="back">Back</button>
+                        <span class="spacer"></span>
+                        <button class="btn" id="saveBtn" onclick="saveAgent()">Create agent</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= SETUP ================= -->
+    <div class="view view-single" id="viewSetup">
+        <div class="card">
+            <div class="card-header">
+                <h2 data-i18n="scripts">Scripts</h2>
+                <span class="status" id="scriptCount"></span>
+            </div>
+            <div class="card-body">
+                <p class="hint" data-i18n="hint_scripts">
+                    A shell step runs one of these &mdash; no model, no tokens, no approval prompt.
+                    Steps reference a script by name, never by command line, so registering is
+                    the moment the script is vetted. The path is checked now, not at 3am inside
+                    a scheduled run.
+                </p>
+                <div class="row">
+                    <div class="field">
+                        <label for="scriptName" data-i18n="name">Name</label>
+                        <input id="scriptName" data-i18n-ph="ph_script_name" class="input" maxlength="80" placeholder="smalldev exchange cycle">
+                    </div>
+                    <div class="field" style="flex:2;">
+                        <label for="scriptPath" data-i18n="abs_path">Absolute path</label>
+                        <input id="scriptPath" data-i18n-ph="ph_script_path" class="input" placeholder="/Users/you/Library/Scripts/cycle.sh">
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="field">
+                        <label for="scriptInterpreter" data-i18n="interpreter">Interpreter</label>
+                        <select id="scriptInterpreter" class="input">
+                            <option value="bash">bash</option>
+                            <option value="sh">sh</option>
+                            <option value="zsh">zsh</option>
+                            <option value="python3">python3</option>
+                            <option value="node">node</option>
+                            <option value="direct">direct (executable)</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="scriptArgs" data-i18n="default_args">Default args (space separated)</label>
+                        <input id="scriptArgs" data-i18n-ph="ph_script_args" class="input" placeholder="optional">
+                    </div>
+                    <div class="field">
+                        <label for="scriptTimeout" data-i18n="timeout_s">Timeout (seconds)</label>
+                        <input id="scriptTimeout" class="input" type="number" min="1" value="3600">
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="scriptDescription" data-i18n="description">Description</label>
+                    <input id="scriptDescription" data-i18n-ph="ph_script_desc" class="input" placeholder="What this script does">
+                </div>
+                <div class="actions">
+                    <button class="btn" onclick="registerScript()" data-i18n="register">Register</button>
+                    <button class="btn btn-secondary" onclick="openScriptWriter()" data-i18n="write_with_llm">Write one with the LLM</button>
+                    <span id="scriptStatus" class="status"></span>
+                </div>
+
+                <div id="scriptList" style="margin-top:16px;"></div>
+
+                <div id="scriptWriter" style="display:none; margin-top:16px; border-top:1px solid var(--border-color); padding-top:16px;">
+                    <div class="field">
+                        <label for="scriptWriterPrompt" data-i18n="describe_script">Describe what the script should do</label>
+                        <textarea id="scriptWriterPrompt" data-i18n-ph="ph_script_writer" class="input" rows="3"
+                                  placeholder="Every 2 hours, open the smalldev app on device R59N3035LQL, join any pending test, and report what it joined"></textarea>
+                    </div>
+                    <div class="actions">
+                        <button class="btn" id="scriptWriterBtn" onclick="draftScript()" data-i18n="draft_it">Draft it</button>
+                        <button class="btn btn-secondary" onclick="closeScriptWriter()" data-i18n="cancel">Cancel</button>
+                        <span id="scriptWriterStatus" class="status"></span>
+                    </div>
+                    <div id="scriptDraftPanel" style="display:none; margin-top:12px;">
+                        <p class="hint" data-i18n="hint_draft">
+                            Read it before you register it. Nothing is written to disk or registered
+                            until you say so &mdash; this is a draft, and the model has not run anything.
+                        </p>
+                        <div class="field">
+                            <label for="scriptDraftName" data-i18n="name">Name</label>
+                            <input id="scriptDraftName" class="input" maxlength="80">
+                        </div>
+                        <div class="field">
+                            <label for="scriptDraftBody" data-i18n="script">Script</label>
+                            <textarea id="scriptDraftBody" class="input" rows="16" style="font-family: var(--mono); font-size:12px;"></textarea>
+                        </div>
+                        <div class="actions">
+                            <button class="btn" onclick="saveDraftedScript()" data-i18n="save_register">Save and register</button>
+                            <button class="btn btn-secondary" onclick="draftScript()" data-i18n="redraft">Redraft</button>
+                            <span id="scriptDraftStatus" class="status"></span>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
 
-        <div>
-            <div class="card">
-                <div class="card-header">
-                    <div class="tabs">
-                        <div class="tab active" id="tabEditor" onclick="showTab('editor')">Editor</div>
-                        <div class="tab" id="tabBuilder" onclick="showTab('builder')">Builder chat</div>
-                    </div>
-                    <span id="editorTitle" class="status"></span>
-                </div>
-
-                <div class="card-body" id="paneEditor">
-                    <p class="hint">The form writes the agent definition directly. Use Builder chat instead when you want the LLM to draft the workflow for you.</p>
-                    <input type="hidden" id="agentId">
-                    <div class="row">
-                        <div class="field">
-                            <label for="agentName">Name</label>
-                            <input id="agentName" class="input" maxlength="80" placeholder="Daily site check">
-                        </div>
-                        <div class="field">
-                            <label for="agentDescription">Description</label>
-                            <input id="agentDescription" class="input" placeholder="What this agent is for">
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="field">
-                            <label for="agentProvider">Provider</label>
-                            <select id="agentProvider" class="input">
-                                <option value="">(default)</option>
-                                <option value="anthropic">anthropic</option>
-                                <option value="openai">openai</option>
-                                <option value="google">google</option>
-                            </select>
-                        </div>
-                        <div class="field">
-                            <label for="agentModel">Model</label>
-                            <input id="agentModel" class="input" placeholder="model id (optional)">
-                        </div>
+        <div class="card" id="cardRules">
+            <div class="card-header">
+                <h2 data-i18n="permissions">Unattended permissions</h2>
+                <span class="status" id="ruleCount"></span>
+            </div>
+            <div class="card-body">
+                <p class="hint" data-i18n="hint_permissions">
+                    A scheduled run has nobody to tap &quot;approve&quot;, so the first time it wants a
+                    terminal, a file or the browser it stops and waits &mdash; and because a schedule
+                    skips while its task is still active, every later run is skipped too. Standing
+                    rules below let named operations through without prompting. Grant the narrowest
+                    scope that works.
+                </p>
+                <div class="row">
+                    <div class="field">
+                        <label for="ruleOperation" data-i18n="operation">Operation</label>
+                        <select id="ruleOperation" class="input">
+                            <option value="process.terminal" data-i18n="op_terminal">process.terminal &mdash; shell commands</option>
+                            <option value="file.write" data-i18n="op_file_write">file.write &mdash; writing files</option>
+                            <option value="file.read" data-i18n="op_file_read">file.read &mdash; reading files</option>
+                            <option value="browser.control" data-i18n="op_browser">browser.control &mdash; browser automation</option>
+                            <option value="device.control" data-i18n="op_device">device.control &mdash; connected phones</option>
+                        </select>
                     </div>
                     <div class="field">
-                        <label for="agentPrompt">System prompt</label>
-                        <textarea id="agentPrompt" class="input" rows="5" placeholder="You are ..."></textarea>
-                    </div>
-
-                    <div class="card-header" style="padding-left:0; padding-right:0;">
-                        <h2>Workflow</h2>
-                        <button class="btn btn-secondary btn-xs" onclick="addStep()">Add step</button>
-                    </div>
-                    <p class="hint">Steps run in order. An agent with no steps can still be assigned work, but it has nothing to execute on a schedule.</p>
-                    <div id="stepList"></div>
-
-                    <div class="actions">
-                        <button class="btn" id="saveBtn" onclick="saveAgent()">Save</button>
-                        <button class="btn btn-secondary" onclick="newAgent()">Clear</button>
-                        <button class="btn btn-danger" id="archiveBtn" onclick="archiveAgent()" style="display:none;">Archive</button>
-                        <span id="editorStatus" class="status"></span>
-                    </div>
-                </div>
-
-                <div class="card-body" id="paneBuilder" style="display:none;">
-                    <p class="hint">Same Configurator the app talks to. It drafts the agent for you; press Create agent when it says it is ready.</p>
-                    <div id="builderLog" class="chat-log"></div>
-                    <div class="row" style="margin-top:8px;">
-                        <input id="builderInput" class="input" placeholder="e.g. Check my site every morning and report failures"
-                               onkeydown="if(event.key==='Enter'){sendBuilderTurn();}">
-                        <button class="btn" style="flex:0 0 auto;" id="builderSendBtn" onclick="sendBuilderTurn()">Send</button>
-                        <button class="btn btn-secondary" style="flex:0 0 auto;" onclick="resetBuilder()">Reset</button>
-                    </div>
-                    <div class="actions">
-                        <button class="btn" id="builderCommitBtn" onclick="commitBuilderDraft()" style="display:none;">Create agent</button>
-                        <span id="builderStatus" class="status"></span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header">
-                    <h2>Schedules</h2>
-                    <span class="status" id="scheduleCount"></span>
-                </div>
-                <div class="card-body">
-                    <p class="hint">A schedule fires a task, and the task runs its assigned agent. Created here, they show up on the phone too.</p>
-                    <div class="row">
-                        <div class="field">
-                            <label for="schedAgent">Agent</label>
-                            <select id="schedAgent" class="input"></select>
-                        </div>
-                        <div class="field">
-                            <label for="schedKind">Repeat</label>
-                            <select id="schedKind" class="input" onchange="syncScheduleKind()">
-                                <option value="daily_at">Daily at</option>
-                                <option value="interval">Every N minutes</option>
-                            </select>
-                        </div>
-                        <div class="field" id="schedTimeField">
-                            <label for="schedTime">Time (HH:MM)</label>
-                            <input id="schedTime" class="input" placeholder="09:00" value="09:00">
-                        </div>
-                        <div class="field" id="schedMinutesField" style="display:none;">
-                            <label for="schedMinutes">Minutes</label>
-                            <input id="schedMinutes" class="input" type="number" min="1" value="60">
-                        </div>
+                        <label for="ruleScope" data-i18n="scope">Scope</label>
+                        <input id="ruleScope" data-i18n-ph="ph_scope" class="input" placeholder="global, or project:my_app" value="global">
                     </div>
                     <div class="field">
-                        <label for="schedGoal">What should it do on each run?</label>
-                        <input id="schedGoal" class="input" placeholder="Summarise last night's build log and report failures">
+                        <label for="ruleExpires" data-i18n="expires">Expires (optional)</label>
+                        <input id="ruleExpires" class="input" type="date">
                     </div>
-                    <div class="actions">
-                        <button class="btn" onclick="createSchedule()">Add schedule</button>
-                        <span id="schedStatus" class="status"></span>
-                    </div>
-
-                    <div id="scheduleList" style="margin-top:16px;"></div>
                 </div>
+                <div class="actions">
+                    <button class="btn" onclick="createPolicyRule()" data-i18n="allow_no_prompt">Allow without prompting</button>
+                    <span id="ruleStatus" class="status"></span>
+                </div>
+
+                <div id="ruleList" style="margin-top:16px;"></div>
             </div>
+        </div>
 
-            <div class="card">
-                <div class="card-header">
-                    <h2>Run results</h2>
-                    <span class="status" id="runResultsFor"></span>
-                </div>
-                <div class="card-body">
-                    <p class="hint">
-                        What each run actually did. A script step keeps its exit code and the
-                        tail of everything it printed, so a failure is readable here instead of
-                        on a terminal you are not sitting at.
-                    </p>
-                    <div class="row" style="align-items: flex-start;">
-                        <div style="flex: 0 0 300px;">
-                            <div id="runList"></div>
-                        </div>
-                        <div style="flex: 1; min-width: 0;">
-                            <div id="runDetail"><div class="empty">Pick a run.</div></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header">
-                    <h2>Scripts</h2>
-                    <span class="status" id="scriptCount"></span>
-                </div>
-                <div class="card-body">
-                    <p class="hint">
-                        A shell step runs one of these — no model, no tokens, no approval prompt.
-                        Steps reference a script by name, never by command line, so registering is
-                        the moment the script is vetted. The path is checked now, not at 3am inside
-                        a scheduled run.
-                    </p>
-                    <div class="row">
-                        <div class="field">
-                            <label for="scriptName">Name</label>
-                            <input id="scriptName" class="input" maxlength="80" placeholder="smalldev exchange cycle">
-                        </div>
-                        <div class="field" style="flex:2;">
-                            <label for="scriptPath">Absolute path</label>
-                            <input id="scriptPath" class="input" placeholder="/Users/you/Library/Scripts/cycle.sh">
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="field">
-                            <label for="scriptInterpreter">Interpreter</label>
-                            <select id="scriptInterpreter" class="input">
-                                <option value="bash">bash</option>
-                                <option value="sh">sh</option>
-                                <option value="zsh">zsh</option>
-                                <option value="python3">python3</option>
-                                <option value="node">node</option>
-                                <option value="direct">direct (executable)</option>
-                            </select>
-                        </div>
-                        <div class="field">
-                            <label for="scriptArgs">Default args (space separated)</label>
-                            <input id="scriptArgs" class="input" placeholder="optional">
-                        </div>
-                        <div class="field">
-                            <label for="scriptTimeout">Timeout (seconds)</label>
-                            <input id="scriptTimeout" class="input" type="number" min="1" value="3600">
-                        </div>
-                    </div>
-                    <div class="field">
-                        <label for="scriptDescription">Description</label>
-                        <input id="scriptDescription" class="input" placeholder="What this script does">
-                    </div>
-                    <div class="actions">
-                        <button class="btn" onclick="registerScript()">Register</button>
-                        <button class="btn btn-secondary" onclick="openScriptWriter()">Write one with the LLM</button>
-                        <span id="scriptStatus" class="status"></span>
-                    </div>
-
-                    <div id="scriptList" style="margin-top:16px;"></div>
-
-                    <div id="scriptWriter" style="display:none; margin-top:16px; border-top:1px solid var(--border-color); padding-top:16px;">
-                        <div class="field">
-                            <label for="scriptWriterPrompt">Describe what the script should do</label>
-                            <textarea id="scriptWriterPrompt" class="input" rows="3"
-                                      placeholder="Every 2 hours, open the smalldev app on device R59N3035LQL, join any pending test, and report what it joined"></textarea>
-                        </div>
-                        <div class="actions">
-                            <button class="btn" id="scriptWriterBtn" onclick="draftScript()">Draft it</button>
-                            <button class="btn btn-secondary" onclick="closeScriptWriter()">Cancel</button>
-                            <span id="scriptWriterStatus" class="status"></span>
-                        </div>
-                        <div id="scriptDraftPanel" style="display:none; margin-top:12px;">
-                            <p class="hint">
-                                Read it before you register it. Nothing is written to disk or registered
-                                until you say so — this is a draft, and the model has not run anything.
-                            </p>
-                            <div class="field">
-                                <label for="scriptDraftName">Name</label>
-                                <input id="scriptDraftName" class="input" maxlength="80">
-                            </div>
-                            <div class="field">
-                                <label for="scriptDraftBody">Script</label>
-                                <textarea id="scriptDraftBody" class="input" rows="16" style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px;"></textarea>
-                            </div>
-                            <div class="actions">
-                                <button class="btn" onclick="saveDraftedScript()">Save and register</button>
-                                <button class="btn btn-secondary" onclick="draftScript()">Redraft</button>
-                                <span id="scriptDraftStatus" class="status"></span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card">
-                <div class="card-header">
-                    <h2>Unattended permissions</h2>
-                    <span class="status" id="ruleCount"></span>
-                </div>
-                <div class="card-body">
-                    <p class="hint">
-                        A scheduled run has nobody to tap "approve", so the first time it wants a
-                        terminal, a file or the browser it stops and waits — and because a schedule
-                        skips while its task is still active, every later run is skipped too. Standing
-                        rules below let named operations through without prompting. Grant the narrowest
-                        scope that works.
-                    </p>
-                    <div class="row">
-                        <div class="field">
-                            <label for="ruleOperation">Operation</label>
-                            <select id="ruleOperation" class="input">
-                                <option value="process.terminal">process.terminal — shell commands</option>
-                                <option value="file.write">file.write — writing files</option>
-                                <option value="file.read">file.read — reading files</option>
-                                <option value="browser.control">browser.control — browser automation</option>
-                                <option value="device.control">device.control — connected phones</option>
-                            </select>
-                        </div>
-                        <div class="field">
-                            <label for="ruleScope">Scope</label>
-                            <input id="ruleScope" class="input" placeholder="global, or project:my_app" value="global">
-                        </div>
-                        <div class="field">
-                            <label for="ruleExpires">Expires (optional)</label>
-                            <input id="ruleExpires" class="input" type="date">
-                        </div>
-                    </div>
-                    <div class="actions">
-                        <button class="btn" onclick="createPolicyRule()">Allow without prompting</button>
-                        <span id="ruleStatus" class="status"></span>
-                    </div>
-
-                    <div id="ruleList" style="margin-top:16px;"></div>
-
-                    <div class="card-header" style="padding-left:0; padding-right:0; margin-top:8px;">
-                        <h2>Waiting for approval</h2>
-                    </div>
-                    <div id="approvalList"></div>
-                </div>
+        <div class="card" id="cardApprovals">
+            <div class="card-header"><h2 data-i18n="waiting_approval">Waiting for approval</h2></div>
+            <div class="card-body">
+                <p class="hint" data-i18n="hint_approvals">A run that stopped for permission. Until it is answered, its schedule keeps skipping.</p>
+                <div id="approvalList"></div>
             </div>
         </div>
     </div>
@@ -646,6 +878,272 @@
 
     <script>
         const API = '/api/dashboard/agent';
+
+        // --- Language -------------------------------------------------------
+        //
+        // Shares the dashboard's stored choice, so setting Korean on one page
+        // sets it here too. Product nouns the user already reads as names
+        // (Agents, shell, exit code) stay as they are; anything that is a
+        // sentence gets translated, because that is the part that has to be
+        // read rather than recognised.
+        const i18n = {
+            en: {
+                nav_dashboard: 'Dashboard', nav_agents: 'Agents', nav_settings: 'Settings',
+                refresh: 'Refresh', new_agent: 'New agent',
+                setup_link: 'Scripts & permissions', back_all: '← All agents',
+
+                agents: 'Agents',
+                tab_what: 'What it does', tab_schedule: 'Schedule', tab_runs: 'Runs',
+                detail_empty: 'Pick an agent on the left, or create one.',
+                edit_definition: 'Edit definition', archive: 'Archive',
+                roster_empty: 'No agents yet.', roster_create_first: 'Create your first agent',
+
+                flow_purpose: 'Purpose', flow_steps: 'Steps', flow_review: 'Review',
+                q_purpose: 'What is this agent for?',
+                hint_purpose: 'Name it after the job, not the tool. You can hand the whole thing to the Configurator instead — it drafts the steps from a sentence.',
+                tab_fill: 'Fill it in', tab_configurator: 'Let the Configurator draft it',
+                q_steps: 'What should it do, in order?',
+                hint_steps_1: 'Steps run top to bottom. A ',
+                hint_steps_2: ' step runs a registered script — no model, no tokens, no approval prompt. An agent with no steps has nothing to execute when a schedule fires it.',
+                q_review: 'Ready to create?',
+                hint_review: 'This is what will exist after you press create, and what will still be missing before it can run on its own.',
+                hint_review_after: 'Schedule and permissions are set after it exists — the agent list will show what is still missing.',
+                add_step: 'Add step', next_steps: 'Next: steps', next_review: 'Next: review',
+                back: 'Back', create_agent: 'Create agent', save_changes: 'Save changes',
+
+                name: 'Name', description: 'Description', system_prompt: 'System prompt',
+                model_settings: 'Model settings', provider: 'Provider', model: 'Model',
+                hint_builder: 'Same Configurator the app talks to. It drafts the agent for you; press Create agent when it says it is ready.',
+                send: 'Send', reset: 'Reset',
+
+                hint_schedule: 'A schedule fires a task, and the task runs this agent. Created here, it shows up on the phone too.',
+                sched_agent: 'Agent', sched_repeat: 'Repeat', sched_daily: 'Daily at',
+                sched_interval: 'Every N minutes', sched_time: 'Time (HH:MM)', sched_minutes: 'Minutes',
+                sched_goal: 'What should it do on each run?', add_schedule: 'Add schedule',
+                sched_empty: 'Nothing fires this agent yet. Add a schedule above and it runs on its own.',
+                col_agent: 'Agent', col_repeat: 'Repeat', col_next: 'Next run', col_state: 'State',
+                pause: 'Pause', enable: 'Enable', run_now: 'Run now', delete: 'Delete',
+                edit_repeat_title: 'Click to change how often this runs',
+
+                hint_runs: 'What each run actually did. A script step keeps its exit code and the tail of everything it printed, so a failure is readable here instead of on a terminal you are not sitting at.',
+                pick_run: 'Pick a run.',
+
+                scripts: 'Scripts',
+                hint_scripts: 'A shell step runs one of these — no model, no tokens, no approval prompt. Steps reference a script by name, never by command line, so registering is the moment the script is vetted. The path is checked now, not at 3am inside a scheduled run.',
+                abs_path: 'Absolute path', interpreter: 'Interpreter', default_args: 'Default args (space separated)',
+                timeout_s: 'Timeout (seconds)', register: 'Register', write_with_llm: 'Write one with the LLM',
+                describe_script: 'Describe what the script should do', draft_it: 'Draft it', cancel: 'Cancel',
+                hint_draft: 'Read it before you register it. Nothing is written to disk or registered until you say so — this is a draft, and the model has not run anything.',
+                save_register: 'Save and register', redraft: 'Redraft', script: 'Script',
+
+                permissions: 'Unattended permissions',
+                hint_permissions: 'A scheduled run has nobody to tap "approve", so the first time it wants a terminal, a file or the browser it stops and waits — and because a schedule skips while its task is still active, every later run is skipped too. Standing rules below let named operations through without prompting. Grant the narrowest scope that works.',
+                operation: 'Operation', scope: 'Scope', expires: 'Expires (optional)',
+                allow_no_prompt: 'Allow without prompting', revoke: 'Revoke',
+                waiting_approval: 'Waiting for approval', nothing_waiting: 'Nothing waiting.',
+                hint_approvals: 'A run that stopped for permission. Until it is answered, its schedule keeps skipping.',
+
+                r_steps: 'Steps', r_scripts: 'Scripts', r_schedule: 'Schedule', r_unattended: 'Unattended',
+                fix_steps: 'Add at least one step',
+                fix_scripts: 'A shell step points at a script that is not registered',
+                fix_schedule: 'Nothing fires it — it runs only when you start it',
+                fix_unattended: 'It will stop for approval, and every later run will be skipped',
+                ready: 'ready', to_finish: ' to finish', manual_only: 'runs only when you start it',
+                next_prefix: 'next',
+                warn_no_script: 'A shell step runs a registered script, and none are registered yet.',
+                warn_no_script_link: 'Register a script first',
+                unnamed_agent: 'Unnamed agent',
+                approval_banner_one: '1 run is stopped waiting for permission. Its schedule skips until answered.',
+                approval_banner_many: '{n} runs are stopped waiting for permission. Their schedules skip until answered.',
+                review: 'Review',
+                just_now: 'just now', paused: 'paused', due: 'due',
+                ph_agent_name: 'Nightly build check',
+                ph_agent_desc: 'What this agent is for',
+                ph_prompt: 'You are ...',
+                ph_model: 'model id (optional)',
+                ph_builder: 'e.g. Check my site every morning and report failures',
+                ph_sched_goal: "Summarise last night's build log and report failures",
+                ph_script_name: 'smalldev exchange cycle',
+                ph_script_path: '/Users/you/Library/Scripts/cycle.sh',
+                ph_script_args: 'optional',
+                ph_script_desc: 'What this script does',
+                ph_script_writer: 'Every 2 hours, open the smalldev app on device R59N3035LQL, join any pending test, and report what it joined',
+                ph_scope: 'global, or project:my_app',
+                col_path: 'Path', col_runwith: 'Run with', col_timeout: 'Timeout',
+                col_effect: 'Effect', col_expires: 'Expires', col_detail: 'Detail', col_risk: 'Risk',
+                remove: 'Remove', never: 'never', approve: 'Approve', deny: 'Deny',
+                op_terminal: 'process.terminal — shell commands',
+                op_file_write: 'file.write — writing files',
+                op_file_read: 'file.read — reading files',
+                op_browser: 'browser.control — browser automation',
+                op_device: 'device.control — connected phones',
+            },
+            ko: {
+                nav_dashboard: '대시보드', nav_agents: '에이전트', nav_settings: '설정',
+                refresh: '새로고침', new_agent: '에이전트 만들기',
+                setup_link: '스크립트 · 권한', back_all: '← 에이전트 목록',
+
+                agents: '에이전트',
+                tab_what: '하는 일', tab_schedule: '스케줄', tab_runs: '실행 기록',
+                detail_empty: '왼쪽에서 에이전트를 고르거나, 새로 만드세요.',
+                edit_definition: '정의 수정', archive: '보관',
+                roster_empty: '아직 에이전트가 없습니다.',
+                roster_create_first: '첫 에이전트 만들기',
+
+                flow_purpose: '목적', flow_steps: '단계', flow_review: '검토',
+                q_purpose: '이 에이전트는 무엇을 위한 것인가요?',
+                hint_purpose: '도구가 아니라 하는 일로 이름을 붙이세요. 한 문장만 주면 Configurator가 단계까지 초안을 잡아줍니다.',
+                tab_fill: '직접 입력', tab_configurator: 'Configurator에게 맡기기',
+                q_steps: '무엇을, 어떤 순서로 하나요?',
+                hint_steps_1: '단계는 위에서 아래로 실행됩니다. ',
+                hint_steps_2: ' 단계는 등록된 스크립트를 실행합니다 — 모델도, 토큰도, 승인 창도 없습니다. 단계가 없는 에이전트는 스케줄이 불러도 실행할 것이 없습니다.',
+                q_review: '이대로 만들까요?',
+                hint_review: '만들고 나면 무엇이 존재하고, 스스로 돌기까지 무엇이 아직 없는지입니다.',
+                hint_review_after: '스케줄과 권한은 만든 뒤에 지정합니다. 무엇이 빠졌는지는 에이전트 목록이 알려줍니다.',
+                add_step: '단계 추가', next_steps: '다음: 단계', next_review: '다음: 검토',
+                back: '뒤로', create_agent: '에이전트 만들기', save_changes: '변경 저장',
+
+                name: '이름', description: '설명', system_prompt: '시스템 프롬프트',
+                model_settings: '모델 설정', provider: '제공자', model: '모델',
+                hint_builder: '앱이 쓰는 것과 같은 Configurator입니다. 에이전트 초안을 잡아주고, 준비됐다고 하면 만들기를 누르세요.',
+                send: '보내기', reset: '초기화',
+
+                hint_schedule: '스케줄이 작업을 실행하고, 그 작업이 이 에이전트를 돌립니다. 여기서 만들면 폰에도 나타납니다.',
+                sched_agent: '에이전트', sched_repeat: '주기', sched_daily: '매일 정해진 시각',
+                sched_interval: 'N분마다', sched_time: '시각 (HH:MM)', sched_minutes: '분',
+                sched_goal: '매 실행마다 무엇을 하나요?', add_schedule: '스케줄 추가',
+                sched_empty: '이 에이전트를 실행시키는 스케줄이 없습니다. 위에서 추가하면 스스로 돕니다.',
+                col_agent: '에이전트', col_repeat: '주기', col_next: '다음 실행', col_state: '상태',
+                pause: '중지', enable: '재개', run_now: '지금 실행', delete: '삭제',
+                edit_repeat_title: '클릭하면 실행 주기를 바꿉니다',
+
+                hint_runs: '각 실행이 실제로 한 일입니다. 스크립트 단계는 exit code와 출력 끝부분을 남기므로, 앉아 있지 않은 터미널 대신 여기서 실패를 읽을 수 있습니다.',
+                pick_run: '실행을 고르세요.',
+
+                scripts: '스크립트',
+                hint_scripts: 'shell 단계는 여기 등록된 것을 실행합니다 — 모델도, 토큰도, 승인 창도 없습니다. 단계는 명령줄이 아니라 이름으로 스크립트를 가리키므로, 등록하는 순간이 검증하는 순간입니다. 경로는 새벽 3시 예약 실행 중이 아니라 지금 확인합니다.',
+                abs_path: '절대 경로', interpreter: '실행기', default_args: '기본 인자 (공백 구분)',
+                timeout_s: '제한 시간 (초)', register: '등록', write_with_llm: 'LLM으로 작성',
+                describe_script: '스크립트가 무엇을 해야 하는지 쓰세요', draft_it: '초안 작성', cancel: '취소',
+                hint_draft: '등록 전에 읽어보세요. 저장하겠다고 하기 전까지 디스크에 쓰이지도, 등록되지도 않습니다 — 초안이고, 모델은 아무것도 실행하지 않았습니다.',
+                save_register: '저장하고 등록', redraft: '다시 작성', script: '스크립트',
+
+                permissions: '무인 실행 권한',
+                hint_permissions: '예약 실행에는 "승인"을 눌러줄 사람이 없습니다. 그래서 터미널·파일·브라우저가 처음 필요해지는 순간 멈춰서 기다리고, 작업이 살아 있는 동안 스케줄은 건너뛰므로 이후 실행도 전부 건너뜁니다. 아래 상시 규칙은 지정한 작업을 묻지 않고 통과시킵니다. 되도록 좁은 범위로 주세요.',
+                operation: '작업', scope: '범위', expires: '만료 (선택)',
+                allow_no_prompt: '묻지 않고 허용', revoke: '해제',
+                waiting_approval: '승인 대기', nothing_waiting: '대기 중인 것이 없습니다.',
+                hint_approvals: '권한 때문에 멈춘 실행입니다. 답하기 전까지 그 스케줄은 계속 건너뜁니다.',
+
+                r_steps: '단계', r_scripts: '스크립트', r_schedule: '스케줄', r_unattended: '무인 실행',
+                fix_steps: '단계를 하나 이상 추가하세요',
+                fix_scripts: 'shell 단계가 등록되지 않은 스크립트를 가리킵니다',
+                fix_schedule: '실행시키는 것이 없습니다 — 직접 시작할 때만 돕니다',
+                fix_unattended: '승인을 기다리며 멈추고, 이후 실행은 모두 건너뜁니다',
+                ready: '준비됨', to_finish: '개 남음', manual_only: '직접 시작할 때만 실행',
+                next_prefix: '다음',
+                warn_no_script: 'shell 단계는 등록된 스크립트를 실행하는데, 등록된 것이 없습니다.',
+                warn_no_script_link: '먼저 스크립트를 등록하세요',
+                unnamed_agent: '이름 없는 에이전트',
+                approval_banner_one: '실행 1건이 권한을 기다리며 멈춰 있습니다. 답하기 전까지 스케줄은 건너뜁니다.',
+                approval_banner_many: '실행 {n}건이 권한을 기다리며 멈춰 있습니다. 답하기 전까지 스케줄은 건너뜁니다.',
+                review: '보기',
+                just_now: '방금', paused: '중지됨', due: '지금',
+                col_path: '경로', col_runwith: '실행기', col_timeout: '제한 시간',
+                col_effect: '효과', col_expires: '만료', col_detail: '내용', col_risk: '위험',
+                remove: '삭제', never: '없음', approve: '허용', deny: '거부',
+                op_terminal: 'process.terminal — 셸 명령',
+                op_file_write: 'file.write — 파일 쓰기',
+                op_file_read: 'file.read — 파일 읽기',
+                op_browser: 'browser.control — 브라우저 자동화',
+                op_device: 'device.control — 연결된 폰',
+                ph_agent_name: '야간 빌드 점검',
+                ph_agent_desc: '이 에이전트가 무엇을 위한 것인지',
+                ph_prompt: '너는 ...',
+                ph_model: '모델 id (선택)',
+                ph_builder: '예: 매일 아침 사이트를 점검하고 실패를 보고해줘',
+                ph_sched_goal: '어젯밤 빌드 로그를 요약하고 실패를 보고',
+                ph_script_name: '스몰뎁 교환 사이클',
+                ph_script_path: '/Users/you/Library/Scripts/cycle.sh',
+                ph_script_args: '선택',
+                ph_script_desc: '이 스크립트가 하는 일',
+                ph_script_writer: '2시간마다 R59N3035LQL 기기에서 스몰뎁 앱을 열고, 대기 중인 테스트에 참여한 뒤 무엇에 참여했는지 보고',
+                ph_scope: 'global 또는 project:my_app',
+            },
+        };
+
+        let currentLang = localStorage.getItem('dashboard_lang') || 'en';
+
+        // Run and schedule states arrive as API enum values, so they are
+        // mapped rather than tagged in markup.
+        const STATUS_KO = {
+            queued: '대기 중', starting: '시작 중', running: '실행 중',
+            completed: '완료', failed: '실패', cancelled: '취소됨',
+            waiting_for_user: '사용자 대기', waiting_user: '사용자 대기',
+            blocked: '차단됨', skipped: '건너뜀', error: '오류',
+            fired: '실행됨', enabled: '켜짐', paused: '중지됨',
+        };
+
+        function statusText(value) {
+            if (!value) return '';
+            return currentLang === 'ko' ? (STATUS_KO[value] || value) : value;
+        }
+
+        function countText(n, key) {
+            if (!n) return '';
+            if (currentLang !== 'ko') return `${n} ${key}`;
+            const suffix = { total: '개', registered: '개 등록됨', standing: '개 상시 규칙' };
+            return `${n}${suffix[key] || '개'}`;
+        }
+
+        function t(key) {
+            const table = i18n[currentLang] || {};
+            if (Object.prototype.hasOwnProperty.call(table, key)) return table[key];
+            const fallback = i18n.en || {};
+            return Object.prototype.hasOwnProperty.call(fallback, key) ? fallback[key] : key;
+        }
+
+        function setLanguage(lang) {
+            currentLang = lang;
+            localStorage.setItem('dashboard_lang', lang);
+            applyTranslations();
+            updateLangButtons();
+            renderAgentList();
+            renderSchedules();
+            renderScripts();
+            renderPolicyRules();
+            renderApprovals();
+            renderApprovalBanner();
+            renderRunList();
+            const agent = agents.find((candidate) => candidate.id === selectedAgentId);
+            if (agent) renderDetail(agent);
+            if (currentView === 'create') goFlow(flowStep);
+        }
+
+        function applyTranslations() {
+            document.querySelectorAll('[data-i18n]').forEach((el) => {
+                const key = el.getAttribute('data-i18n');
+                // Only a genuinely absent key leaves the markup alone; comparing
+                // the value to the key would strand the page in whichever
+                // language it was last rendered in.
+                if (Object.prototype.hasOwnProperty.call(i18n[currentLang] || {}, key)) {
+                    el.textContent = i18n[currentLang][key];
+                }
+            });
+            document.querySelectorAll('[data-i18n-ph]').forEach((el) => {
+                const key = el.getAttribute('data-i18n-ph');
+                if (Object.prototype.hasOwnProperty.call(i18n[currentLang] || {}, key)) {
+                    el.placeholder = i18n[currentLang][key];
+                }
+            });
+        }
+
+        function updateLangButtons() {
+            document.querySelectorAll('.lang-btn').forEach((btn) => {
+                btn.classList.toggle('active', (btn.dataset.lang || 'en') === currentLang);
+            });
+        }
+
 
         let agents = [];
         let schedules = [];
@@ -704,29 +1202,272 @@
             document.getElementById('tabBuilder').className = 'tab' + (editor ? '' : ' active');
         }
 
+        // --- Views ----------------------------------------------------------
+        //
+        // Creating an agent and watching one are different jobs at different
+        // frequencies, so they are different places. Everything used to sit on
+        // one scroll, which is why "New agent" — a button that only cleared a
+        // form already on screen — looked like it did nothing.
+
+        let currentView = 'manage';
+        let flowStep = 1;
+
+        function setView(name, here) {
+            currentView = name;
+            ['manage', 'create', 'setup'].forEach((key) => {
+                const node = document.getElementById('view' + key[0].toUpperCase() + key.slice(1));
+                if (node) node.dataset.active = key === name ? '1' : '0';
+            });
+            const crumb = document.getElementById('crumb');
+            crumb.style.display = name === 'manage' ? 'none' : '';
+            document.getElementById('crumbHere').textContent = here || '';
+            window.scrollTo({ top: 0, behavior: 'auto' });
+        }
+
+        function goManage() {
+            setView('manage');
+            renderAgentList();
+        }
+
+        function goCreate() {
+            newAgent();
+            goFlow(1);
+            setView('create', 'New agent');
+            const name = document.getElementById('agentName');
+            if (name) name.focus();
+        }
+
+        function goSetup(section) {
+            setView('setup', 'Scripts & permissions');
+            if (section === 'approvals') {
+                const card = document.getElementById('cardApprovals');
+                if (card) card.scrollIntoView({ block: 'start' });
+            }
+        }
+
+        function editSelectedAgent() {
+            if (!selectedAgentId) return;
+            goFlow(1);
+            setView('create', document.getElementById('agentName').value || 'Edit agent');
+        }
+
+        function goFlow(step) {
+            flowStep = step;
+            [1, 2, 3].forEach((n) => {
+                const pane = document.getElementById('flow' + n);
+                if (pane) pane.dataset.active = n === step ? '1' : '0';
+                const node = document.querySelector(`.stepper-node[data-node="${n}"]`);
+                if (node) node.dataset.state = n < step ? 'done' : (n === step ? 'now' : '');
+            });
+            if (step === 2) renderStepScriptWarning();
+            if (step === 3) renderReview();
+        }
+
+        // --- Readiness ------------------------------------------------------
+        //
+        // The four preconditions an unattended agent silently fails on. Each is
+        // computed from data already loaded, so the rail never claims more than
+        // the server actually knows.
+
+        const OPERATION_FOR_STEP = {
+            shell: 'process.terminal',
+            browser_action: 'browser.control',
+            device_action: 'device.control',
+            android_action: 'device.control',
+            mobile_action: 'device.control',
+            app_action: 'device.control',
+        };
+
+        function stepsOf(agent) {
+            return Array.isArray(agent && agent.flow_json) ? agent.flow_json : [];
+        }
+
+        function schedulesFor(agentId) {
+            return schedules.filter((schedule) => {
+                const task = tasksById[schedule.task_id];
+                return task && task.assigned_agent_id === agentId;
+            });
+        }
+
+        function readiness(agent) {
+            const flow = stepsOf(agent);
+            const shellSteps = flow.filter((step) => step.type === 'shell');
+            const scriptIds = new Set(scripts.map((script) => script.id));
+            const needed = new Set(
+                flow.map((step) => OPERATION_FOR_STEP[step.type]).filter(Boolean)
+            );
+            const granted = new Set(
+                policyRules.filter((rule) => rule.effect === 'allow').map((rule) => rule.operation)
+            );
+            const mine = schedulesFor(agent.id);
+            return [
+                {
+                    key: 'steps', label: t('r_steps'), ok: flow.length > 0,
+                    fix: t('fix_steps'), go: () => { selectAgent(agent.id).then(() => editSelectedAgent()); },
+                },
+                {
+                    key: 'scripts', label: t('r_scripts'), ok: shellSteps.every((step) => scriptIds.has(step.script_id)),
+                    fix: t('fix_scripts'), go: () => goSetup(),
+                },
+                {
+                    key: 'schedule', label: t('r_schedule'), ok: mine.some((schedule) => schedule.enabled !== false),
+                    fix: t('fix_schedule'),
+                    go: () => { selectAgent(agent.id).then(() => showDetail('schedule')); },
+                },
+                {
+                    key: 'unattended', label: t('r_unattended'), ok: [...needed].every((op) => granted.has(op)),
+                    fix: t('fix_unattended'), go: () => goSetup(),
+                },
+            ];
+        }
+
+        function nextRunFor(agent) {
+            const times = schedulesFor(agent.id)
+                .filter((schedule) => schedule.enabled !== false)
+                .map((schedule) => schedule.next_run_at)
+                .filter(Boolean)
+                .sort();
+            if (!times.length) return '';
+            const stamp = new Date(times[0]);
+            if (Number.isNaN(stamp.getTime())) return '';
+            const mins = Math.round((stamp.getTime() - Date.now()) / 60000);
+            if (mins <= 0) return t('due');
+            const ko = currentLang === 'ko';
+            if (mins < 60) return ko ? `${mins}분 뒤` : `in ${mins}m`;
+            if (mins < 1440) return ko ? `${Math.round(mins / 60)}시간 뒤` : `in ${Math.round(mins / 60)}h`;
+            return ko ? `${Math.round(mins / 1440)}일 뒤` : `in ${Math.round(mins / 1440)}d`;
+        }
+
+        function lastOutcomeFor(agent) {
+            const mine = runs.filter((run) => run.agent_id === agent.id);
+            if (!mine.length) return null;
+            const run = mine[0];
+            return {
+                failed: run.status === 'failed' || run.status === 'cancelled',
+                text: `${statusText(run.status)} ${ago(run.created_at)}`.trim(),
+            };
+        }
+
+        function renderRail(agent) {
+            return `<div class="rail-full">` + readiness(agent).map((item, index) =>
+                `<span class="rail-chip" data-on="${item.ok ? 1 : 0}" data-fix="${index}"
+                       ${item.ok ? '' : `role="button" tabindex="0" title="${escapeHtml(item.fix)}"`}
+                       onclick="fixReadiness('${agent.id}', ${index})">
+                    <span class="dot"></span>${escapeHtml(item.label)}
+                 </span>`
+            ).join('') + `</div>`;
+        }
+
+        function fixReadiness(agentId, index) {
+            const agent = agents.find((candidate) => candidate.id === agentId);
+            if (!agent) return;
+            const item = readiness(agent)[index];
+            if (item && !item.ok && typeof item.go === 'function') item.go();
+        }
+
+        // --- Detail ----------------------------------------------------------
+
+        function renderDetail(agent) {
+            document.getElementById('detailEmpty').style.display = 'none';
+            document.getElementById('detailPanes').style.display = '';
+            document.getElementById('detailTitle').textContent = agent.id;
+            document.getElementById('detailReadiness').innerHTML = renderRail(agent);
+
+            const flow = stepsOf(agent);
+            const summary = flow.length
+                ? flow.map((step, index) => `
+                    <div class="step">
+                        <div class="step-head">
+                            <span class="badge">${index + 1}</span>
+                            <strong>${escapeHtml(step.name || step.title || 'Step')}</strong>
+                            <span class="badge">${escapeHtml(step.type || 'llm')}</span>
+                        </div>
+                        <div class="hint" style="margin:4px 0 0;">${escapeHtml(step.description || '')}</div>
+                    </div>`).join('')
+                : `<div class="empty">${escapeHtml(currentLang === 'ko'
+                        ? '단계가 없습니다. 스케줄이 이 에이전트를 불러도 실행할 것이 없습니다.'
+                        : 'No steps. A schedule can fire this agent, but there is nothing for it to run.')}</div>`;
+            document.getElementById('stepsSummary').innerHTML =
+                `<p class="hint">${escapeHtml(agent.description || '')}</p>` + summary;
+
+            const picker = document.getElementById('schedAgent');
+            if (picker) picker.value = agent.id;
+            showDetail('steps');
+        }
+
+        function showDetail(which) {
+            [['steps', 'paneSteps', 'tabSteps'], ['schedule', 'paneSchedule', 'tabSchedule'], ['runs', 'paneRuns', 'tabRuns']]
+                .forEach(([key, paneId, tabId]) => {
+                    const pane = document.getElementById(paneId);
+                    const tab = document.getElementById(tabId);
+                    if (pane) pane.style.display = key === which ? '' : 'none';
+                    if (tab) tab.className = 'tab' + (key === which ? ' active' : '');
+                });
+            if (currentView !== 'manage') setView('manage');
+        }
+
+        // --- Create-flow guidance --------------------------------------------
+
+        function renderStepScriptWarning() {
+            const host = document.getElementById('stepScriptWarning');
+            if (!host) return;
+            const usesShell = steps.some((step) => step.type === 'shell');
+            if (usesShell && !scripts.length) {
+                host.innerHTML = `<div class="note blocking">${escapeHtml(t('warn_no_script'))}
+                    <button type="button" class="linklike" onclick="goSetup()">${escapeHtml(t('warn_no_script_link'))}</button>.</div>`;
+            } else {
+                host.innerHTML = '';
+            }
+        }
+
+        function renderReview() {
+            const host = document.getElementById('reviewSummary');
+            if (!host) return;
+            const name = document.getElementById('agentName').value.trim();
+            const draft = { id: selectedAgentId || '__new__', name, flow_json: collectSteps() };
+            const ready = readiness(draft);
+            const rows = ready.map((item) => `
+                <div class="roster-meta" style="margin:6px 0;">
+                    <span class="${item.ok ? 'ok' : ''}">${item.ok ? '✓' : '○'} ${escapeHtml(item.label)}</span>
+                    <span>&middot;</span>
+                    <span>${item.ok ? escapeHtml(t('ready')) : escapeHtml(item.fix)}</span>
+                </div>`).join('');
+            host.innerHTML = `
+                <div class="step">
+                    <div class="step-head"><strong>${escapeHtml(name || t('unnamed_agent'))}</strong>
+                    <span class="badge">${draft.flow_json.length}${currentLang === 'ko' ? '단계' : ` step${draft.flow_json.length === 1 ? '' : 's'}`}</span></div>
+                    ${rows}
+                </div>
+                <p class="hint">${escapeHtml(t('hint_review_after'))}</p>`;
+        }
+
         // --- Agents ---------------------------------------------------------
 
         function renderAgentList() {
             const host = document.getElementById('agentList');
-            document.getElementById('agentCount').textContent = agents.length ? `${agents.length} total` : '';
+            document.getElementById('agentCount').textContent = countText(agents.length, 'total');
             if (!agents.length) {
-                host.innerHTML = '<div class="empty">No agents yet. Create one with the form or the builder.</div>';
+                host.innerHTML = `<div class="empty">${escapeHtml(t('roster_empty'))}<br><br>`
+                    + `<button class="btn" onclick="goCreate()">${escapeHtml(t('roster_create_first'))}</button></div>`;
                 return;
             }
             host.innerHTML = agents.map((agent) => {
-                const activation = agent.activation || {};
-                const stepCount = (agent.flow_json || []).length;
-                const badges = [
-                    `<span class="badge">${stepCount} step${stepCount === 1 ? '' : 's'}</span>`,
-                    activation.enabled_schedule_count
-                        ? `<span class="badge on">${activation.enabled_schedule_count} scheduled</span>`
-                        : '<span class="badge off">no schedule</span>',
-                ].join('');
+                const ready = readiness(agent);
+                const rail = ready.map((item) =>
+                    `<span class="rail-seg" data-on="${item.ok ? 1 : 0}" title="${escapeHtml(item.label)}: ${item.ok ? t('ready') : escapeHtml(item.fix)}"></span>`
+                ).join('');
+                const meta = [];
+                const next = nextRunFor(agent);
+                meta.push(next ? `${t('next_prefix')} ${next}` : t('manual_only'));
+                const last = lastOutcomeFor(agent);
+                if (last) meta.push(`<span class="${last.failed ? 'fault' : 'ok'}">${escapeHtml(last.text)}</span>`);
+                const missing = ready.filter((item) => !item.ok).length;
+                if (missing) meta.push(currentLang === 'ko' ? `${missing}${t('to_finish')}` : `${missing} to finish`);
                 return `
-                    <div class="agent-item${agent.id === selectedAgentId ? ' selected' : ''}" onclick="selectAgent('${agent.id}')">
-                        <div class="name">${escapeHtml(agent.name)}</div>
-                        <div class="meta">${escapeHtml(agent.description || agent.provider_id || '')}</div>
-                        <div style="margin-top:4px;">${badges}</div>
+                    <div class="roster-item" data-selected="${agent.id === selectedAgentId ? 1 : 0}" onclick="selectAgent('${agent.id}')">
+                        <div class="roster-name">${escapeHtml(agent.name)}</div>
+                        <div class="rail">${rail}</div>
+                        <div class="roster-meta">${meta.join('<span>&middot;</span>')}</div>
                     </div>`;
             }).join('');
         }
@@ -748,13 +1489,11 @@
                 document.getElementById(id).value = '';
             });
             document.getElementById('agentProvider').value = '';
-            document.getElementById('archiveBtn').style.display = 'none';
-            document.getElementById('editorTitle').textContent = 'New agent';
+            document.getElementById('editorTitle').textContent = t('new_agent');
             setStatus('editorStatus', '');
+            document.getElementById('saveBtn').textContent = 'Create agent';
             renderSteps();
             renderAgentList();
-            renderRunList();
-            showTab('editor');
         }
 
         async function selectAgent(agentId) {
@@ -772,13 +1511,15 @@
             document.getElementById('agentModel').value = agent.model || '';
             document.getElementById('agentPrompt').value = agent.system_prompt || '';
             steps = Array.isArray(agent.flow_json) ? agent.flow_json.map((step) => ({ ...step })) : [];
-            document.getElementById('archiveBtn').style.display = '';
-            document.getElementById('editorTitle').textContent = agent.id;
+            document.getElementById('editorTitle').textContent = agent.name || agent.id;
             setStatus('editorStatus', '');
+            document.getElementById('saveBtn').textContent = 'Save changes';
             renderSteps();
             renderAgentList();
             renderRunList();
-            showTab('editor');
+            renderSchedules();
+            renderDetail(agent);
+            return agent;
         }
 
         function stepId(step, index) {
@@ -908,7 +1649,7 @@
                         <span>
                             <button class="btn btn-secondary btn-xs" onclick="moveStep(${index}, -1)" ${index === 0 ? 'disabled' : ''}>↑</button>
                             <button class="btn btn-secondary btn-xs" onclick="moveStep(${index}, 1)" ${index === steps.length - 1 ? 'disabled' : ''}>↓</button>
-                            <button class="btn btn-danger btn-xs" onclick="removeStep(${index})">Remove</button>
+                            <button class="btn btn-danger btn-xs" onclick="removeStep(${index})">${escapeHtml(t('remove'))}</button>
                         </span>
                     </div>
                     <div class="row">
@@ -1046,6 +1787,8 @@
             const saved = result.agent || result;
             await reloadAll();
             if (saved && saved.id) await selectAgent(saved.id);
+            // Creating is done; the roster is where you see what is still missing.
+            goManage();
         }
 
         async function archiveAgent() {
@@ -1140,48 +1883,73 @@
 
         function describeExpression(expression) {
             if (!expression || typeof expression !== 'object') return '—';
-            if (expression.kind === 'daily_at') return `daily at ${expression.time}`;
+            const ko = currentLang === 'ko';
+            if (expression.kind === 'daily_at') return ko ? `매일 ${expression.time}` : `daily at ${expression.time}`;
             if (expression.kind === 'interval') {
                 const seconds = Number(expression.seconds || 0);
-                return seconds % 60 === 0 ? `every ${seconds / 60} min` : `every ${seconds}s`;
+                if (seconds % 60 !== 0) return ko ? `${seconds}초마다` : `every ${seconds}s`;
+                const mins = seconds / 60;
+                if (ko) return mins % 60 === 0 ? `${mins / 60}시간마다` : `${mins}분마다`;
+                return `every ${mins} min`;
             }
             return JSON.stringify(expression);
         }
 
+        // A schedule row carries no zone, so it is rendered in local time here
+        // rather than pasted as the raw UTC string the API returns.
+        function whenNext(schedule) {
+            if (schedule.enabled === false) return t('paused');
+            const raw = schedule.next_run_at;
+            if (!raw) return '—';
+            const stamp = new Date(raw);
+            if (Number.isNaN(stamp.getTime())) return '—';
+            const mins = Math.round((stamp.getTime() - Date.now()) / 60000);
+            const clock = stamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const ko = currentLang === 'ko';
+            if (mins <= 0) return `${t('due')} (${clock})`;
+            if (mins < 60) return ko ? `${mins}분 뒤 (${clock})` : `in ${mins}m (${clock})`;
+            if (mins < 1440) return ko ? `${Math.round(mins / 60)}시간 뒤 (${clock})` : `in ${Math.round(mins / 60)}h (${clock})`;
+            return ko ? `${Math.round(mins / 1440)}일 뒤` : `in ${Math.round(mins / 1440)}d`;
+        }
+
         function renderSchedules() {
             const host = document.getElementById('scheduleList');
-            document.getElementById('scheduleCount').textContent = schedules.length ? `${schedules.length} total` : '';
-            if (!schedules.length) {
-                host.innerHTML = '<div class="empty">No schedules yet.</div>';
+            // Inside an agent's detail, only that agent's schedules belong here.
+            const shown = selectedAgentId ? schedulesFor(selectedAgentId) : schedules;
+            document.getElementById('scheduleCount').textContent = countText(shown.length, 'total');
+            if (!shown.length) {
+                host.innerHTML = `<div class="empty">${escapeHtml(t('sched_empty'))}</div>`;
                 return;
             }
-            const rows = schedules.map((schedule) => {
+            const rows = shown.map((schedule) => {
                 const task = tasksById[schedule.task_id];
                 const agent = task && agents.find((candidate) => candidate.id === task.assigned_agent_id);
                 const enabled = schedule.enabled !== false;
                 return `
                     <tr>
                         <td>${escapeHtml(agent ? agent.name : (task ? task.title : schedule.task_id))}</td>
-                        <td>${escapeHtml(describeExpression(schedule.expression))}</td>
-                        <td>${escapeHtml(schedule.next_fire_at || '—')}</td>
                         <td>
-                            <span class="badge ${enabled ? 'on' : 'off'}">${enabled ? 'enabled' : 'paused'}</span>
+                            <span class="sched-repeat" onclick="beginEditRepeat(this, '${schedule.id}')" title="${escapeHtml(t('edit_repeat_title'))}">${escapeHtml(describeExpression(schedule.expression))}</span>
+                        </td>
+                        <td>${escapeHtml(whenNext(schedule))}</td>
+                        <td>
+                            <span class="badge ${enabled ? 'on' : 'off'}">${escapeHtml(statusText(enabled ? 'enabled' : 'paused'))}</span>
                             ${schedule.last_status === 'skipped'
-                                ? `<span class="badge off" title="${escapeHtml(schedule.last_error || '')}">skipped ×${schedule.skip_count || 1}</span>`
+                                ? `<span class="badge off" title="${escapeHtml(schedule.last_error || '')}">${escapeHtml(statusText('skipped'))} ×${schedule.skip_count || 1}</span>`
                                 : ''}
                             ${schedule.last_status === 'error'
-                                ? `<span class="badge off" title="${escapeHtml(schedule.last_error || '')}">error</span>`
+                                ? `<span class="badge off" title="${escapeHtml(schedule.last_error || '')}">${escapeHtml(statusText('error'))}</span>`
                                 : ''}
                         </td>
                         <td style="text-align:right; white-space:nowrap;">
-                            <button class="btn btn-secondary btn-xs" onclick="toggleSchedule('${schedule.id}', ${!enabled})">${enabled ? 'Pause' : 'Enable'}</button>
-                            <button class="btn btn-secondary btn-xs" onclick="triggerSchedule('${schedule.id}')">Run now</button>
-                            <button class="btn btn-danger btn-xs" onclick="deleteSchedule('${schedule.id}')">Delete</button>
+                            <button class="btn btn-secondary btn-xs" onclick="toggleSchedule('${schedule.id}', ${!enabled})">${enabled ? escapeHtml(t('pause')) : escapeHtml(t('enable'))}</button>
+                            <button class="btn btn-secondary btn-xs" onclick="triggerSchedule('${schedule.id}')">${escapeHtml(t('run_now'))}</button>
+                            <button class="btn btn-danger btn-xs" onclick="deleteSchedule('${schedule.id}')">${escapeHtml(t('delete'))}</button>
                         </td>
                     </tr>`;
             }).join('');
             host.innerHTML = `<table class="sched">
-                <thead><tr><th>Agent</th><th>Repeat</th><th>Next run</th><th>State</th><th></th></tr></thead>
+                <thead><tr><th>${escapeHtml(t('col_agent'))}</th><th>${escapeHtml(t('col_repeat'))}</th><th>${escapeHtml(t('col_next'))}</th><th>${escapeHtml(t('col_state'))}</th><th></th></tr></thead>
                 <tbody>${rows}</tbody></table>`;
         }
 
@@ -1246,6 +2014,55 @@
             reloadAll();
         }
 
+        // How often a schedule runs is the thing most likely to change about
+        // it, and until now the only way was Delete + re-add — which throws
+        // away the fire and skip counts that say whether it has been working.
+        function beginEditRepeat(cell, scheduleId) {
+            const schedule = schedules.find((candidate) => candidate.id === scheduleId);
+            if (!schedule || !cell || cell.dataset.editing === '1') return;
+            const expression = schedule.expression || {};
+            const current = expression.kind === 'interval'
+                ? Math.round(Number(expression.seconds || 0) / 60)
+                : 60;
+            cell.dataset.editing = '1';
+            cell.innerHTML = `every <input type="number" min="1" class="sched-repeat-input" value="${current}"> min`;
+            const input = cell.querySelector('input');
+            input.focus();
+            input.select();
+            const commit = async () => {
+                const minutes = Number(input.value);
+                if (!Number.isFinite(minutes) || minutes < 1) {
+                    renderSchedules();
+                    return;
+                }
+                if (expression.kind === 'interval' && minutes * 60 === Number(expression.seconds)) {
+                    renderSchedules();
+                    return;
+                }
+                await updateScheduleExpression(scheduleId, { kind: 'interval', seconds: minutes * 60 });
+            };
+            input.addEventListener('blur', commit, { once: true });
+            input.addEventListener('keydown', (keyEvent) => {
+                if (keyEvent.key === 'Enter') input.blur();
+                if (keyEvent.key === 'Escape') { input.removeEventListener('blur', commit); renderSchedules(); }
+            });
+        }
+
+        async function updateScheduleExpression(scheduleId, expression) {
+            setStatus('schedStatus', 'Saving…');
+            const result = await api(`/schedules/${encodeURIComponent(scheduleId)}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ expression }),
+            });
+            if (!result || result.error) {
+                setStatus('schedStatus', (result && result.error) || 'Update failed', true);
+                renderSchedules();
+                return;
+            }
+            setStatus('schedStatus', 'Saved');
+            reloadAll();
+        }
+
         async function toggleSchedule(scheduleId, enabled) {
             const result = await api(`/schedules/${encodeURIComponent(scheduleId)}`, {
                 method: 'PATCH',
@@ -1286,7 +2103,7 @@
         function renderScripts() {
             const host = document.getElementById('scriptList');
             document.getElementById('scriptCount').textContent =
-                scripts.length ? `${scripts.length} registered` : '';
+                countText(scripts.length, 'registered');
             if (!scripts.length) {
                 host.innerHTML = '<div class="empty">No scripts registered — shell steps have nothing to run.</div>';
                 return;
@@ -1299,11 +2116,11 @@
                     <td>${escapeHtml(script.interpreter)}</td>
                     <td>${escapeHtml(String(script.timeout_seconds))}s</td>
                     <td style="text-align:right;">
-                        <button class="btn btn-danger btn-xs" onclick="deleteScript('${script.id}')">Remove</button>
+                        <button class="btn btn-danger btn-xs" onclick="deleteScript('${script.id}')">${escapeHtml(t('remove'))}</button>
                     </td>
                 </tr>`).join('');
             host.innerHTML = `<table class="sched">
-                <thead><tr><th>Name</th><th>Path</th><th>Run with</th><th>Timeout</th><th></th></tr></thead>
+                <thead><tr><th>${escapeHtml(t('name'))}</th><th>${escapeHtml(t('col_path'))}</th><th>${escapeHtml(t('col_runwith'))}</th><th>${escapeHtml(t('col_timeout'))}</th><th></th></tr></thead>
                 <tbody>${rows}</tbody></table>`;
         }
 
@@ -1425,10 +2242,11 @@
             const stamp = new Date(String(value).includes('T') ? value : `${value}Z`.replace(' ', 'T'));
             if (Number.isNaN(stamp.getTime())) return '';
             const s = Math.max(0, Math.round((Date.now() - stamp.getTime()) / 1000));
-            if (s < 60) return 'just now';
-            if (s < 3600) return `${Math.round(s / 60)}m ago`;
-            if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-            return `${Math.round(s / 86400)}d ago`;
+            const ko = currentLang === 'ko';
+            if (s < 60) return t('just_now');
+            if (s < 3600) return ko ? `${Math.round(s / 60)}분 전` : `${Math.round(s / 60)}m ago`;
+            if (s < 86400) return ko ? `${Math.round(s / 3600)}시간 전` : `${Math.round(s / 3600)}h ago`;
+            return ko ? `${Math.round(s / 86400)}일 전` : `${Math.round(s / 86400)}d ago`;
         }
 
         function renderRunList() {
@@ -1449,7 +2267,7 @@
                 <div class="run-item${run.id === selectedRunId ? ' selected' : ''}" onclick="selectRun('${run.id}')">
                     <span class="dot ${runDotClass(run.status)}"></span>
                     <span class="grow">${escapeHtml(run.title || run.id)}</span>
-                    <span class="when">${escapeHtml(run.status || '')} · ${escapeHtml(ago(run.updated_at || run.created_at))}</span>
+                    <span class="when">${escapeHtml(statusText(run.status))} · ${escapeHtml(ago(run.updated_at || run.created_at))}</span>
                 </div>`).join('');
         }
 
@@ -1521,7 +2339,7 @@
         function renderPolicyRules() {
             const host = document.getElementById('ruleList');
             document.getElementById('ruleCount').textContent =
-                policyRules.length ? `${policyRules.length} standing` : '';
+                countText(policyRules.length, 'standing');
             if (!policyRules.length) {
                 host.innerHTML = '<div class="empty">No standing rules — every tool use will prompt.</div>';
                 return;
@@ -1531,13 +2349,13 @@
                     <td>${escapeHtml(rule.operation)}</td>
                     <td>${escapeHtml(rule.scope)}</td>
                     <td><span class="badge ${rule.effect === 'allow' ? 'on' : 'off'}">${escapeHtml(rule.effect)}</span></td>
-                    <td>${escapeHtml(rule.expires_at || 'never')}</td>
+                    <td>${escapeHtml(rule.expires_at || t('never'))}</td>
                     <td style="text-align:right;">
-                        <button class="btn btn-danger btn-xs" onclick="deletePolicyRule('${rule.id}')">Revoke</button>
+                        <button class="btn btn-danger btn-xs" onclick="deletePolicyRule('${rule.id}')">${escapeHtml(t('revoke'))}</button>
                     </td>
                 </tr>`).join('');
             host.innerHTML = `<table class="sched">
-                <thead><tr><th>Operation</th><th>Scope</th><th>Effect</th><th>Expires</th><th></th></tr></thead>
+                <thead><tr><th>${escapeHtml(t('operation'))}</th><th>${escapeHtml(t('scope'))}</th><th>${escapeHtml(t('col_effect'))}</th><th>${escapeHtml(t('col_expires'))}</th><th></th></tr></thead>
                 <tbody>${rows}</tbody></table>`;
         }
 
@@ -1579,7 +2397,7 @@
         function renderApprovals() {
             const host = document.getElementById('approvalList');
             if (!approvals.length) {
-                host.innerHTML = '<div class="empty">Nothing waiting.</div>';
+                host.innerHTML = `<div class="empty">${escapeHtml(t('nothing_waiting'))}</div>`;
                 return;
             }
             const rows = approvals.map((approval) => {
@@ -1598,7 +2416,7 @@
                     </tr>`;
             }).join('');
             host.innerHTML = `<table class="sched">
-                <thead><tr><th>Operation</th><th>Detail</th><th>Risk</th><th></th></tr></thead>
+                <thead><tr><th>${escapeHtml(t('operation'))}</th><th>${escapeHtml(t('col_detail'))}</th><th>${escapeHtml(t('col_risk'))}</th><th></th></tr></thead>
                 <tbody>${rows}</tbody></table>`;
         }
 
@@ -1644,10 +2462,29 @@
             renderScripts();
             renderPolicyRules();
             renderApprovals();
+            renderApprovalBanner();
+        }
+
+        // A run parked on an unanswered permission keeps its schedule skipping,
+        // so it has to be visible from wherever you are — not only on the page
+        // you would have to already suspect.
+        function renderApprovalBanner() {
+            const banner = document.getElementById('approvalBanner');
+            if (!banner) return;
+            if (!approvals.length) { banner.style.display = 'none'; return; }
+            banner.style.display = '';
+            const n = approvals.length;
+            document.getElementById('approvalBannerText').textContent = currentLang === 'ko'
+                ? (n === 1 ? t('approval_banner_one') : t('approval_banner_many').replace('{n}', n))
+                : `${n} run${n === 1 ? ' is' : 's are'} stopped waiting for permission. Their schedules skip until answered.`;
         }
 
         syncScheduleKind();
+        applyTranslations();
+        updateLangButtons();
         newAgent();
+        goFlow(1);
+        setView('manage');
         reloadAll();
     </script>
 </body>

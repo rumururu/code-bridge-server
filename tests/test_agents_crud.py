@@ -573,27 +573,6 @@ class AgentsCrudTest(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json(), {"error": "pseudo_agent_protected"})
 
-    def test_preview_prompt_returns_composed_text_and_counts(self):
-        agent = self._create_agent(system_prompt="Base prompt.")
-        self.client.post(
-            f"/api/agent/agents/{agent['id']}/memories",
-            json={"content": "Remember this.", "pinned": True},
-        )
-
-        response = self.client.get(
-            f"/api/agent/agents/{agent['id']}/preview-prompt?task_goal=Ship"
-        )
-
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        # TASK_004 composer combines system_prompt + memory + workflow + task_goal
-        self.assertIn("Base prompt.", body["composed_prompt"])
-        self.assertIn("Remember this.", body["composed_prompt"])
-        self.assertIn("Ship", body["composed_prompt"])
-        self.assertEqual(body["memory_count"], 1)
-        # _create_agent helper seeds 1 flow step by default
-        self.assertEqual(body["workflow_steps"], 1)
-
     def test_memory_missing_agent_returns_404(self):
         response = self.client.get("/api/agent/agents/agent_missing/memories")
 

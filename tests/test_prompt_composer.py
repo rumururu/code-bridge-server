@@ -257,30 +257,6 @@ class PromptComposerRoutesTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
-    def test_preview_prompt_returns_composed_text_and_counts(self):
-        agent = self._create_agent()
-        self.client.post(
-            f"/api/agent/agents/{agent['id']}/memories",
-            json={"content": "Avoid touching billing queues.", "pinned": True},
-        )
-        self.client.post(
-            f"/api/agent/agents/{agent['id']}/memories",
-            json={"content": "Run tests before reporting done."},
-        )
-
-        response = self.client.get(
-            f"/api/agent/agents/{agent['id']}/preview-prompt?task_goal=Ship%20build%2038"
-        )
-
-        self.assertEqual(response.status_code, 200, response.text)
-        payload = response.json()
-        self.assertEqual(payload["memory_count"], 2)
-        self.assertEqual(payload["workflow_steps"], 1)
-        self.assertIn("Your accumulated learnings", payload["composed_prompt"])
-        self.assertIn("- Avoid touching billing queues.", payload["composed_prompt"])
-        self.assertIn("Your workflow (run this in order):", payload["composed_prompt"])
-        self.assertIn("Current task: Ship build 38", payload["composed_prompt"])
-
     def test_run_feedback_creates_agent_memory(self):
         agent = self._create_agent()
         run = self.client.post(
