@@ -204,23 +204,70 @@
         /* --- Create flow ---------------------------------------------------- */
         /* The definition and the conversation that shapes it sit side by side,
            so a reply and what it changed are visible at the same time. */
+        /* Two panes of one workspace: what the agent is, and the conversation
+           shaping it. They get equal width and share a single height, because a
+           reply and the field it changed have to be legible at the same moment
+           — a taller left column would push the chat off screen exactly when a
+           turn lands. The page itself does not scroll; each pane scrolls its
+           own content and keeps its action bar on the floor, so "Create agent"
+           and the message box never leave. */
         .build-layout {
             display: grid;
-            grid-template-columns: minmax(0, 1fr) 420px;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
             gap: 16px;
-            padding: 16px 24px 48px;
-            align-items: start;
+            padding: 16px 24px 20px;
+            align-items: stretch;
+            /* Filled in from the pane's measured top: the chrome above it is
+               not one fixed bar — the breadcrumb appears per view and the
+               approval banner comes and goes — so a constant would leave the
+               page scrolling by exactly the height of whatever showed up. */
+            height: var(--build-h, 70dvh);
         }
-        @media (max-width: 1040px) {
-            .build-layout { grid-template-columns: minmax(0, 1fr); }
-            .build-chat { order: -1; }
+        .build-layout > .card {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            margin-bottom: 0;
         }
-        .build-chat { position: sticky; top: 72px; }
-        .build-chat-body { display: flex; flex-direction: column; gap: 10px; }
-        .build-chat .chat-log { flex: 1; min-height: 300px; max-height: 52vh; overflow-y: auto; }
-        .chat-compose { display: flex; flex-direction: column; gap: 8px; }
+        .build-layout > .card > .card-header { flex: 0 0 auto; }
+        .build-layout > .card > .card-body {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* The definition scrolls; its action bar is pinned to the pane floor so
+           creating is one click away from anywhere in a long workflow. */
+        .build-def .def-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+        .build-def .actions {
+            flex: 0 0 auto;
+            margin: 0;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-color);
+            background: var(--bg-card);
+        }
+
+        .build-chat-body { gap: 10px; }
+        .build-chat .chat-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+        .chat-compose { flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px; }
         .chat-actions { display: flex; align-items: center; gap: 8px; }
         .chat-actions .spacer { flex: 1; }
+
+        /* Stacked, the shared-height trick stops helping — a pane you have to
+           scroll inside a page you also scroll is worse than one long column. */
+        @media (max-width: 1040px) {
+            .build-layout {
+                grid-template-columns: minmax(0, 1fr);
+                height: auto;
+                padding-bottom: 48px;
+            }
+            .build-layout > .card > .card-body { overflow: visible; }
+            .build-def .def-scroll { overflow: visible; }
+            .build-chat { order: -1; }
+            .build-chat .chat-log { min-height: 260px; max-height: 46vh; }
+        }
 
         .note {
             border-left: 2px solid var(--warning-color); background: var(--pulse-bg);
@@ -634,6 +681,7 @@
                     <span id="editorStatus" class="status"></span>
                 </div>
                 <div class="card-body">
+                    <div class="def-scroll">
                     <p class="hint" data-i18n="hint_definition">This is the agent as it stands. Say what you want on the right and it fills in here; edit anything directly.</p>
 
                     <input type="hidden" id="agentId">
@@ -678,6 +726,7 @@
                     <div id="stepList"></div>
 
                     <div id="reviewSummary" style="margin-top:14px;"></div>
+                    </div>
 
                     <div class="actions">
                         <button class="btn" id="saveBtn" onclick="saveAgent()" data-i18n="create_agent">Create agent</button>
@@ -966,6 +1015,17 @@
                 edit_agent: 'Edit agent', no_reply: '(no reply)',
                 saving: 'Saving…', saved: 'Saved', save_failed: 'Save failed',
                 turn_failed: 'The turn failed', no_steps_yet: 'No steps yet.',
+                s_step: 'Step', s_type: 'Type', s_tool_hint: 'Tool hint',
+                s_what_step: 'What happens in this step', s_what_script: 'What this script does',
+                s_success_criteria: 'Success criteria', s_on_success: 'If it succeeds', s_on_failure: 'If it fails',
+                s_type_llm: 'LLM — the model decides and acts',
+                s_type_shell: 'Script — runs a registered script, no tokens',
+                s_script: 'Script', s_extra_args: 'Extra args (space separated)',
+                s_register_first: 'Register a script below first.',
+                p_continue: 'Go to the next step', p_end: 'Finish the run here',
+                p_ask: 'Ask me and wait', p_abort: 'Stop the workflow', p_retry: 'Retry once, then stop',
+                p_jump: 'Jump to "{name}"', p_goto: 'Go to "{name}"',
+                optional: 'optional',
                 turn_timed_out: 'This is taking too long. Try again.',
                 name_required: 'Name is required', thinking: 'Configurator is thinking…',
                 agent_created: 'Agent created', agent_updated: 'Agent updated',
@@ -1060,6 +1120,17 @@
                 edit_agent: '에이전트 수정', no_reply: '(응답 없음)',
                 saving: '저장 중…', saved: '저장됨', save_failed: '저장 실패',
                 turn_failed: '요청 처리에 실패했습니다', no_steps_yet: '아직 단계가 없습니다.',
+                s_step: '단계', s_type: '종류', s_tool_hint: '도구 힌트',
+                s_what_step: '이 단계에서 하는 일', s_what_script: '이 스크립트가 하는 일',
+                s_success_criteria: '성공 기준', s_on_success: '성공하면', s_on_failure: '실패하면',
+                s_type_llm: 'LLM — 모델이 판단하고 실행',
+                s_type_shell: '스크립트 — 등록된 스크립트 실행, 토큰 없음',
+                s_script: '스크립트', s_extra_args: '추가 인자 (공백 구분)',
+                s_register_first: '먼저 아래에서 스크립트를 등록하세요.',
+                p_continue: '다음 단계로', p_end: '여기서 실행 종료',
+                p_ask: '나에게 묻고 대기', p_abort: '워크플로 중단', p_retry: '한 번 재시도 후 중단',
+                p_jump: '"{name}"(으)로 이동', p_goto: '"{name}"(으)로 이동',
+                optional: '선택',
                 turn_timed_out: '응답이 너무 오래 걸립니다. 다시 시도해 주세요.',
                 name_required: '이름을 입력하세요', thinking: 'Configurator가 생각 중…',
                 agent_created: '에이전트를 만들었습니다', agent_updated: '에이전트를 수정했습니다',
@@ -1127,6 +1198,20 @@
             if (saveBtn) saveBtn.textContent = t(selectedAgentId ? 'save_changes' : 'create_agent');
             if (currentView === 'create') refreshBuildPanels();
         }
+
+        // The workspace is sized against the real header rather than a guessed
+        // constant, which drifts the moment the nav wraps on a narrow window.
+        function syncBuildHeight() {
+            const layout = document.querySelector('.build-layout');
+            if (!layout) return;
+            if (getComputedStyle(layout).gridTemplateColumns.split(' ').length < 2) {
+                layout.style.removeProperty('--build-h');  // Stacked: let it grow.
+                return;
+            }
+            const top = layout.getBoundingClientRect().top;
+            layout.style.setProperty('--build-h', `${Math.max(360, Math.round(window.innerHeight - top))}px`);
+        }
+        window.addEventListener('resize', syncBuildHeight);
 
         function applyTranslations() {
             document.querySelectorAll('[data-i18n]').forEach((el) => {
@@ -1297,6 +1382,7 @@
             crumb.style.display = name === 'manage' ? 'none' : '';
             document.getElementById('crumbHere').textContent = here || '';
             window.scrollTo({ top: 0, behavior: 'auto' });
+            requestAnimationFrame(syncBuildHeight);
         }
 
         function goManage() {
@@ -1641,13 +1727,13 @@
         function successOptions(step, index) {
             const current = successPolicyValue(step);
             const options = [
-                ['continue', 'Go to the next step'],
-                ['end', 'Finish the run here'],
+                ['continue', t('p_continue')],
+                ['end', t('p_end')],
             ];
             steps.forEach((candidate, candidateIndex) => {
                 if (candidateIndex === index) return;
                 const id = stepId(candidate, candidateIndex);
-                options.push([`goto:${id}`, `Jump to "${candidate.name || id}"`]);
+                options.push([`goto:${id}`, t('p_jump').replace('{name}', candidate.name || id)]);
             });
             return options
                 .map(([value, label]) =>
@@ -1658,16 +1744,16 @@
         function failureOptions(step, index) {
             const current = failurePolicyValue(step);
             const options = [
-                ['ask_user', 'Ask me and wait'],
-                ['abort', 'Stop the workflow'],
-                ['retry_once', 'Retry once, then stop'],
+                ['ask_user', t('p_ask')],
+                ['abort', t('p_abort')],
+                ['retry_once', t('p_retry')],
             ];
             // Every *other* step is a jump target — this is how a script step
             // escalates to an LLM step that works out why it broke.
             steps.forEach((candidate, candidateIndex) => {
                 if (candidateIndex === index) return;
                 const id = stepId(candidate, candidateIndex);
-                options.push([`goto:${id}`, `Go to "${candidate.name || id}"`]);
+                options.push([`goto:${id}`, t('p_goto').replace('{name}', candidate.name || id)]);
             });
             return options
                 .map(([value, label]) =>
@@ -1697,29 +1783,29 @@
                     ? `
                     <div class="row">
                         <div class="field">
-                            <label>Script</label>
+                            <label>${escapeHtml(t('s_script'))}</label>
                             <select class="input" onchange="updateStepAndRender(${index}, 'script_id', this.value)">
                                 ${scriptOptions(step)}
                             </select>
                         </div>
                         <div class="field">
-                            <label>Extra args (space separated)</label>
+                            <label>${escapeHtml(t('s_extra_args'))}</label>
                             <input class="input" value="${escapeHtml((step.script_args || []).join(' '))}"
                                    placeholder="e.g. R59N3035LQL"
                                    oninput="updateStepArgs(${index}, this.value)">
                         </div>
                     </div>
-                    ${scripts.length ? '' : '<div class="empty">Register a script below first.</div>'}`
+                    ${scripts.length ? '' : `<div class="empty">${escapeHtml(t('s_register_first'))}</div>`}`
                     : `
                     <div class="field">
-                        <label>Tool hint</label>
-                        <input class="input" value="${escapeHtml(step.tool_hint || '')}" placeholder="optional"
+                        <label>${escapeHtml(t('s_tool_hint'))}</label>
+                        <input class="input" value="${escapeHtml(step.tool_hint || '')}" placeholder="${escapeHtml(t('optional'))}"
                                oninput="updateStep(${index}, 'tool_hint', this.value)">
                     </div>`;
                 return `
                 <div class="step">
                     <div class="step-head">
-                        <span class="step-index">Step ${index + 1} · ${escapeHtml(stepId(step, index))}</span>
+                        <span class="step-index">${escapeHtml(t('s_step'))} ${index + 1} · ${escapeHtml(stepId(step, index))}</span>
                         <span>
                             <button class="btn btn-secondary btn-xs" onclick="moveStep(${index}, -1)" ${index === 0 ? 'disabled' : ''}>↑</button>
                             <button class="btn btn-secondary btn-xs" onclick="moveStep(${index}, 1)" ${index === steps.length - 1 ? 'disabled' : ''}>↓</button>
@@ -1728,35 +1814,35 @@
                     </div>
                     <div class="row">
                         <div class="field">
-                            <label>Name</label>
+                            <label>${escapeHtml(t('name'))}</label>
                             <input class="input" value="${escapeHtml(step.name || '')}" oninput="updateStep(${index}, 'name', this.value)">
                         </div>
                         <div class="field">
-                            <label>Type</label>
+                            <label>${escapeHtml(t('s_type'))}</label>
                             <select class="input" onchange="updateStepAndRender(${index}, 'type', this.value)">
-                                <option value="llm"${type === 'llm' ? ' selected' : ''}>LLM — the model decides and acts</option>
-                                <option value="shell"${isShell ? ' selected' : ''}>Script — runs a registered script, no tokens</option>
+                                <option value="llm"${type === 'llm' ? ' selected' : ''}>${escapeHtml(t('s_type_llm'))}</option>
+                                <option value="shell"${isShell ? ' selected' : ''}>${escapeHtml(t('s_type_shell'))}</option>
                             </select>
                         </div>
                     </div>
                     ${body}
                     <div class="field">
-                        <label>${isShell ? 'What this script does' : 'What happens in this step'}</label>
+                        <label>${escapeHtml(isShell ? t('s_what_script') : t('s_what_step'))}</label>
                         <textarea class="input" rows="2" oninput="updateStep(${index}, 'description', this.value)">${escapeHtml(step.description || '')}</textarea>
                     </div>
                     <div class="field">
-                        <label>Success criteria</label>
+                        <label>${escapeHtml(t('s_success_criteria'))}</label>
                         <input class="input" value="${escapeHtml(step.success_criteria || '')}" oninput="updateStep(${index}, 'success_criteria', this.value)">
                     </div>
                     <div class="row" style="margin-bottom:0;">
                         <div class="field" style="margin-bottom:0;">
-                            <label>If it succeeds</label>
+                            <label>${escapeHtml(t('s_on_success'))}</label>
                             <select class="input" onchange="setSuccessPolicy(${index}, this.value)">
                                 ${successOptions(step, index)}
                             </select>
                         </div>
                         <div class="field" style="margin-bottom:0;">
-                            <label>If it fails</label>
+                            <label>${escapeHtml(t('s_on_failure'))}</label>
                             <select class="input" onchange="setFailurePolicy(${index}, this.value)">
                                 ${failureOptions(step, index)}
                             </select>
@@ -2585,12 +2671,14 @@
             if (!approvals.length) { banner.style.display = 'none'; return; }
             banner.style.display = '';
             const n = approvals.length;
+            requestAnimationFrame(syncBuildHeight);
             document.getElementById('approvalBannerText').textContent = currentLang === 'ko'
                 ? (n === 1 ? t('approval_banner_one') : t('approval_banner_many').replace('{n}', n))
                 : `${n} run${n === 1 ? ' is' : 's are'} stopped waiting for permission. Their schedules skip until answered.`;
         }
 
         syncScheduleKind();
+        syncBuildHeight();
         applyTranslations();
         updateLangButtons();
         newAgent();
