@@ -11,6 +11,7 @@ from fastapi import FastAPI
 
 logger = logging.getLogger(__name__)
 
+from agent.run_reconciliation import reconcile_interrupted_runs
 from agent.scheduler import get_scheduler
 from core.config import get_config
 from core.database import migrate_accessible_folders_from_projects
@@ -47,6 +48,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     tunnel_service = await start_remote_tunnel_for_current_server(config, firebase_auth)
     heartbeat_task = start_heartbeat_for_current_server(config, firebase_auth)
+
+    # Before the scheduler can fire anything: close out runs a previous
+    # process left mid-flight. They are stale by definition — orchestration
+    # runs in this interpreter — and a run stuck "running" makes its schedule
+    # skip every fire from here on, with no grace period to rescue it.
+    reconcile_interrupted_runs()
 
     scheduler = None
     if os.environ.get("CODEBRIDGE_DISABLE_SCHEDULER") == "1":
