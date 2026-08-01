@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from core.database import get_db_connection
+from core.timestamps import to_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -161,15 +162,15 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "capabilities": json.loads(row["capabilities_json"]),
         "enabled": bool(row["enabled"]),
         "skip_if_active": bool(row["skip_if_active"]),
-        "next_run_at": row["next_run_at"],
-        "last_run_at": row["last_run_at"],
+        "next_run_at": to_utc_iso(row["next_run_at"]),
+        "last_run_at": to_utc_iso(row["last_run_at"]),
         "last_run_id": row["last_run_id"],
         "last_status": row["last_status"],
         "last_error": row["last_error"],
         "fire_count": int(row["fire_count"] or 0),
         "skip_count": int(row["skip_count"] or 0),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
+        "created_at": to_utc_iso(row["created_at"]),
+        "updated_at": to_utc_iso(row["updated_at"]),
     }
 
 

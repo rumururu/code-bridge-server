@@ -7,6 +7,7 @@ from typing import Any
 
 from core.database import get_db_connection, init_db
 from policy.policy_store import decide_policy_with_rules
+from core.timestamps import to_utc_iso
 
 
 def is_request_expired(request: dict[str, Any] | None) -> bool:
@@ -63,8 +64,8 @@ def _row_to_request(row: Any) -> dict[str, Any]:
         "policy": policy,
         "desktop_only": bool(policy.get("desktop_only")),
         "status": row["status"],
-        "created_at": row["created_at"],
-        "expires_at": row["expires_at"],
+        "created_at": to_utc_iso(row["created_at"]),
+        "expires_at": to_utc_iso(row["expires_at"]),
         "resolved_at": row["resolved_at"],
     }
 
@@ -78,7 +79,7 @@ def _row_to_decision(row: Any) -> dict[str, Any]:
         "reason": row["reason"],
         "constraints": _json_loads(row["constraints_json"], {}),
         "approver": _json_loads(row["approver_json"], {}),
-        "created_at": row["created_at"],
+        "created_at": to_utc_iso(row["created_at"]),
     }
 
 

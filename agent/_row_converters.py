@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from core.timestamps import to_utc_iso as _ts
+
 
 def _json_loads(value: str | None, default: Any) -> Any:
     if not value:
@@ -21,6 +23,7 @@ def _json_loads(value: str | None, default: Any) -> Any:
         return json.loads(value)
     except (TypeError, ValueError, json.JSONDecodeError):
         return default
+
 
 
 def _row_to_run(row: Any) -> dict[str, Any]:
@@ -38,10 +41,10 @@ def _row_to_run(row: Any) -> dict[str, Any]:
         "cwd": row["cwd"],
         "native_session_id": row["native_session_id"],
         "parent_run_id": row["parent_run_id"],
-        "started_at": row["started_at"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-        "ended_at": row["ended_at"],
+        "started_at": _ts(row["started_at"]),
+        "created_at": _ts(row["created_at"]),
+        "updated_at": _ts(row["updated_at"]),
+        "ended_at": _ts(row["ended_at"]),
     }
 
 
@@ -67,10 +70,10 @@ def _row_to_task(row: Any) -> dict[str, Any]:
         "metadata": _json_loads(row["metadata_json"], {}),
         "result": _json_loads(row["result_json"], {}),
         "error": _json_loads(row["error_json"], {}),
-        "started_at": row["started_at"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-        "ended_at": row["ended_at"],
+        "started_at": _ts(row["started_at"]),
+        "created_at": _ts(row["created_at"]),
+        "updated_at": _ts(row["updated_at"]),
+        "ended_at": _ts(row["ended_at"]),
     }
 
 
@@ -82,7 +85,7 @@ def _row_to_task_run(row: Any) -> dict[str, Any]:
         "role": row["role"],
         "sequence": row["sequence"],
         "metadata": _json_loads(row["metadata_json"], {}),
-        "created_at": row["created_at"],
+        "created_at": _ts(row["created_at"]),
     }
 
 
@@ -99,10 +102,10 @@ def _row_to_task_step(row: Any) -> dict[str, Any]:
         "output": _json_loads(row["output_json"], {}),
         "approval_id": row["approval_id"],
         "artifact_id": row["artifact_id"],
-        "started_at": row["started_at"],
-        "ended_at": row["ended_at"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
+        "started_at": _ts(row["started_at"]),
+        "ended_at": _ts(row["ended_at"]),
+        "created_at": _ts(row["created_at"]),
+        "updated_at": _ts(row["updated_at"]),
     }
 
 
@@ -121,7 +124,7 @@ def _row_to_capability(row: Any) -> dict[str, Any]:
         "local_only": bool(row["local_only"]),
         "metadata": _json_loads(row["metadata_json"], {}),
         "discovered_at": row["discovered_at"],
-        "updated_at": row["updated_at"],
+        "updated_at": _ts(row["updated_at"]),
     }
 
 
@@ -131,7 +134,7 @@ def _row_to_task_capability(row: Any) -> dict[str, Any]:
         "task_id": row["task_id"],
         "capability_id": row["capability_id"],
         "mode": row["mode"],
-        "created_at": row["created_at"],
+        "created_at": _ts(row["created_at"]),
     }
 
 
@@ -148,8 +151,8 @@ def _row_to_connector_request(row: Any) -> dict[str, Any]:
         "parameters": _json_loads(row["parameters_json"], {}),
         "result": _json_loads(row["result_json"], {}),
         "error": _json_loads(row["error_json"], {}),
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
+        "created_at": _ts(row["created_at"]),
+        "updated_at": _ts(row["updated_at"]),
         "completed_at": row["completed_at"],
     }
 
@@ -167,7 +170,7 @@ def _row_to_event(row: Any) -> dict[str, Any]:
         "parent_event_id": (
             row["parent_event_id"] if "parent_event_id" in row.keys() else None
         ),
-        "created_at": row["created_at"],
+        "created_at": _ts(row["created_at"]),
     }
 
 
@@ -178,7 +181,7 @@ def _row_to_message(row: Any) -> dict[str, Any]:
         "role": row["role"],
         "content": row["content"],
         "attachments": _json_loads(row["attachments_json"], []),
-        "created_at": row["created_at"],
+        "created_at": _ts(row["created_at"]),
     }
 
 
@@ -190,7 +193,7 @@ def _row_to_artifact(row: Any) -> dict[str, Any]:
         "path": row["path"],
         "mime_type": row["mime_type"],
         "metadata": _json_loads(row["metadata_json"], {}),
-        "created_at": row["created_at"],
+        "created_at": _ts(row["created_at"]),
     }
 
 
@@ -206,9 +209,9 @@ def _row_to_agent(row: Any) -> dict[str, Any]:
         "flow_json": _json_loads(row["flow_json"], []),
         "policy_overrides_json": _json_loads(row["policy_overrides_json"], {}),
         "is_pseudo": bool(row["is_pseudo"]),
-        "archived_at": row["archived_at"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
+        "archived_at": _ts(row["archived_at"]),
+        "created_at": _ts(row["created_at"]),
+        "updated_at": _ts(row["updated_at"]),
     }
 
 
@@ -220,5 +223,5 @@ def _row_to_memory(row: Any) -> dict[str, Any]:
         "source_run_id": row["source_run_id"],
         "source_event_type": row["source_event_type"],
         "pinned": bool(row["pinned"]),
-        "created_at": row["created_at"],
+        "created_at": _ts(row["created_at"]),
     }

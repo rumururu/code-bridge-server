@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from core.database import get_db_connection
+from core.timestamps import to_utc_iso
 
 _DEFAULT_TIMEOUT_SECONDS = 3600
 _MAX_TIMEOUT_SECONDS = 6 * 3600
@@ -41,8 +42,8 @@ def _row_to_script(row: Any) -> dict[str, Any]:
         "default_args": json.loads(row["default_args_json"] or "[]"),
         "timeout_seconds": row["timeout_seconds"],
         "created_by": row["created_by"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
+        "created_at": to_utc_iso(row["created_at"]),
+        "updated_at": to_utc_iso(row["updated_at"]),
     }
 
 

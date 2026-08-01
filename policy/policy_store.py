@@ -7,6 +7,7 @@ from typing import Any
 from core.database import get_db_connection, init_db
 
 from .policy_engine import decide_policy
+from core.timestamps import to_utc_iso
 
 ALLOWED_RULE_EFFECTS = {"allow", "confirm_once", "confirm_each", "desktop_only", "forbidden"}
 _EFFECT_RISK = {
@@ -43,8 +44,8 @@ def _row_to_rule(row: Any) -> dict[str, Any]:
         "effect": row["effect"],
         "constraints": _json_loads(row["constraints_json"], {}),
         "created_by": row["created_by"],
-        "created_at": row["created_at"],
-        "expires_at": row["expires_at"],
+        "created_at": to_utc_iso(row["created_at"]),
+        "expires_at": to_utc_iso(row["expires_at"]),
     }
 
 

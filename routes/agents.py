@@ -206,9 +206,30 @@ def _agent_run_activity(agent_id: str) -> dict[str, Any]:
         if run.get("started_at") or run.get("created_at")
     ]
     return {
-        "last_fire_at": max(stamps) if stamps else None,
+        "last_fire_at": _as_utc_iso(max(stamps)) if stamps else None,
         "active_run_count": active,
     }
+
+
+def _as_utc_iso(stamp: str) -> str | None:
+    """Turn a stored timestamp into an unambiguous instant.
+
+    SQLite writes ``CURRENT_TIMESTAMP`` as naive UTC — "2026-08-01 02:57:48"
+    with nothing to say which zone that is. Sent as-is, a client in KST reads
+    it as local and puts the run nine hours in the past. ``next_fire_at``
+    already goes out with an offset, so the two fields disagreed about what
+    "now" meant.
+    """
+    text = stamp.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat()
 
 
 def _agent_with_next_fire(agent: dict[str, Any]) -> dict[str, Any]:
