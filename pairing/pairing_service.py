@@ -97,9 +97,43 @@ class PairingService:
             except (json.JSONDecodeError, OSError):
                 self._api_keys = {}
 
-    def _save_api_keys(self) -> None:
-        """Persist API keys to disk."""
+    def _save_api_keys(self, *, allow_empty: bool = False) -> None:
+        """Persist API keys to disk.
+
+        Refuses to write an empty store over a file that still has clients
+        unless the caller says that is the intent. Every device loses its
+        pairing at once when that happens, and the phones cannot tell a wiped
+        server from a rejected key — they just stop working and offer a retry
+        that can never succeed. Recovering means re-pairing each device by QR.
+
+        The in-memory store is emptied on any read failure in
+        :meth:`_load_api_keys`, so one unreadable moment followed by any
+        ordinary save was enough to destroy every pairing.
+        """
         api_keys_file = self.config_dir / "api_keys.json"
+
+        if not self._api_keys and not allow_empty:
+            existing = self._read_api_keys_file(api_keys_file)
+            if existing:
+                backup = api_keys_file.with_name(
+                    f"api_keys.{int(_now_ts())}.recovered.json"
+                )
+                try:
+                    backup.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+                    backup.chmod(0o600)
+                except OSError:
+                    backup = None
+                logger.error(
+                    "Refusing to overwrite %d paired client(s) with an empty key store. "
+                    "Backup: %s",
+                    len(existing),
+                    backup or "not written",
+                )
+                # Recover rather than persist the emptiness: the file on disk is
+                # the truth here, not whatever cleared memory.
+                self._api_keys = existing
+                return
+
         tmp_file = api_keys_file.with_name(f"{api_keys_file.name}.tmp")
         tmp_file.write_text(json.dumps(self._api_keys, indent=2), encoding="utf-8")
         os.replace(tmp_file, api_keys_file)
@@ -107,6 +141,14 @@ class PairingService:
             api_keys_file.chmod(0o600)
         except OSError:
             pass
+
+    @staticmethod
+    def _read_api_keys_file(path: Path) -> dict[str, Any]:
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def _store_api_key_hash(self, client_data: dict[str, Any], api_key: str) -> None:
         """Store only a one-way hash of a client API key."""
@@ -599,7 +641,8 @@ class PairingService:
         """Revoke API key for a client."""
         if client_id in self._api_keys:
             del self._api_keys[client_id]
-            self._save_api_keys()
+            # Revoking the last client is a real, intended empty store.
+            self._save_api_keys(allow_empty=True)
             return PairingRevokeResult(
                 success=True,
                 status_code=200,
