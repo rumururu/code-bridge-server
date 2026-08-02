@@ -226,6 +226,17 @@ async def trigger_schedule_now(schedule_id: str) -> dict[str, Any]:
 # the PC — where you set schedules up — has to be able to see and write them.
 
 
+@router.get("/policies/operations", response_model=None)
+async def list_policy_operations() -> dict[str, Any]:
+    """Operations the permissions form may offer, derived from runtime reality.
+
+    Dashboard-only: this is UI metadata for building the standing-rule form,
+    not a capability the phone needs, so it stays off the tunnel-exposed API
+    the same way the rest of this file does.
+    """
+    return policies_routes.list_policy_operations()
+
+
 @router.get("/policies/rules", response_model=None)
 async def list_policy_rules(
     scope: str | None = None,

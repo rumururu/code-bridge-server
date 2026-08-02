@@ -29,6 +29,7 @@ class PairingRoutesTest(unittest.TestCase):
         app.include_router(pairing_router)
         app.dependency_overrides[verify_api_key] = lambda: True
         app.dependency_overrides[require_localhost_only] = lambda: True
+        self.app = app
         self.client = TestClient(app)
 
     def tearDown(self):
@@ -275,3 +276,50 @@ class PairingRoutesTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"success": True, "message": "Client c1 revoked"})
+
+    def test_register_push_token_success(self):
+        with patch(
+            "routes.pairing.register_push_token_for_current_server", return_value=True
+        ) as mock_register:
+            response = self.client.post(
+                "/api/pair/push-token",
+                json={"token": "fcm-token-1", "platform": "android"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"success": True})
+        mock_register.assert_called_once_with(True, "fcm-token-1", platform="android")
+
+    def test_register_push_token_defaults_platform_to_android(self):
+        with patch(
+            "routes.pairing.register_push_token_for_current_server", return_value=True
+        ) as mock_register:
+            response = self.client.post("/api/pair/push-token", json={"token": "fcm-token-1"})
+
+        self.assertEqual(response.status_code, 200)
+        mock_register.assert_called_once_with(True, "fcm-token-1", platform="android")
+
+    def test_register_push_token_unknown_client_returns_404(self):
+        with patch("routes.pairing.register_push_token_for_current_server", return_value=False):
+            response = self.client.post(
+                "/api/pair/push-token",
+                json={"token": "fcm-token-1"},
+            )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_register_push_token_requires_a_paired_key_not_ip_login(self):
+        self.app.dependency_overrides[verify_api_key] = lambda: "__ip_login__"
+        try:
+            with patch(
+                "routes.pairing.register_push_token_for_current_server"
+            ) as mock_register:
+                response = self.client.post(
+                    "/api/pair/push-token",
+                    json={"token": "fcm-token-1"},
+                )
+        finally:
+            self.app.dependency_overrides[verify_api_key] = lambda: True
+
+        self.assertEqual(response.status_code, 401)
+        mock_register.assert_not_called()

@@ -217,3 +217,14 @@ class SSOPairRequest(BaseModel):
     client_id: Optional[str] = None
     device_name: Optional[str] = None
     force_replace: bool = False  # If True, replace existing owner without confirmation
+
+
+class PushTokenRegisterRequest(BaseModel):
+    """Request body for registering/refreshing this device's FCM push token.
+
+    No client_id here on purpose — the token is attached to whichever paired
+    client authenticated the request, resolved server-side from the API key.
+    """
+
+    token: str
+    platform: str = "android"

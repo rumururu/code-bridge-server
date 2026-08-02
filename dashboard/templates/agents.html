@@ -402,6 +402,9 @@
         }
         .badge.on { border-color: var(--success-color); color: var(--success-color); }
         .badge.off { border-color: var(--text-muted); color: var(--text-muted); }
+        .badge.info { border-color: var(--accent-color); color: var(--accent-color); }
+        .badge.warn { border-color: var(--warning-color); color: var(--warning-color); }
+        .badge.bad { border-color: var(--danger-color); color: var(--danger-color); }
 
         .step {
             border: 1px solid var(--border-color);
@@ -778,6 +781,7 @@
                 </div>
                 <div class="card-body build-chat-body">
                     <div id="builderLog" class="chat-log"></div>
+                    <div id="builderProposals"></div>
                     <div id="builderApply"></div>
                     <div class="chat-compose">
                         <textarea id="builderInput" class="input" rows="2"
@@ -903,13 +907,13 @@
                 <div class="row">
                     <div class="field">
                         <label for="ruleOperation" data-i18n="operation">Operation</label>
-                        <select id="ruleOperation" class="input">
-                            <option value="process.terminal" data-i18n="op_terminal">process.terminal &mdash; shell commands</option>
-                            <option value="file.write" data-i18n="op_file_write">file.write &mdash; writing files</option>
-                            <option value="file.read" data-i18n="op_file_read">file.read &mdash; reading files</option>
-                            <option value="browser.control" data-i18n="op_browser">browser.control &mdash; browser automation</option>
-                            <option value="device.control" data-i18n="op_device">device.control &mdash; connected phones</option>
-                        </select>
+                        <!-- Options are populated by renderPolicyOperationOptions() from
+                             GET /policies/operations, which is generated server-side from
+                             the same mapping the runtime uses to check tool-permission
+                             prompts (chat/chat_stream_service.py:LLM_TOOL_APPROVAL_OPERATIONS).
+                             Do not hand-add <option> values here — that hand-copy is exactly
+                             how this list drifted from reality before. -->
+                        <select id="ruleOperation" class="input"></select>
                     </div>
                     <div class="field">
                         <label for="ruleScope" data-i18n="scope">Scope</label>
@@ -1036,11 +1040,11 @@
                 col_path: 'Path', col_runwith: 'Run with', col_timeout: 'Timeout',
                 col_effect: 'Effect', col_expires: 'Expires', col_detail: 'Detail', col_risk: 'Risk',
                 remove: 'Remove', never: 'never', approve: 'Approve', deny: 'Deny',
-                op_terminal: 'process.terminal — shell commands',
-                op_file_write: 'file.write — writing files',
-                op_file_read: 'file.read — reading files',
-                op_browser: 'browser.control — browser automation',
-                op_device: 'device.control — connected phones',
+                op_terminal: 'process.terminal — shell commands (chat/agent tool calls)',
+                op_file_write: 'file.write — editing or writing files (chat/agent tool calls)',
+                op_git_commit: 'git.commit — git commit or push (chat/agent tool calls)',
+                op_provider_tool: 'provider.tool — any other tool the model asks to use (Read, Grep, MCP tools, and anything else not listed above)',
+                op_device: 'device.control — connected-phone actions requested directly through the API, not through a chat tool call',
                 configurator: 'Configurator',
                 hint_definition: 'This is the agent as it stands. Say what you want on the right and it fills in here; edit anything directly.',
                 chat_opening: 'What should this agent do? One sentence is enough — I will draft the name, the prompt and the steps with you.',
@@ -1075,6 +1079,17 @@
                 s_schema_loading: 'Loading step fields…',
                 s_level_info: 'Info', s_level_success: 'Success', s_level_warning: 'Warning', s_level_error: 'Error',
                 s_actions_hint: 'Structured action list — edit from the phone app for the full action editor. This is a raw JSON fallback.',
+
+                sp_section_title: 'Scripts requested',
+                sp_status_drafting: 'Drafting…', sp_status_ready: 'Ready for review',
+                sp_status_failed: 'Failed', sp_status_registered: 'Registered',
+                sp_drafting_hint: 'The Configurator is writing this script. This can take up to three minutes — keep talking, it updates on its own.',
+                sp_approve: 'Approve & register', sp_registering: 'Registering…',
+                sp_failed_hint: 'Ask the Configurator again in the conversation if you still need this script.',
+                sp_failed_generic: 'The script could not be drafted.',
+                sp_registered_as: 'Registered as', sp_untitled: 'Untitled script',
+                sp_approve_failed: 'Could not register the script',
+                sp_registered_toast: 'Script registered — the step now points at it',
             },
             ko: {
                 nav_dashboard: '대시보드', nav_agents: '에이전트', nav_settings: '설정',
@@ -1150,11 +1165,11 @@
                 col_path: '경로', col_runwith: '실행기', col_timeout: '제한 시간',
                 col_effect: '효과', col_expires: '만료', col_detail: '내용', col_risk: '위험',
                 remove: '삭제', never: '없음', approve: '허용', deny: '거부',
-                op_terminal: 'process.terminal — 셸 명령',
-                op_file_write: 'file.write — 파일 쓰기',
-                op_file_read: 'file.read — 파일 읽기',
-                op_browser: 'browser.control — 브라우저 자동화',
-                op_device: 'device.control — 연결된 폰',
+                op_terminal: 'process.terminal — 셸 명령 (채팅/에이전트 도구 호출)',
+                op_file_write: 'file.write — 파일 수정 또는 쓰기 (채팅/에이전트 도구 호출)',
+                op_git_commit: 'git.commit — git 커밋 또는 푸시 (채팅/에이전트 도구 호출)',
+                op_provider_tool: 'provider.tool — 모델이 요청하는 그 외 모든 도구 (Read, Grep, MCP 도구 등 위에 없는 전부)',
+                op_device: 'device.control — API로 직접 요청하는 연결된 폰 동작 (채팅 도구 호출 아님)',
                 configurator: 'Configurator',
                 hint_definition: '지금까지의 에이전트입니다. 오른쪽에 원하는 바를 말하면 여기 채워집니다. 직접 고쳐도 됩니다.',
                 chat_opening: '어떤 일을 맡기고 싶으신가요? 한 문장으로 말씀하시면 이름·프롬프트·단계까지 같이 잡아 드립니다.',
@@ -1201,6 +1216,17 @@
                 s_schema_loading: '스텝 필드를 불러오는 중…',
                 s_level_info: '정보', s_level_success: '성공', s_level_warning: '경고', s_level_error: '오류',
                 s_actions_hint: '구조화된 동작 목록입니다 — 전용 동작 편집기는 폰 앱에서 사용하세요. 여기서는 원시 JSON으로만 편집합니다.',
+
+                sp_section_title: '요청된 스크립트',
+                sp_status_drafting: '초안 작성 중…', sp_status_ready: '검토 대기',
+                sp_status_failed: '실패', sp_status_registered: '등록됨',
+                sp_drafting_hint: 'Configurator가 이 스크립트를 작성하고 있습니다. 최대 3분 걸릴 수 있습니다 — 계속 대화하셔도 되고, 준비되면 자동으로 갱신됩니다.',
+                sp_approve: '승인하고 등록', sp_registering: '등록 중…',
+                sp_failed_hint: '이 스크립트가 여전히 필요하면 대화에서 Configurator에게 다시 요청하세요.',
+                sp_failed_generic: '스크립트를 작성하지 못했습니다.',
+                sp_registered_as: '등록된 스크립트', sp_untitled: '이름 없는 스크립트',
+                sp_approve_failed: '스크립트를 등록하지 못했습니다',
+                sp_registered_toast: '스크립트가 등록되어 이 단계가 이제 이를 가리킵니다',
             },
         };
 
@@ -1243,11 +1269,13 @@
             renderAgentList();
             renderSchedules();
             renderScripts();
+            renderPolicyOperationOptions();
             renderPolicyRules();
             renderApprovals();
             renderApprovalBanner();
             renderRunList();
             renderSteps();
+            renderScriptProposals();
             const agent = agents.find((candidate) => candidate.id === selectedAgentId);
             if (agent) renderDetail(agent);
             const saveBtn = document.getElementById('saveBtn');
@@ -1308,12 +1336,33 @@
         let runs = [];
         let selectedRunId = null;
         let policyRules = [];
+        let policyOperations = [];
         let approvals = [];
         let tasksById = {};
         let selectedAgentId = null;
         let steps = [];
         let builderSession = null;
         let builderDraft = null;
+
+        // --- Script proposals -------------------------------------------
+        //
+        // A script the Configurator asks for mid-conversation (see
+        // AGENT_COMPOSITION_SPEC.md 4.1 / server/routes/script_proposals.py).
+        // Every turn's response carries the whole session's proposal list, so
+        // this is keyed by proposal_id and merged rather than replaced —
+        // a proposal already `ready` must not flash back to `drafting`
+        // because an older turn's snapshot arrived late.
+        let scriptProposals = {};
+        // proposal_id -> ms timestamp first seen `drafting`, purely for the
+        // "Ns elapsed" hint; not sent anywhere.
+        let scriptProposalStartedAt = {};
+        // Prevents a second poll loop starting for a proposal that already
+        // has one in flight (e.g. re-rendered after a turn while an earlier
+        // poll from a previous turn is still ticking).
+        let scriptProposalPolling = new Set();
+        // Proposal ids with an in-flight approve call, so the button cannot
+        // be double-clicked into two registrations.
+        let scriptProposalApproving = new Set();
 
         // The server's single per-step-type field definition (see
         // AGENT_COMPOSITION_SPEC.md Phase 2/3). Fetched once on page load and
@@ -1436,6 +1485,180 @@
                 ${escapeHtml(t('apply_offer'))} <strong>${escapeHtml(bits.join(', '))}</strong>
                 <button type="button" class="linklike" onclick="applyDraft(pendingDraft)">${escapeHtml(t('apply_now'))}</button>
             </div>`;
+        }
+
+        // --- Script proposals -------------------------------------------
+        //
+        // The Configurator can ask mid-conversation for a script it needs
+        // instead of dead-ending (AGENT_COMPOSITION_SPEC.md 4.1). A proposal
+        // arrives `drafting`, becomes `ready` with a body to read, and only an
+        // explicit click here ever registers it — see
+        // server/routes/script_proposals.py for why approval takes no body
+        // and is dashboard-only.
+
+        function scriptProposalBadgeClass(status) {
+            if (status === 'registered') return 'on';
+            if (status === 'failed') return 'bad';
+            if (status === 'ready') return 'warn';
+            return 'info'; // drafting
+        }
+
+        function scriptProposalStatusLabel(status) {
+            if (status === 'registered') return t('sp_status_registered');
+            if (status === 'failed') return t('sp_status_failed');
+            if (status === 'ready') return t('sp_status_ready');
+            return t('sp_status_drafting');
+        }
+
+        // Merges rather than replaces: every turn re-sends the whole
+        // session's proposal list, and an older, still-in-flight turn must
+        // not be allowed to snap a proposal that has since gone `ready` back
+        // to `drafting`.
+        function syncScriptProposals(list) {
+            if (Array.isArray(list)) {
+                list.forEach((proposal) => {
+                    const id = proposal && proposal.proposal_id;
+                    if (!id) return;
+                    scriptProposals[id] = proposal;
+                    if (proposal.status === 'drafting') {
+                        if (!scriptProposalStartedAt[id]) scriptProposalStartedAt[id] = Date.now();
+                        pollScriptProposal(id);
+                    }
+                });
+            }
+            renderScriptProposals();
+        }
+
+        // Polls one proposal on its own timer, independent of the chat send
+        // button, so the user can keep talking while a script drafts in the
+        // background. Mirrors runBuilderTurn's poll/limit shape.
+        const SCRIPT_PROPOSAL_POLL_MS = 2000;
+        const SCRIPT_PROPOSAL_POLL_LIMIT = 90; // ~3 minutes, same budget the server documents.
+
+        async function pollScriptProposal(proposalId) {
+            if (scriptProposalPolling.has(proposalId)) return;
+            scriptProposalPolling.add(proposalId);
+            try {
+                for (let attempt = 0; attempt < SCRIPT_PROPOSAL_POLL_LIMIT; attempt += 1) {
+                    const current = scriptProposals[proposalId];
+                    // Gone (a reset) or already settled by another path (a
+                    // later turn's script_proposals list): stop.
+                    if (!current || current.status !== 'drafting') return;
+                    await new Promise((resolve) => setTimeout(resolve, SCRIPT_PROPOSAL_POLL_MS));
+                    const polled = await api(`/builder/scripts/proposals/${encodeURIComponent(proposalId)}`);
+                    if (polled && polled.proposal) {
+                        scriptProposals[proposalId] = polled.proposal;
+                        renderScriptProposals();
+                        if (polled.proposal.status !== 'drafting') return;
+                    }
+                    // A transient poll error leaves the card as `drafting`;
+                    // the loop just tries again next tick.
+                }
+            } finally {
+                scriptProposalPolling.delete(proposalId);
+            }
+        }
+
+        function renderScriptProposals() {
+            const host = document.getElementById('builderProposals');
+            if (!host) return;
+            const list = Object.keys(scriptProposals)
+                .map((id) => scriptProposals[id])
+                .sort((a, b) => (a.proposal_id > b.proposal_id ? 1 : -1));
+            if (!list.length) {
+                host.innerHTML = '';
+                return;
+            }
+            host.innerHTML = `<div class="log-label" style="margin-bottom:6px;">${escapeHtml(t('sp_section_title'))}</div>`
+                + list.map(renderScriptProposalCard).join('');
+        }
+
+        function renderScriptProposalCard(proposal) {
+            const id = proposal.proposal_id;
+            const badgeClass = scriptProposalBadgeClass(proposal.status);
+            const label = scriptProposalStatusLabel(proposal.status);
+            let body = '';
+            if (proposal.status === 'ready' && proposal.body) {
+                // The approve action only ever exists in the same block as the
+                // body it approves — there is no path that offers approval
+                // without the script text visible above the button.
+                const approving = scriptProposalApproving.has(id);
+                const errorLine = proposal.error
+                    ? `<div class="status error" style="margin-top:6px;">${escapeHtml(proposal.error)}</div>`
+                    : '';
+                body = `
+                    <pre class="log-pane">${escapeHtml(proposal.body)}</pre>
+                    <div class="actions" style="margin-top:8px;">
+                        <button type="button" class="btn btn-xs" ${approving ? 'disabled' : ''} onclick="approveScriptProposal('${id}')">${escapeHtml(approving ? t('sp_registering') : t('sp_approve'))}</button>
+                    </div>
+                    ${errorLine}`;
+            } else if (proposal.status === 'failed') {
+                body = `
+                    <div class="note blocking">${escapeHtml(proposal.error || t('sp_failed_generic'))}</div>
+                    <div class="hint" style="margin:6px 0 0;">${escapeHtml(t('sp_failed_hint'))}</div>`;
+            } else if (proposal.status === 'registered') {
+                // Collapsed: it is done, this is just a receipt.
+                body = `<div class="status">${escapeHtml(t('sp_registered_as'))} <code>${escapeHtml(proposal.script_id || '')}</code></div>`;
+            } else {
+                // drafting, or ready-with-no-body-yet — treated the same: it
+                // is not approvable until there is something to read.
+                const startedAt = scriptProposalStartedAt[id] || Date.now();
+                const elapsed = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+                body = `<div class="status">${escapeHtml(t('sp_drafting_hint'))} · ${elapsed}s</div>`;
+            }
+            return `
+                <div class="step" data-proposal-id="${escapeHtml(id)}">
+                    <div class="step-head">
+                        <span class="step-index">${escapeHtml(proposal.name || t('sp_untitled'))}</span>
+                        <span class="badge ${badgeClass}">${escapeHtml(label)}</span>
+                    </div>
+                    <div class="hint" style="margin:0 0 8px;">${escapeHtml(proposal.purpose || '')}</div>
+                    ${body}
+                </div>`;
+        }
+
+        async function approveScriptProposal(proposalId) {
+            if (scriptProposalApproving.has(proposalId)) return;
+            scriptProposalApproving.add(proposalId);
+            renderScriptProposals();
+
+            const result = await api(`/builder/scripts/proposals/${encodeURIComponent(proposalId)}/approve`, {
+                method: 'POST',
+            });
+            scriptProposalApproving.delete(proposalId);
+
+            if (!result || result.error) {
+                // The server leaves a failed approval (e.g. a name collision)
+                // in `ready` and approvable again — see approve_script_proposal
+                // in script_proposals.py — so this is not a dead end, just an
+                // inline message next to the button.
+                const proposal = scriptProposals[proposalId];
+                if (proposal) proposal.error = (result && result.error) || t('sp_approve_failed');
+                renderScriptProposals();
+                return;
+            }
+
+            if (result.proposal) scriptProposals[proposalId] = result.proposal;
+            if (result.script) {
+                const idx = scripts.findIndex((script) => script.id === result.script.id);
+                if (idx >= 0) scripts[idx] = result.script; else scripts.push(result.script);
+            }
+            if (result.updated_draft) {
+                // Approval is itself the explicit, positive user action —
+                // unlike a conversation turn's draft, it does not wait for a
+                // separate "Apply" click. This is what makes the shell step's
+                // script picker show the new script immediately.
+                builderDraft = result.updated_draft;
+                pendingDraft = result.updated_draft;
+                if (Array.isArray(result.updated_draft.flow) && result.updated_draft.flow.length) {
+                    steps = result.updated_draft.flow.map((step) => ({ ...step }));
+                    renderSteps();
+                }
+            }
+            renderScriptProposals();
+            renderStepScriptWarning();
+            renderReview();
+            toast(t('sp_registered_toast'));
         }
 
         // --- Views ----------------------------------------------------------
@@ -2372,10 +2595,17 @@
             builderDraft = null;
             pendingDraft = null;
             handEdited = new Set();
+            // Clearing the dict (rather than leaving entries) is what stops
+            // any in-flight pollScriptProposal loop for the old session: each
+            // tick checks scriptProposals[id] and returns once it is gone.
+            scriptProposals = {};
+            scriptProposalStartedAt = {};
+            scriptProposalApproving = new Set();
             const log = document.getElementById('builderLog');
             log.innerHTML = `<div class="chat-line builder"><span class="who">configurator</span>${escapeHtml(t('chat_opening'))}</div>`;
             const apply = document.getElementById('builderApply');
             if (apply) apply.innerHTML = '';
+            renderScriptProposals();
             setStatus('builderStatus', '');
         }
 
@@ -2436,6 +2666,11 @@
             // Fields the user has not touched follow the conversation on their
             // own; the rest is offered rather than taken.
             applyDraft(pendingDraft);
+            // Every turn carries the session's whole script-proposal list
+            // (see agent.agent_models.BuilderTurnResponse), including ones a
+            // background drafting job finished while this turn was in
+            // flight — sync picks those up too, not just new ones.
+            syncScriptProposals(result.script_proposals);
         }
 
         // --- Schedules ------------------------------------------------------
@@ -2901,6 +3136,43 @@
 
         // --- Unattended permissions ------------------------------------------
 
+        // Maps an operation value from GET /policies/operations to its i18n
+        // key. Anything the server returns that is not in here (a future
+        // operation added before this map is updated) still shows up, just
+        // with the server's own English `surface_detail` instead of a
+        // translated label — never silently dropped, so a new operation is
+        // always pickable even before someone adds copy for it.
+        const OPERATION_I18N_KEY = {
+            'process.terminal': 'op_terminal',
+            'file.write': 'op_file_write',
+            'git.commit': 'op_git_commit',
+            'provider.tool': 'op_provider_tool',
+            'device.control': 'op_device',
+        };
+
+        function operationLabel(op) {
+            const key = OPERATION_I18N_KEY[op.value];
+            if (key) return t(key);
+            return `${op.value} — ${op.surface_detail || op.surface || ''}`.trim();
+        }
+
+        // Populated from the server's operation catalog rather than a
+        // hand-written <option> list, so the choices offered here can never
+        // drift from what the runtime actually checks (see the comment on
+        // #ruleOperation in the HTML and LLM_TOOL_APPROVAL_OPERATIONS in
+        // chat/chat_stream_service.py).
+        function renderPolicyOperationOptions() {
+            const select = document.getElementById('ruleOperation');
+            if (!select) return;
+            const previous = select.value;
+            select.innerHTML = policyOperations.map((op) =>
+                `<option value="${escapeHtml(op.value)}">${escapeHtml(operationLabel(op))}</option>`
+            ).join('');
+            if (previous && policyOperations.some((op) => op.value === previous)) {
+                select.value = previous;
+            }
+        }
+
         function renderPolicyRules() {
             const host = document.getElementById('ruleList');
             document.getElementById('ruleCount').textContent =
@@ -3003,11 +3275,12 @@
         // --- Bootstrap ------------------------------------------------------
 
         async function reloadAll() {
-            const [agentResult, scheduleResult, taskResult, ruleResult, approvalResult, scriptResult, runResult, stepSchemaResult] = await Promise.all([
+            const [agentResult, scheduleResult, taskResult, ruleResult, operationResult, approvalResult, scriptResult, runResult, stepSchemaResult] = await Promise.all([
                 api('/agents?limit=200'),
                 api('/schedules'),
                 api('/tasks?limit=200'),
                 api('/policies/rules'),
+                api('/policies/operations'),
                 api('/approvals/pending'),
                 api('/scripts'),
                 api('/runs?limit=60'),
@@ -3016,6 +3289,12 @@
             agents = (agentResult && agentResult.agents) || [];
             schedules = (scheduleResult && scheduleResult.schedules) || [];
             policyRules = (ruleResult && ruleResult.rules) || [];
+            // A failed/errored fetch leaves whatever was already loaded in
+            // place, same as the step-schema guard below — losing the
+            // catalog on a transient error would empty the operation select.
+            if (operationResult && Array.isArray(operationResult.operations)) {
+                policyOperations = operationResult.operations;
+            }
             scripts = (scriptResult && scriptResult.scripts) || [];
             runs = (runResult && runResult.runs) || [];
             approvals = (approvalResult && approvalResult.approvals) || [];
@@ -3027,6 +3306,7 @@
             if (stepSchemaResult && Array.isArray(stepSchemaResult.types)) {
                 stepSchema = stepSchemaResult;
             }
+            renderPolicyOperationOptions();
             renderAgentList();
             renderAgentPicker();
             renderSchedules();

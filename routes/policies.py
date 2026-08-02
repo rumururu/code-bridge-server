@@ -4,12 +4,60 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from chat.chat_stream_service import LLM_TOOL_APPROVAL_OPERATIONS
 from policy.policy_models import PolicyRuleCreate
 from policy.policy_store import get_policy_rule_store
 
 from .deps import verify_api_key
 
 router = APIRouter(prefix="/api/policies", tags=["policies"])
+
+
+# Operations meaningful for a dashboard standing-permission rule, each tagged
+# with the request surface that actually consults it. `LLM_TOOL_APPROVAL_OPERATIONS`
+# covers every operation an LLM tool-permission prompt can carry; `device.control`
+# is a separate, real surface — direct device-action API routes (see
+# routes/projects.py) call `evaluate_direct_action_gate(operation="device.control", ...)`
+# directly, never through a chat/LLM tool call. Two operations the dashboard
+# used to also offer, `file.read` and `browser.control`, are deliberately not
+# here: no call site anywhere (LLM tool path or direct-action gate) ever asks
+# for approval under either name, so a rule for them can never be consulted —
+# offering them told the user they had authorized something that does not
+# exist.
+_DIRECT_ACTION_OPERATIONS: tuple[dict[str, str], ...] = (
+    {
+        "value": "device.control",
+        "surface": "direct_action",
+        "surface_detail": (
+            "Connected-phone actions requested directly through the API — "
+            "not through a chat/LLM tool call."
+        ),
+    },
+)
+
+
+def list_policy_operations() -> dict[str, Any]:
+    """Operations a standing policy rule can actually match, with their surface.
+
+    This is the dashboard permissions form's data source. It exists so that
+    list is generated from `LLM_TOOL_APPROVAL_OPERATIONS` instead of being
+    hand-copied into HTML a second time — that hand-copy is exactly how the
+    form's option list drifted from reality before.
+    """
+    operations = [
+        {
+            "value": operation,
+            "surface": "llm_tool_call",
+            "surface_detail": (
+                "Any other tool the model asks to use during a chat/agent turn."
+                if operation == "provider.tool"
+                else "Requested when the model calls this tool during a chat/agent turn."
+            ),
+        }
+        for operation in LLM_TOOL_APPROVAL_OPERATIONS
+    ]
+    operations.extend(dict(item) for item in _DIRECT_ACTION_OPERATIONS)
+    return {"operations": operations}
 
 
 @router.get("/rules", dependencies=[Depends(verify_api_key)], response_model=None)

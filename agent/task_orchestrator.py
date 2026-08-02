@@ -1311,11 +1311,13 @@ async def _execute_notify_workflow_step(
         return False
 
     task = store.get_task(task_id) or {}
+    notify_body = payload.get("body") or step_input.get("description") or None
+    notify_level = normalize_level(payload.get("level"))
     try:
         notification = get_notification_store().create(
             title=title,
-            body=payload.get("body") or step_input.get("description") or None,
-            level=normalize_level(payload.get("level")),
+            body=notify_body,
+            level=notify_level,
             run_id=run_id,
             task_id=task_id,
             agent_id=task.get("assigned_agent_id"),
@@ -1330,11 +1332,55 @@ async def _execute_notify_workflow_step(
         )
         return False
 
+    _push_notification_best_effort(
+        notification=notification,
+        title=title,
+        body=notify_body,
+        level=notify_level,
+    )
+
     store.update_task_step(
         step_id,
         {"status": "completed", "output": {"notification": notification}},
     )
     return True
+
+
+def _push_notification_best_effort(
+    *,
+    notification: dict[str, Any],
+    title: str,
+    body: str | None,
+    level: str,
+) -> None:
+    """Best-effort FCM push for a notification that is already durably stored.
+
+    The step already succeeded by the time this runs — the notification is
+    in the store and the inbox will show it on the next pull regardless. A
+    push failure (no key configured, FCM rejects the send, network error) is
+    a lost ring, not a lost message, so it is logged and swallowed here
+    rather than allowed to fail the step.
+    """
+    try:
+        from pairing.pairing import get_pairing_service
+
+        tokens = get_pairing_service().all_push_tokens()
+        if not tokens:
+            return
+
+        from agent.push_notifier import send_to_tokens
+
+        result = send_to_tokens(
+            tokens,
+            title=title,
+            body=body,
+            notification_id=notification.get("id"),
+            level=level,
+        )
+        for dead_token in result.get("dropped", []):
+            get_pairing_service().remove_push_token(dead_token)
+    except Exception:
+        logger.exception("Push notification attempt failed; notification is still stored")
 
 
 async def _execute_shell_workflow_step(
@@ -2188,12 +2234,14 @@ def _wait_for_user_step(
     )
     task = store.get_task(task_id)
     metadata = dict(task.get("metadata") or {}) if task else {}
-    metadata["active_checkpoint"] = {
+    previous_checkpoint = metadata.get("active_checkpoint")
+    new_checkpoint_marker = {
         "run_id": run_id,
         "step_id": step["id"],
         "workflow_step_id": checkpoint.get("workflow_step_id"),
         "reason": reason,
     }
+    metadata["active_checkpoint"] = new_checkpoint_marker
     store.update_task(task_id, {"status": "waiting_for_user", "metadata": metadata})
     store.update_run_status(run_id, "waiting_for_user")
     store.append_event(
@@ -2206,6 +2254,116 @@ def _wait_for_user_step(
             "step": updated_step,
         },
     )
+
+    # Same run, same step, same reason as the last park means this is a
+    # resume-then-immediately-re-park loop (e.g. the user resumed a browser
+    # handoff but the page is still showing the login form) rather than a
+    # new event the user has not already been told about. Notifying again on
+    # every such loop would turn one stuck run into a stream of pings.
+    is_repeat_park = (
+        isinstance(previous_checkpoint, dict)
+        and previous_checkpoint.get("run_id") == run_id
+        and previous_checkpoint.get("step_id") == step["id"]
+        and previous_checkpoint.get("reason") == reason
+    )
+    if not is_repeat_park:
+        _notify_waiting_for_user_best_effort(
+            store=store,
+            task=task,
+            run_id=run_id,
+            step=step,
+            reason=reason,
+            prompt=checkpoint.get("prompt") if isinstance(checkpoint.get("prompt"), str) else None,
+        )
+
+
+_WAIT_REASON_LABELS: dict[str, str] = {
+    "login_required": "needs a login",
+    "captcha_or_bot_challenge": "hit a CAPTCHA or bot check",
+    "manual_handoff": "needs a manual handoff",
+    "mcp_tool": "needs a tool/MCP confirmation",
+    "approval_gate": "needs your approval",
+    "approval_required": "needs your approval",
+    "ask_user": "needs your input",
+    "browser_action": "needs help with a browser step",
+    "app_action": "needs help with a device action",
+}
+
+
+def _wait_reason_label(reason: str) -> str:
+    """Turn a wait-reason code into a short phrase for a notification title.
+
+    Known reasons get a human phrase; anything else (there are dozens of
+    finer-grained `wait_reason` values from the browser/app adapters, e.g.
+    ``browser_action_click_requires_review``) still gets read as words rather
+    than a code, because a notification with no clue why it fired is not
+    actionable at 3am.
+    """
+    label = _WAIT_REASON_LABELS.get(reason)
+    if label:
+        return label
+    humanized = str(reason or "").replace("_", " ").strip()
+    return humanized or "needs your attention"
+
+
+def _notify_waiting_for_user_best_effort(
+    *,
+    store: Any,
+    task: dict[str, Any] | None,
+    run_id: str,
+    step: dict[str, Any],
+    reason: str,
+    prompt: str | None,
+) -> None:
+    """Tell the phone a run parked for a human, best-effort.
+
+    The run is already parked by the time this runs — its only job left is
+    to make sure someone finds out. A notification-store failure or a push
+    failure must never turn into a further-stalled or failed run; the run
+    stays parked either way, and the worst outcome here is the user finding
+    out from the app instead of a push, which is exactly today's behavior.
+    Losing this path entirely, silently, is the actual regression to guard
+    against: without it a 3am run stuck on a login prompt sits invisible
+    until someone opens the app and happens to notice a badge.
+    """
+    try:
+        from agent.notification_store import get_notification_store
+
+        agent_id = task.get("assigned_agent_id") if isinstance(task, dict) else None
+        agent_name = None
+        if agent_id:
+            agent = store.get_agent(str(agent_id))
+            if isinstance(agent, dict):
+                agent_name = agent.get("name")
+        task_title = (
+            (task.get("title") if isinstance(task, dict) else None)
+            or step.get("title")
+            or "A task"
+        )
+        reason_label = _wait_reason_label(reason)
+        title = f"{agent_name or 'An agent'} needs you: {reason_label}"
+        body = prompt or f"{task_title} is waiting for you."
+
+        notification = get_notification_store().create(
+            title=title,
+            body=body,
+            level="warning",
+            run_id=run_id,
+            task_id=task.get("id") if isinstance(task, dict) else None,
+            agent_id=agent_id,
+        )
+        _push_notification_best_effort(
+            notification=notification,
+            title=title,
+            body=body,
+            level="warning",
+        )
+    except Exception:
+        logger.exception(
+            "Waiting-for-user notification failed for run_id=%s step_id=%s; run stays parked",
+            run_id,
+            step.get("id"),
+        )
 
 
 def _finish_workflow_execution(

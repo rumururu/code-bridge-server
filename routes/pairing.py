@@ -7,12 +7,18 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from models import PairCodeVerifyRequest, PairVerifyRequest, SSOPairRequest
+from models import (
+    PairCodeVerifyRequest,
+    PairVerifyRequest,
+    PushTokenRegisterRequest,
+    SSOPairRequest,
+)
 from pairing.pairing import (
     RateLimiter,
     build_current_pairing_qr_result,
     get_pair_token_status_for_current_server,
     get_pairing_status_for_current_server,
+    register_push_token_for_current_server,
     revoke_paired_client_for_current_server,
     verify_pairing_code_for_current_server,
     verify_sso_pairing_for_current_server,
@@ -267,6 +273,37 @@ async def verify_sso_pairing(request: Request, body: SSOPairRequest) -> dict[str
 async def get_pair_status() -> dict[str, Any]:
     """Get current pairing status."""
     return get_pairing_status_for_current_server().as_response_fields()
+
+
+@router.post("/api/pair/push-token", response_model=None)
+async def register_push_token(
+    body: PushTokenRegisterRequest,
+    api_key: str = Depends(verify_api_key),
+) -> dict[str, Any]:
+    """Register (or refresh) this device's FCM token for push delivery.
+
+    Called once right after pairing and again whenever the OS rotates the
+    token. The token is attached to whichever paired client authenticated
+    this request — a device can only ever register a token for its own
+    pairing, never for a client_id it merely names in the body.
+
+    Without this endpoint a notify step's message is stored on the server
+    but the phone never learns about it until the inbox is opened by hand;
+    this is what turns that pull into a push.
+    """
+    if not api_key or api_key == "__ip_login__":
+        raise HTTPException(
+            status_code=401,
+            detail="A paired API key is required to register a push token.",
+        )
+
+    registered = register_push_token_for_current_server(api_key, body.token, platform=body.platform)
+    if not registered:
+        raise HTTPException(
+            status_code=404,
+            detail="No paired client found for this API key.",
+        )
+    return {"success": True}
 
 
 @router.delete(

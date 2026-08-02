@@ -637,6 +637,89 @@ class PairingService:
             expired=token_data.get("expires_at", 0) < _now_ts(),
         )
 
+    def find_client_id_by_api_key(self, api_key: str) -> Optional[str]:
+        """Resolve which paired client authenticated with `api_key`.
+
+        Used by the push-token route so a device can only ever register a
+        token for the pairing it actually authenticated as — never for a
+        client_id it merely claims in the request body.
+        """
+        for client_id, key_data in self._api_keys.items():
+            if self._api_key_matches(key_data, api_key):
+                return client_id
+        return None
+
+    def register_push_token(
+        self,
+        client_id: str,
+        token: str,
+        *,
+        platform: str = "android",
+    ) -> bool:
+        """Attach an FCM token to a paired client.
+
+        Tokens rotate — reinstall, cleared app data, a routine Play Services
+        refresh — so the same physical device can show up under a new token
+        at any time. Registering is therefore idempotent (the same token
+        twice keeps one entry) and self-healing (a token that moved to a
+        different client_id is removed from its old owner first, so a
+        re-pair on a new account doesn't fan a push out to both).
+        """
+        if client_id not in self._api_keys:
+            return False
+        clean_token = str(token or "").strip()
+        if not clean_token:
+            return False
+
+        for other_id, data in self._api_keys.items():
+            if other_id == client_id:
+                continue
+            tokens = data.get("push_tokens")
+            if isinstance(tokens, list) and clean_token in tokens:
+                data["push_tokens"] = [t for t in tokens if t != clean_token]
+
+        client_data = self._api_keys[client_id]
+        tokens = client_data.get("push_tokens")
+        tokens = list(tokens) if isinstance(tokens, list) else []
+        if clean_token not in tokens:
+            tokens.append(clean_token)
+        client_data["push_tokens"] = tokens
+        client_data["push_platform"] = platform
+        self._save_api_keys()
+        return True
+
+    def remove_push_token(self, token: str) -> None:
+        """Drop a token FCM reported as unregistered.
+
+        Keeping it around would cost a doomed send attempt on every future
+        notify for no benefit — an unregistered token does not come back.
+        """
+        clean_token = str(token or "").strip()
+        if not clean_token:
+            return
+        changed = False
+        for data in self._api_keys.values():
+            tokens = data.get("push_tokens")
+            if isinstance(tokens, list) and clean_token in tokens:
+                data["push_tokens"] = [t for t in tokens if t != clean_token]
+                changed = True
+        if changed:
+            self._save_api_keys()
+
+    def all_push_tokens(self) -> list[str]:
+        """Every push token across every paired client.
+
+        The inbox is not per-client, so a notify step's push fans out to
+        every device that has ever registered a token, the same way the
+        stored notification is visible to every paired client that pulls it.
+        """
+        tokens: list[str] = []
+        for data in self._api_keys.values():
+            raw = data.get("push_tokens")
+            if isinstance(raw, list):
+                tokens.extend(t for t in raw if isinstance(t, str) and t)
+        return tokens
+
     def revoke_client(self, client_id: str) -> PairingRevokeResult:
         """Revoke API key for a client."""
         if client_id in self._api_keys:
@@ -803,6 +886,25 @@ def revoke_paired_client_for_current_server(
     """Revoke paired client using current pairing service context."""
     resolved_pairing_service = pairing_service or get_pairing_service()
     return resolved_pairing_service.revoke_client(client_id)
+
+
+def register_push_token_for_current_server(
+    api_key: str,
+    token: str,
+    *,
+    platform: str = "android",
+    pairing_service: Optional[PairingService] = None,
+) -> bool:
+    """Register a push token for whichever paired client owns `api_key`.
+
+    Returns False (rather than raising) when the key does not belong to any
+    tracked client — callers turn that into a 404, not a crash.
+    """
+    resolved_pairing_service = pairing_service or get_pairing_service()
+    client_id = resolved_pairing_service.find_client_id_by_api_key(api_key)
+    if client_id is None:
+        return False
+    return resolved_pairing_service.register_push_token(client_id, token, platform=platform)
 
 
 def verify_pairing_code_for_current_server(

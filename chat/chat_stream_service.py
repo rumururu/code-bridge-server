@@ -159,7 +159,16 @@ def _normalized_event_from(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _approval_operation_for_tool(tool_name: Any) -> str:
-    """Map provider-native tool names to Code Bridge policy operations."""
+    """Map provider-native tool names to Code Bridge policy operations.
+
+    The literal strings this returns are the entire set of operations a
+    standing policy rule can ever match for an LLM tool-permission prompt —
+    see ``LLM_TOOL_APPROVAL_OPERATIONS`` below, which must list exactly these
+    four values. A rule created for anything outside that set (the dashboard
+    used to also offer ``file.read`` and ``browser.control``) looks like a
+    working standing permission and is not: it can never be consulted,
+    because no call site ever asks for approval under that operation name.
+    """
     normalized = str(tool_name or "").strip().lower()
     if normalized in {"bash", "shell", "terminal", "run_command"}:
         return "process.terminal"
@@ -168,6 +177,27 @@ def _approval_operation_for_tool(tool_name: Any) -> str:
     if normalized in {"git", "git_commit", "git_push"}:
         return "git.commit"
     return "provider.tool"
+
+
+# The exhaustive set of operations `_approval_operation_for_tool` can produce.
+# The dashboard's "Unattended permissions" form used to hand-copy a second,
+# independent list of operations into an HTML <select> instead of reading
+# this one, and the two drifted: the form offered `file.read` and
+# `browser.control` (which this function never returns, so a rule for them
+# never matches anything) and omitted `git.commit` and `provider.tool`
+# (which it does return, so the common case of a scheduled run stalling on a
+# plain tool read had no way to be pre-authorized at all). Anything that
+# builds that option list must derive it from here rather than copying it
+# again, or the same drift happens the next time a branch is added or
+# renamed. `tests/test_llm_tool_approval_operations.py` enforces this by
+# reading `_approval_operation_for_tool`'s source and diffing its literal
+# return values against this tuple.
+LLM_TOOL_APPROVAL_OPERATIONS: tuple[str, ...] = (
+    "process.terminal",
+    "file.write",
+    "git.commit",
+    "provider.tool",
+)
 
 
 async def _emit_app_event(

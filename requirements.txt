@@ -23,8 +23,13 @@ sse-starlette>=1.6.1,<2.2
 # QR code generation for pairing
 qrcode[pil]>=7.4
 
-# Firebase (optional, for remote access)
-# firebase-admin>=6.0.0  # Uncomment if using Firebase Admin SDK
+# Firebase (optional, for remote access + push notifications)
+# Used for Android FCM push in agent/push_notifier.py. Absence of this
+# package (or of the service account key it needs) must degrade push to a
+# no-op, never break the server — see agent/push_notifier.py docstring.
+# Pinned below 6.9.0: 6.9.0+ hard-pins httpx[http2]==0.28.1, which conflicts
+# with the httpx<0.28 floor above (needed for starlette 0.35's TestClient).
+firebase-admin>=6.0.0,<6.9.0
 
 # JWT token verification
 PyJWT>=2.8.0
