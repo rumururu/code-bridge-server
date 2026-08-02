@@ -2117,7 +2117,6 @@
                 spine_serving: 'serving',
                 spine_open: 'open',
                 spine_closed: 'closed',
-                spine_paired: 'paired',
                 spine_connected: 'connected',
                 spine_offline: 'offline',
                 spine_waiting: 'waiting',
@@ -2200,8 +2199,7 @@
                 spine_serving: '서비스 중',
                 spine_open: '열림',
                 spine_closed: '닫힘',
-                spine_paired: '대 페어링됨',
-                spine_connected: '대 연결됨',
+                spine_connected: '연결됨',
                 spine_offline: '연결 끊김',
                 spine_waiting: '대기',
                 spine_none_paired: '페어링된 기기 없음',
@@ -2812,13 +2810,19 @@
             set('spinePhone', clients.length
                 ? clients.map((c) => c.device_name || c.name || c.id).slice(0, 2).join(', ')
                 : (t('spine_none_paired') || 'none paired'));
-            set('spinePhoneState',
-                !clients.length
-                    ? (t('spine_waiting') || 'waiting')
-                    : (connectedClients.length
-                        ? `${connectedClients.length} ${t('spine_connected') || 'connected'}`
-                        : `${clients.length} ${t('spine_paired') || 'paired'} · ${t('spine_offline') || 'offline'}`),
-                connectedClients.length ? 'up' : 'idle');
+            // The value line above already names the paired phones, so the
+            // state line says only the thing it cannot: whether they are
+            // reachable right now. A count is worth printing only when it
+            // carries something the names do not — which is when some of
+            // several are up and the rest are not.
+            const phoneState = !clients.length
+                ? (t('spine_waiting') || 'waiting')
+                : !connectedClients.length
+                    ? (t('spine_offline') || 'offline')
+                    : connectedClients.length === clients.length
+                        ? (t('spine_connected') || 'connected')
+                        : `${connectedClients.length}/${clients.length} ${t('spine_connected') || 'connected'}`;
+            set('spinePhoneState', phoneState, connectedClients.length ? 'up' : 'idle');
 
             const left = document.getElementById('spineLeft');
             const right = document.getElementById('spineRight');
