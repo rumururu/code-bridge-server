@@ -1221,6 +1221,51 @@ async def delete_agent_memory(
     return None
 
 
+@router.get("/notifications", dependencies=[Depends(verify_api_key)], response_model=None)
+async def list_notifications(
+    unread_only: bool = False,
+    agent_id: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """What agents have left for you since you last looked."""
+    from agent.notification_store import get_notification_store
+
+    store = get_notification_store()
+    return {
+        "notifications": store.list_notifications(
+            unread_only=unread_only, agent_id=agent_id, limit=limit
+        ),
+        "unread_count": store.unread_count(),
+    }
+
+
+@router.post(
+    "/notifications/{notification_id}/read",
+    dependencies=[Depends(verify_api_key)],
+    response_model=None,
+)
+async def mark_notification_read(notification_id: str) -> dict[str, Any]:
+    from agent.notification_store import get_notification_store
+
+    notification = get_notification_store().mark_read(notification_id)
+    if notification is None:
+        raise HTTPException(
+            status_code=404, detail=f"Notification '{notification_id}' not found"
+        )
+    return {"notification": notification}
+
+
+@router.post(
+    "/notifications/read-all",
+    dependencies=[Depends(verify_api_key)],
+    response_model=None,
+)
+async def mark_all_notifications_read() -> dict[str, Any]:
+    from agent.notification_store import get_notification_store
+
+    return {"marked": get_notification_store().mark_all_read()}
+
+
 @router.get(
     "/agents/{agent_id}/tasks",
     dependencies=[Depends(verify_api_key)],

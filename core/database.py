@@ -23,6 +23,7 @@ AUDIT_REDACTED_CATEGORIES_SCHEMA_VERSION = 2026060500
 EVENT_PAIRING_COLUMNS_SCHEMA_VERSION = 2026060601
 BROWSER_SESSIONS_SCHEMA_VERSION = 2026061000
 AGENT_SCRIPTS_SCHEMA_VERSION = 2026072600
+AGENT_NOTIFICATIONS_SCHEMA_VERSION = 2026080200
 
 _PSEUDO_AGENTS = [
     {
@@ -760,6 +761,33 @@ def _migrate_agent_scripts(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migrate_agent_notifications(conn: sqlite3.Connection) -> None:
+    """What an unattended agent needs to tell someone.
+
+    A scheduled run finishes while nobody is watching, so "tell me if the disk
+    is nearly full" has to land somewhere durable that the phone can read
+    later. Shelling out to a notifier would make the message depend on a
+    script the user has to write and vet; this is the server's own capability,
+    so a `notify` step writes here and the app drains it.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS agent_notifications (
+            id TEXT PRIMARY KEY,
+            run_id TEXT,
+            task_id TEXT,
+            agent_id TEXT,
+            title TEXT NOT NULL,
+            body TEXT,
+            level TEXT NOT NULL DEFAULT 'info',
+            read_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_notifications_unread
+        ON agent_notifications(read_at, created_at DESC);
+    """)
+
+
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (
         LEGACY_FOUNDATION_SCHEMA_VERSION,
@@ -806,6 +834,11 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
         AGENT_SCRIPTS_SCHEMA_VERSION,
         "agent_scripts",
         _migrate_agent_scripts,
+    ),
+    (
+        AGENT_NOTIFICATIONS_SCHEMA_VERSION,
+        "agent_notifications",
+        _migrate_agent_notifications,
     ),
 )
 

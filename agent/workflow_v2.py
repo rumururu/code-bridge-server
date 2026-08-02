@@ -23,6 +23,10 @@ ALLOWED_STEP_TYPES = {
     # registration. Its exit code and output become evidence for later steps,
     # so a failure can escalate to an LLM step via on_failure: goto_step.
     "shell",
+    # Leaves a message for whoever comes back. Delivery is the server's own
+    # capability rather than a script, so an agent that needs to say something
+    # does not first need a notifier written, vetted and registered.
+    "notify",
     "mcp_tool",
     "browser_action",
     "app_action",
@@ -131,7 +135,22 @@ def normalize_workflow_step(
             )
         step["script_id"] = script_id
         step["script_args"] = [str(item) for item in (step.get("script_args") or [])]
+    if step_type == "notify":
+        raw = step.get("notify") if isinstance(step.get("notify"), dict) else {}
+        title = _clean_optional_text(raw.get("title")) or step["name"]
+        # A notification with no title has nothing to show in the inbox, and
+        # the step name is always something the author already wrote.
+        step["notify"] = {
+            "title": title,
+            "body": _clean_optional_text(raw.get("body")) or step["description"] or None,
+            "level": _normalize_notify_level(raw.get("level")),
+        }
     return step
+
+
+def _normalize_notify_level(raw: Any) -> str:
+    value = str(raw or "info").strip().lower()
+    return value if value in {"info", "success", "warning", "error"} else "info"
 
 
 def normalize_failure_policy(raw_policy: Any) -> dict[str, Any]:

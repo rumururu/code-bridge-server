@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -57,8 +58,14 @@ AgentDraft {
 
 WorkflowStep {
   id                // stable machine id, e.g. "login_check"
-  type              // "llm" | "browser_action" | "manual_handoff" |
-                    // "approval_gate" | "condition" | "mcp_tool"
+  type              // "shell" | "llm" | "notify" | "browser_action" |
+                    // "manual_handoff" | "approval_gate" | "condition" |
+                    // "mcp_tool"
+  script_id         // shell steps only: id of a REGISTERED script (never a
+                    // command line — the workflow cannot carry one)
+  script_args       // shell steps only: optional list of extra arguments
+  notify            // notify steps only: { title, body, level } where level is
+                    // "info" | "success" | "warning" | "error"
   name              // short label (e.g. "Login")
   description       // legacy summary; keep for compatibility
   instruction       // optional: explicit work the agent should do in this step
@@ -101,11 +108,40 @@ Rules:
     become a scheduled Android app automation workflow, not a request for
     more schema details.
 
+2c. Pick the cheapest step type that can do the work.
+
+    - A fixed command with a knowable answer — disk usage, a health check,
+      a build, an rsync — is a `shell` step running a REGISTERED script.
+      It costs no tokens, needs no approval, and gives the same answer
+      every time. An `llm` step that only runs `df -h` wakes a model every
+      time the schedule fires to read one number.
+    - Judgement about that answer is a SECOND `llm` step after it. The
+      shell step's exit code and output are handed to it as evidence, so
+      "check the disk, and tell me if it is nearly full" is two steps:
+      shell reads, llm decides.
+    - `notify` is how the agent tells the user something. It is the
+      default way to report: a scheduled run finishes while nobody is
+      watching, and anything only printed is lost.
+
+2d. Shell steps name a registered script by `script_id`. The list of
+    registered scripts is given to you below; use one whose description
+    matches. If none does, say so in your reply and describe the script
+    you would need in one sentence — the user can have it written and
+    registered, and you can then reference it. Never invent a script_id,
+    and never put a command line in the draft.
+
 3. When the user mentions tools or external systems, capture them in
    the agent draft's `tools` array using a stable mcp_id (e.g.
    `playwright`, `slack`, `github`). The user installs the MCP in
    their provider CLI themselves (e.g. `codex mcp add playwright -- npx
    @playwright/mcp@latest`); Code Bridge does not manage installation.
+
+3a. Any agent that is supposed to tell the user something ends with a
+    `notify` step. Do not write "sends an alert" into system_prompt and
+    leave it there — that is a sentence, not a delivery. The app inbox is
+    the default and needs no setup; only reach for an external channel
+    (Slack, email) if the user asks for one by name, and say plainly that
+    it needs an MCP they install themselves.
 
 4. When the user mentions repetition or schedule ("every 2 hours",
    "nightly"), do NOT put it in the AgentDraft. Keep timing in the
@@ -192,6 +228,41 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _registered_scripts_block() -> str:
+    """List the scripts a shell step may name.
+
+    Without this the Configurator is told shell steps exist and given no way
+    to reference one, so it either invents a script_id — which fails at
+    execution, far from the conversation that produced it — or falls back to
+    an llm step that re-derives a fixed command on every scheduled run.
+    """
+    try:
+        from agent.script_store import get_script_store
+
+        scripts = get_script_store().list_scripts(limit=50)
+    except (ImportError, RuntimeError, OSError, sqlite3.Error):
+        # Building a prompt must not depend on the script table existing. A
+        # migration mid-flight, or a test database that never ran one, would
+        # otherwise take down the whole conversation.
+        return ""
+
+    if not scripts:
+        return (
+            "\nRegistered scripts: none yet.\n"
+            "No shell step can be written until one is registered. If the work "
+            "is a fixed command, say which script you would need and what it "
+            "should print, and use an llm step only as a stopgap.\n"
+        )
+
+    lines = ["\nRegistered scripts (use these ids for shell steps):"]
+    for script in scripts:
+        description = (script.get("description") or "").strip()
+        suffix = f" — {description}" if description else ""
+        lines.append(f"  - {script['id']}: {script['name']}{suffix}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def build_configurator_system_prompt(_unused: list[Any] | None = None) -> str:
     """Return the Configurator system prompt.
 
@@ -199,9 +270,13 @@ def build_configurator_system_prompt(_unused: list[Any] | None = None) -> str:
     accepts whatever MCP name the user supplies and writes it into the
     agent draft. Provider CLIs handle the actual MCP runtime; the user
     installs MCPs via their own CLI (e.g. ``codex mcp add ...``).
+
+    Registered scripts are injected because they are the one thing the
+    Configurator cannot invent: a shell step names a script by id, and an id
+    it made up fails at execution rather than in the conversation.
     """
 
-    return _SYSTEM_PROMPT_TEMPLATE
+    return _SYSTEM_PROMPT_TEMPLATE + _registered_scripts_block()
 
 
 @dataclass(frozen=True)

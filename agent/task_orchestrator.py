@@ -756,6 +756,16 @@ async def _execute_single_workflow_task_step(
             "status": "completed" if completed else "failed",
         }
 
+    if workflow_type == "notify":
+        completed = await _execute_notify_workflow_step(
+            task_id=task_id, run_id=run_id, step=step
+        )
+        return {
+            "task": store.get_task(task_id),
+            "step": store.get_task_step(step_id),
+            "status": "completed" if completed else "failed",
+        }
+
     if workflow_type in {"manual_handoff", "mcp_tool", "approval_gate"}:
         _wait_for_user_step(
             task_id=task_id,
@@ -1075,6 +1085,36 @@ async def _execute_workflow_orchestration(
                 return
             step_index = next_index
             continue
+        # The auto-advance loop dispatches separately from the single-step
+        # path above. A type added to only one of them runs by hand and stalls
+        # on a schedule, which is how `shell` first shipped.
+        if workflow_type == "notify":
+            completed = await _execute_notify_workflow_step(
+                task_id=task_id, run_id=run_id, step=step
+            )
+            if not completed:
+                next_index = _apply_workflow_failure_policy(
+                    task_id=task_id,
+                    run_id=run_id,
+                    steps=steps,
+                    failed_index=step_index,
+                    error={
+                        "message": f"Notify step '{step.get('title')}' did not send."
+                    },
+                )
+                if next_index is None:
+                    return
+                steps = store.list_task_steps(task_id)
+                step_index = next_index
+                continue
+            steps[step_index] = store.get_task_step(step["id"]) or step
+            next_index = _apply_workflow_success_policy(
+                task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+            )
+            if next_index is None:
+                return
+            step_index = next_index
+            continue
         if workflow_type in {
             "manual_handoff",
             "mcp_tool",
@@ -1224,6 +1264,64 @@ async def _execute_llm_workflow_step(
         step_id=step_id,
         run_id=run_id,
         output=output,
+    )
+    return True
+
+
+async def _execute_notify_workflow_step(
+    *,
+    task_id: str,
+    run_id: str,
+    step: dict[str, Any],
+) -> bool:
+    """Leave a message the phone can read later.
+
+    A scheduled run ends while nobody is watching, so the useful part of "tell
+    me if the disk is nearly full" is what survives the run. Earlier steps put
+    their findings on the step record; this one turns the sentence the
+    workflow was given into something the inbox will show.
+    """
+    from agent.notification_store import get_notification_store, normalize_level
+
+    store = get_agent_store()
+    step_id = str(step["id"])
+    step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+
+    store.update_task_step(step_id, {"status": "running"})
+
+    payload = step_input.get("notify") if isinstance(step_input.get("notify"), dict) else {}
+    title = str(payload.get("title") or step.get("title") or "").strip()
+    if not title:
+        error = {
+            "message": "notify step has no title to send",
+            "type": "NotificationTitleMissing",
+        }
+        store.update_task_step(step_id, {"status": "failed", "output": {"error": error}})
+        return False
+
+    task = store.get_task(task_id) or {}
+    try:
+        notification = get_notification_store().create(
+            title=title,
+            body=payload.get("body") or step_input.get("description") or None,
+            level=normalize_level(payload.get("level")),
+            run_id=run_id,
+            task_id=task_id,
+            agent_id=task.get("assigned_agent_id"),
+        )
+    except (ValueError, RuntimeError, OSError) as exc:
+        store.update_task_step(
+            step_id,
+            {
+                "status": "failed",
+                "output": {"error": {"message": str(exc), "type": type(exc).__name__}},
+            },
+        )
+        return False
+
+    store.update_task_step(
+        step_id,
+        {"status": "completed", "output": {"notification": notification}},
     )
     return True
 
@@ -3005,6 +3103,7 @@ def _plan_workflow_steps(
                     "actions": workflow_step.get("actions") or [],
                     "script_id": workflow_step.get("script_id"),
                     "script_args": workflow_step.get("script_args") or [],
+                    "notify": workflow_step.get("notify") or {},
                     "success_criteria": workflow_step.get("success_criteria") or "",
                     "on_failure": workflow_step.get("on_failure") or {"type": "abort"},
                     "on_success": workflow_step.get("on_success") or {"type": "continue"},
