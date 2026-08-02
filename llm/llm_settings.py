@@ -128,8 +128,8 @@ BUILTIN_PROVIDERS: list[LlmProvider] = [
         command="agy",
         chat_supported=True,
         models=[
-            "gemini-3-pro",
-            "gemini-3-flash",
+            "gemini-3.1-pro-high",
+            "gemini-3.6-flash-medium",
         ],
     ),
 ]
@@ -241,6 +241,37 @@ def _detect_gemini_models_from_config() -> list[dict[str, str]]:
             pass
 
     return detected
+
+
+def _get_antigravity_models() -> list[dict[str, Any]]:
+    """Ask the CLI what it can run.
+
+    The first cut of this provider shipped a hand-written list, and every name
+    in it was wrong — `agy models` reports the real ones, and they change with
+    the CLI rather than with this file.
+    """
+    fallback = [{"id": m, "label": m, "source": "builtin"} for m in ("gemini-3.1-pro-high", "gemini-3.6-flash-medium")]
+    command = shutil.which("agy")
+    if not command:
+        return fallback
+    try:
+        result = subprocess.run(
+            [command, "models"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return fallback
+    if result.returncode != 0:
+        return fallback
+    models = [
+        {"id": line.strip(), "label": line.strip(), "source": "cli"}
+        for line in (result.stdout or "").splitlines()
+        if line.strip() and not line.strip().startswith(("Usage", "Available", "-"))
+    ]
+    return models or fallback
 
 
 def _get_codex_models() -> list[dict[str, Any]]:
@@ -473,7 +504,7 @@ def _build_provider_snapshot(provider: LlmProvider) -> dict[str, Any]:
     elif provider.id == "google":
         models = _get_gemini_models()
     elif provider.id == "antigravity":
-        models = [{"id": m, "label": m, "source": "builtin"} for m in provider.models]
+        models = _get_antigravity_models()
     else:
         # Fallback - use defined models
         models = [{"id": m, "label": m, "source": "builtin"} for m in provider.models]
@@ -483,7 +514,7 @@ def _build_provider_snapshot(provider: LlmProvider) -> dict[str, Any]:
     capabilities = {
         "chat": provider.chat_supported,
         "chat_supported": provider.chat_supported,
-        "sessions": provider.id in ("anthropic", "openai"),
+        "sessions": provider.id in ("anthropic", "openai", "antigravity"),
         "session_history": provider.id in ("anthropic", "openai"),
         "resumable_sessions": provider.id in ("anthropic", "openai"),
         "resume": provider.id in ("anthropic", "openai"),

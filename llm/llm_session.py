@@ -141,9 +141,13 @@ class LlmSessionFactory:
             from llm.gemini_session import GeminiSession
             return GeminiSession(project_path=project_path, model=model)
 
+        if normalized_id == "antigravity":
+            from llm.antigravity_session import AntigravitySession
+            return AntigravitySession(project_path=project_path, model=model)
+
         raise ValueError(f"Unknown LLM provider: {provider_id}")
 
     @staticmethod
     def get_supported_providers() -> list[str]:
         """Return list of supported provider IDs."""
-        return ["anthropic", "openai", "google"]
+        return ["anthropic", "openai", "google", "antigravity"]

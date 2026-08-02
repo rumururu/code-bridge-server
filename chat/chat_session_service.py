@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from llm.claude_session import get_session_manager
+from llm.llm_session import LlmSessionFactory
 from llm.llm_settings import get_llm_options_snapshot
 
 
@@ -33,12 +34,18 @@ def get_chat_provider_selection() -> ChatProviderSelection:
         "anthropic": "Claude",
         "openai": "Codex",
         "google": "Gemini",
+        "antigravity": "Antigravity",
     }.get(provider_id, provider_id.title())
 
-    if provider_id not in ("anthropic", "openai", "google"):
+    # Ask the factory rather than repeating the list here. A provider added to
+    # one and not the other is offered in the picker and refused on use, which
+    # is exactly how Antigravity first shipped: selectable, and then "not
+    # supported yet" from a layer the user never sees.
+    supported = LlmSessionFactory.get_supported_providers()
+    if provider_id not in supported:
         raise ChatSessionInitError(
             f"Selected LLM provider '{provider_id}' is not supported yet. "
-            "Select Anthropic, OpenAI, or Google in Settings > LLM Configuration."
+            f"Choose one of {', '.join(supported)} in Settings > LLM Configuration."
         )
 
     resolved_model = selected_model if isinstance(selected_model, str) and selected_model.strip() else None
