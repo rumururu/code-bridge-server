@@ -2118,6 +2118,8 @@
                 spine_open: 'open',
                 spine_closed: 'closed',
                 spine_paired: 'paired',
+                spine_connected: 'connected',
+                spine_offline: 'offline',
                 spine_waiting: 'waiting',
                 spine_none_paired: 'none paired',
                 agent_activity: 'Agent activity',
@@ -2160,7 +2162,6 @@
                 no_paired_devices_desc: 'Scan the QR code with the Code Bridge app to connect.',
                 open_qr_pairing: 'Open QR Pairing',
                 connected: 'Connected',
-                offline: 'Offline',
                 // Common
                 remove: 'Remove',
                 cancel: 'Cancel',
@@ -2199,9 +2200,11 @@
                 spine_serving: '서비스 중',
                 spine_open: '열림',
                 spine_closed: '닫힘',
-                spine_paired: '대 연결됨',
+                spine_paired: '대 페어링됨',
+                spine_connected: '대 연결됨',
+                spine_offline: '연결 끊김',
                 spine_waiting: '대기',
-                spine_none_paired: '연결된 기기 없음',
+                spine_none_paired: '페어링된 기기 없음',
                 agent_activity: '에이전트 실행현황',
                 agents_open: '에이전트 관리',
                 agent_recent_runs: '최근 실행',
@@ -2799,17 +2802,28 @@
                 tunnelUp ? (t('spine_open') || 'open') : (t('spine_closed') || 'closed'),
                 tunnelUp ? 'up' : 'idle');
 
+            // Paired and connected are different facts. A stored API key says
+            // a phone was paired once; whether it is reachable now is
+            // `is_connected`, which the client list below has always used. The
+            // spine judged both from the key count, so a phone that was off,
+            // uninstalled or out of range still read as connected — the one
+            // state you actually come here to check.
+            const connectedClients = clients.filter((c) => c.is_connected === true);
             set('spinePhone', clients.length
                 ? clients.map((c) => c.device_name || c.name || c.id).slice(0, 2).join(', ')
                 : (t('spine_none_paired') || 'none paired'));
             set('spinePhoneState',
-                clients.length ? `${clients.length} ${t('spine_paired') || 'paired'}` : (t('spine_waiting') || 'waiting'),
-                clients.length ? 'up' : 'idle');
+                !clients.length
+                    ? (t('spine_waiting') || 'waiting')
+                    : (connectedClients.length
+                        ? `${connectedClients.length} ${t('spine_connected') || 'connected'}`
+                        : `${clients.length} ${t('spine_paired') || 'paired'} · ${t('spine_offline') || 'offline'}`),
+                connectedClients.length ? 'up' : 'idle');
 
             const left = document.getElementById('spineLeft');
             const right = document.getElementById('spineRight');
             if (left) left.className = `span ${tunnelUp ? 'up' : ''} ${spineBusy ? 'busy' : ''}`.trim();
-            if (right) right.className = `span ${clients.length ? 'up' : ''} ${spineBusy ? 'busy' : ''}`.trim();
+            if (right) right.className = `span ${connectedClients.length ? 'up' : ''} ${spineBusy ? 'busy' : ''}`.trim();
         }
 
         function updateUI() {
