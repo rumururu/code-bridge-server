@@ -275,51 +275,83 @@ def _task_cwd(task: dict[str, Any] | None) -> str | None:
 
 
 def _schedule_expression_from_draft(schedule: str | None) -> dict[str, Any] | None:
+    """Turn the Configurator's schedule phrase into a schedule expression.
+
+    The phrase is whatever the model wrote down, in whatever language the user
+    was speaking. Anything this cannot read is dropped silently by the caller,
+    so a Korean user asking for "매일 아침 9시" got an agent with no schedule
+    and nothing saying why — which is the same silent nothing that "paired but
+    never runs" looks like from the outside.
+    """
     if not isinstance(schedule, str):
         return None
     text = schedule.strip().lower()
     if not text or text in {"now", "manual", "none", "no schedule"}:
         return None
+    if any(word in text for word in ("수동", "직접 실행", "안 함", "없음")):
+        return None
     import re
+
+    _EN_UNITS = {
+        "minute": 60, "minutes": 60, "min": 60, "m": 60,
+        "hour": 3600, "hours": 3600, "hr": 3600, "h": 3600,
+        "day": 86400, "days": 86400, "d": 86400,
+    }
+    _KO_UNITS = {"분": 60, "시간": 3600, "일": 86400}
+
+    def _interval(seconds: int) -> dict[str, Any]:
+        # A sub-minute schedule is a runaway loop, not a schedule.
+        return {"kind": "interval", "seconds": max(seconds, 60)}
 
     interval = re.search(
         r"every\s+(\d+)\s*(minute|minutes|min|m|hour|hours|hr|h|day|days|d)\b",
         text,
     )
     if interval:
-        amount = int(interval.group(1))
-        unit = interval.group(2)
-        multiplier = 60
-        if unit in {"hour", "hours", "hr", "h"}:
-            multiplier = 3600
-        elif unit in {"day", "days", "d"}:
-            multiplier = 86400
-        seconds = amount * multiplier
-        return {"kind": "interval", "seconds": max(seconds, 60)}
+        return _interval(int(interval.group(1)) * _EN_UNITS[interval.group(2)])
 
     compact = re.fullmatch(r"every\s+(\d+)([mhd])", text)
     if compact:
-        amount = int(compact.group(1))
-        multiplier = {"m": 60, "h": 3600, "d": 86400}[compact.group(2)]
-        return {"kind": "interval", "seconds": max(amount * multiplier, 60)}
+        return _interval(int(compact.group(1)) * _EN_UNITS[compact.group(2)])
 
-    korean_interval = re.search(r"매\s*(\d+)\s*(분|시간|일)", text)
+    # Korean puts the interval either before ("매 6시간") or after ("6시간마다",
+    # "6시간에 한 번"). Both are ordinary ways to say it and neither is a typo.
+    korean_interval = re.search(
+        r"(?:매\s*(\d+)\s*(분|시간|일)"
+        r"|(\d+)\s*(분|시간|일)\s*(?:마다|간격|에\s*한\s*번|당\s*한\s*번))",
+        text,
+    )
     if korean_interval:
-        amount = int(korean_interval.group(1))
-        unit = korean_interval.group(2)
-        multiplier = 60
-        if unit == "시간":
-            multiplier = 3600
-        elif unit == "일":
-            multiplier = 86400
-        return {"kind": "interval", "seconds": max(amount * multiplier, 60)}
+        amount = korean_interval.group(1) or korean_interval.group(3)
+        unit = korean_interval.group(2) or korean_interval.group(4)
+        return _interval(int(amount) * _KO_UNITS[unit])
 
     daily = re.search(r"(?:daily\s+at|daily|every\s+day\s+at)\s+(\d{1,2}:\d{2})", text)
     if daily:
         return {"kind": "daily_at", "time": daily.group(1)}
-    korean_daily = re.search(r"매일\s+(\d{1,2}:\d{2})", text)
-    if korean_daily:
-        return {"kind": "daily_at", "time": korean_daily.group(1)}
+
+    korean_daily_clock = re.search(r"매일\s*(\d{1,2}:\d{2})", text)
+    if korean_daily_clock:
+        return {"kind": "daily_at", "time": korean_daily_clock.group(1)}
+
+    # "매일 아침 9시", "매일 오후 3시 30분" — the way people actually say it.
+    korean_daily_hour = re.search(
+        r"매일\s*(오전|오후|아침|저녁|밤|새벽)?\s*(\d{1,2})\s*시"
+        r"(?:\s*(\d{1,2})\s*분)?",
+        text,
+    )
+    if korean_daily_hour:
+        period = korean_daily_hour.group(1)
+        hour = int(korean_daily_hour.group(2))
+        minute = int(korean_daily_hour.group(3) or 0)
+        if hour > 23 or minute > 59:
+            return None
+        if period in {"오후", "저녁", "밤"} and hour < 12:
+            hour += 12
+        elif period in {"오전", "아침", "새벽"} and hour == 12:
+            hour = 0
+        return {"kind": "daily_at", "time": f"{hour:02d}:{minute:02d}"}
+
     return None
 
 
@@ -1187,6 +1219,39 @@ async def delete_agent_memory(
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Agent memory '{memory_id}' not found")
     return None
+
+
+@router.get(
+    "/agents/{agent_id}/tasks",
+    dependencies=[Depends(verify_api_key)],
+    response_model=None,
+)
+async def list_agent_tasks(
+    agent_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Work assigned to this agent, whether or not it has run yet.
+
+    Runs are the record of execution, so a task that was created and has not
+    fired leaves no trace among them. Listing what an agent was told to do —
+    separately from what it did — is what makes "queued and going nowhere"
+    visible instead of indistinguishable from "nothing was ever asked".
+    """
+    _require_agent(agent_id)
+    store = _store()
+    tasks = [
+        task
+        for task in store.list_tasks(limit=200)
+        if task.get("assigned_agent_id") == agent_id
+    ]
+    runs_by_task: dict[str, int] = {}
+    for run in store.list_runs(agent_id=agent_id, limit=200) or []:
+        task_id = run.get("task_id")
+        if isinstance(task_id, str):
+            runs_by_task[task_id] = runs_by_task.get(task_id, 0) + 1
+    for task in tasks:
+        task["run_count"] = runs_by_task.get(str(task.get("id")), 0)
+    return {"tasks": tasks[:limit]}
 
 
 @router.get(
