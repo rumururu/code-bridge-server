@@ -37,6 +37,7 @@ from policy.policy_models import PolicyRuleCreate
 from . import agents as agents_routes
 from . import approvals as approvals_routes
 from . import policies as policies_routes
+from . import script_proposals as script_proposals_routes
 from . import scripts as scripts_routes
 from .deps import require_local_access
 
@@ -87,9 +88,9 @@ async def delete_agent(
 
 
 @router.post("/builder/converse", response_model=None)
-async def builder_converse(body: BuilderTurn) -> Any:
+async def builder_converse(body: BuilderTurn, background_tasks: BackgroundTasks) -> Any:
     """One turn of the conversational builder — same session store the app uses."""
-    return await agents_routes.builder_converse(body)
+    return await agents_routes.builder_converse(body, background_tasks)
 
 
 @router.post("/builder/converse/jobs", response_model=None)
@@ -273,6 +274,25 @@ async def draft_script(body: ScriptDraftRequest) -> dict[str, Any]:
 async def save_drafted_script(body: ScriptDraftSave) -> dict[str, Any]:
     """Write the reviewed draft into the managed dir and register it."""
     return await scripts_routes.save_drafted_script(body)
+
+
+@router.get("/builder/scripts/proposals/{proposal_id}", response_model=None)
+async def get_script_proposal(proposal_id: str) -> dict[str, Any]:
+    """Poll a script the builder conversation asked for. Reading is not approving."""
+    return await script_proposals_routes.get_script_proposal(proposal_id)
+
+
+@router.post("/builder/scripts/proposals/{proposal_id}/approve", response_model=None)
+async def approve_script_proposal(proposal_id: str) -> dict[str, Any]:
+    """Register a proposal the user has read, and return its new script_id.
+
+    Dashboard-only, for the same reason ``POST /scripts`` and
+    ``/scripts/save-draft`` are: this is the act that puts a new executable
+    where a workflow step can point at it. The phone can hold the
+    conversation, see the proposal and read the drafted script; a person on
+    the PC decides it may exist. There is deliberately no request body — the
+    bytes registered are the bytes the proposal showed."""
+    return await script_proposals_routes.approve_script_proposal(proposal_id)
 
 
 @router.patch("/scripts/{script_id}", response_model=None)

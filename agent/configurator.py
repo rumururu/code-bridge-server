@@ -61,6 +61,15 @@ AgentDraft {
   tools             // list of { mcp_id, tool_names } from the catalog
   flow              // list of WorkflowStep
   memory_seeds      // optional initial memory items
+  script_requests   // list of ScriptRequest — scripts you need that are
+                    // not registered yet (see rule 2d)
+}
+
+ScriptRequest {
+  name              // short script name, e.g. "Check disk usage"
+  purpose           // one line: what the script does, in the imperative
+  expected_output   // what it prints on success, e.g. "USED_PCT=87"
+  step_id           // id of the shell step that will run it once approved
 }
 
 {{WORKFLOW_STEP_SCHEMA_BLOCK}}
@@ -107,10 +116,23 @@ Rules:
 
 2d. Shell steps name a registered script by `script_id`. The list of
     registered scripts is given to you below; use one whose description
-    matches. If none does, say so in your reply and describe the script
-    you would need in one sentence — the user can have it written and
-    registered, and you can then reference it. Never invent a script_id,
-    and never put a command line in the draft.
+    matches.
+
+    If none does, add an entry to `script_requests` describing the script
+    you need: its name, a one-line purpose, what it should print on
+    success, and the `step_id` of the shell step that will run it. The
+    server has that script written and shows the text to the user; nothing
+    is saved or installed until they approve it. Say so in your reply —
+    e.g. "필요한 스크립트 초안을 만들고 있어요. 확인하고 승인하시면 이 단계에
+    연결됩니다." — and carry on with the rest of the draft.
+
+    Until a script is approved it has no id, so do NOT add its shell step
+    to `flow` yet, and never invent a `script_id`. Keep the step out until
+    the registered-scripts list below contains it. Never put a command line
+    in the draft: a workflow step names a script, it never carries one.
+
+    Once the server tells you a script was registered, use that id on the
+    step and drop the matching entry from `script_requests`.
 
 3. When the user mentions tools or external systems, capture them in
    the agent draft's `tools` array using a stable mcp_id (e.g.
@@ -232,8 +254,9 @@ def _registered_scripts_block() -> str:
         return (
             "\nRegistered scripts: none yet.\n"
             "No shell step can be written until one is registered. If the work "
-            "is a fixed command, say which script you would need and what it "
-            "should print, and use an llm step only as a stopgap.\n"
+            "is a fixed command, put it in `script_requests` (rule 2d) so the "
+            "server drafts it for the user to approve, and use an llm step "
+            "only as a stopgap.\n"
         )
 
     lines = ["\nRegistered scripts (use these ids for shell steps):"]
@@ -360,6 +383,60 @@ class BuilderSession:
 
     def append_user_message(self, message: str) -> None:
         self.messages.append({"role": "user", "content": message})
+
+    def apply_registered_script(
+        self,
+        *,
+        script: dict[str, Any],
+        step_id: str | None,
+        request_name: str,
+    ) -> AgentDraft:
+        """Tell a live conversation about a script that now exists.
+
+        The registered-scripts list is baked into ``system_prompt`` when the
+        session is created (see :func:`build_configurator_system_prompt`), so a
+        script approved mid-conversation would otherwise be invisible to every
+        later turn: the model would keep saying it needs the script it just
+        got, and keep being unable to name it. Appending the id here is what
+        makes approval actually close the loop rather than merely file a row.
+
+        The step's ``script_id`` is filled in the same act, because the whole
+        point of ``step_id`` on the request is that the user should not have to
+        copy an id from one panel into another.
+        """
+        script_id = str(script.get("id") or "").strip()
+        if not script_id:
+            return self.current_draft
+
+        flow = self.current_draft.flow
+        if step_id:
+            flow = [
+                step.model_copy(update={"script_id": script_id})
+                if (step.id or "").strip() == step_id.strip()
+                else step
+                for step in flow
+            ]
+        remaining = [
+            request
+            for request in self.current_draft.script_requests
+            if request.name.strip().casefold() != request_name.strip().casefold()
+        ]
+        self.current_draft = self.current_draft.model_copy(
+            update={"flow": flow, "script_requests": remaining}
+        )
+
+        name = str(script.get("name") or request_name).strip()
+        description = str(script.get("description") or "").strip()
+        suffix = f" — {description}" if description else ""
+        line = f"  - {script_id}: {name}{suffix}"
+        step_note = f" Use it as the script_id of step '{step_id}'." if step_id else ""
+        self.system_prompt = (
+            f"{self.system_prompt}\n"
+            f"\nThe user approved a new script, now registered:\n{line}\n"
+            f"It is available for shell steps.{step_note}\n"
+        )
+        self.touch()
+        return self.current_draft
 
     def apply_llm_response(
         self,

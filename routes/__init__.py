@@ -22,6 +22,7 @@ from .terminal import router as terminal_router
 from .dashboard import router as dashboard_router
 from .dashboard_agents import router as dashboard_agents_router
 from .scripts import router as scripts_router
+from .script_proposals import router as script_proposals_router
 from .dashboard_auth import router as dashboard_auth_router
 from .filesystem import router as filesystem_router
 from .mermaid import router as mermaid_router
@@ -65,6 +66,10 @@ _SHARED_ROUTERS = (
     filesystem_router,
     secrets_router,
     scripts_router,
+    # Read-only: polling a script the builder conversation asked for. The
+    # approval that registers one is dashboard-only, like every other write on
+    # the script registry (see routes/dashboard_agents.py).
+    script_proposals_router,
 )
 
 # Routers that must NEVER be reachable on the tunnel-exposed API listener,

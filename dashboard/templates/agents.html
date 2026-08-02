@@ -1067,6 +1067,14 @@
                 turn_timed_out: 'This is taking too long. Try again.',
                 name_required: 'Name is required', thinking: 'Configurator is thinking…',
                 agent_created: 'Agent created', agent_updated: 'Agent updated',
+
+                s_select_none: '(none)', s_select_required: '(pick one)',
+                s_add_item: 'Add', s_remove_item: 'Remove',
+                s_loading_options: 'Loading…', s_no_devices: 'No devices connected.',
+                s_options_load_failed: 'Could not load options — connect this device with an API key, or type the id directly.',
+                s_schema_loading: 'Loading step fields…',
+                s_level_info: 'Info', s_level_success: 'Success', s_level_warning: 'Warning', s_level_error: 'Error',
+                s_actions_hint: 'Structured action list — edit from the phone app for the full action editor. This is a raw JSON fallback.',
             },
             ko: {
                 nav_dashboard: '대시보드', nav_agents: '에이전트', nav_settings: '설정',
@@ -1185,6 +1193,14 @@
                 ph_script_desc: '이 스크립트가 하는 일',
                 ph_script_writer: '2시간마다 R59N3035LQL 기기에서 스몰뎁 앱을 열고, 대기 중인 테스트에 참여한 뒤 무엇에 참여했는지 보고',
                 ph_scope: 'global 또는 project:my_app',
+
+                s_select_none: '(없음)', s_select_required: '(선택하세요)',
+                s_add_item: '추가', s_remove_item: '삭제',
+                s_loading_options: '불러오는 중…', s_no_devices: '연결된 기기가 없습니다.',
+                s_options_load_failed: '옵션을 불러오지 못했습니다 — API 키로 연결하거나 아이디를 직접 입력하세요.',
+                s_schema_loading: '스텝 필드를 불러오는 중…',
+                s_level_info: '정보', s_level_success: '성공', s_level_warning: '경고', s_level_error: '오류',
+                s_actions_hint: '구조화된 동작 목록입니다 — 전용 동작 편집기는 폰 앱에서 사용하세요. 여기서는 원시 JSON으로만 편집합니다.',
             },
         };
 
@@ -1231,6 +1247,7 @@
             renderApprovals();
             renderApprovalBanner();
             renderRunList();
+            renderSteps();
             const agent = agents.find((candidate) => candidate.id === selectedAgentId);
             if (agent) renderDetail(agent);
             const saveBtn = document.getElementById('saveBtn');
@@ -1297,6 +1314,17 @@
         let steps = [];
         let builderSession = null;
         let builderDraft = null;
+
+        // The server's single per-step-type field definition (see
+        // AGENT_COMPOSITION_SPEC.md Phase 2/3). Fetched once on page load and
+        // cached here; the step editor draws every per-type field from this
+        // instead of hardcoding a field list that drifts from the server's.
+        let stepSchema = null;
+        // `null` = not fetched yet, `[]` = fetched and empty/failed. Kept
+        // separate from `stepSchema` because devices load lazily (only once
+        // a step actually needs a device-sourced select), not on page load.
+        let deviceOptions = null;
+        let deviceOptionsLoading = false;
 
         async function api(path, options = {}) {
             try {
@@ -1818,13 +1846,286 @@
                 .join('');
         }
 
-        function scriptOptions(step) {
-            const current = step.script_id || '';
-            const rows = scripts
-                .map((script) =>
-                    `<option value="${script.id}"${script.id === current ? ' selected' : ''}>${escapeHtml(script.name)}</option>`)
+        // --- Schema-driven step fields ---------------------------------------
+        //
+        // The dashboard used to hardcode a field list per step type (a plain
+        // `tool_hint` input for everything, a script picker only for
+        // `shell`). That list drifted from the server's own field contract
+        // (agent/workflow_step_schema.py) and could only ever author two of
+        // the eleven step types the server accepts. Everything below draws
+        // the per-step field area from `GET /workflow/step-schema` instead —
+        // see docs/concept/spec/AGENT_COMPOSITION_SPEC.md Phase 3.2/3.3.
+        //
+        // Fields the server always accepts regardless of step type stay
+        // hardcoded here on purpose — the schema endpoint deliberately does
+        // not describe them (they are `COMMON_STEP_FIELDS` in
+        // agent/workflow_v2.py, not part of any per-type field set).
+        const COMMON_STEP_FIELDS = new Set(['id', 'type', 'step_type', 'name', 'description', 'on_failure', 'on_success']);
+        // `tool_hint` / `success_criteria` / `actions` are accepted by the
+        // server on any step type without rejection (a legacy compatibility
+        // carve-out — see `_UNRESTRICTED_LEGACY_FIELDS` in
+        // agent/workflow_v2.py); a real, currently-scheduled agent in this
+        // project's own database has a `shell` step with a hand-written
+        // `success_criteria` that the carve-out exists specifically not to
+        // break. `success_criteria` and `actions` follow that lead here: a
+        // step keeps whichever of them it already had when saved, even after
+        // its type changes to one that doesn't declare them, rather than
+        // silently dropping hand-authored data on the next save. `tool_hint`
+        // is not included — it never had that precedent (the dashboard has
+        // always dropped it when switching a step to `shell`), and it is
+        // still preserved for every type that actually declares it via the
+        // schema-driven allow-list below.
+        const PRESERVE_LEGACY_FIELDS = new Set(['success_criteria', 'actions']);
+
+        function stepSchemaFor(type) {
+            if (!stepSchema || !Array.isArray(stepSchema.types)) return null;
+            return stepSchema.types.find((entry) => entry.type === type) || null;
+        }
+
+        // Schema label/help objects are `{en, ko, ...}`; read the current
+        // dashboard language with an English fallback, same convention `t()`
+        // already uses for the page's own static strings.
+        function schemaText(localized, fallback) {
+            if (!localized) return fallback || '';
+            return localized[currentLang] || localized.en || fallback || '';
+        }
+
+        function ensureDeviceOptionsLoaded() {
+            if (deviceOptions !== null || deviceOptionsLoading) return;
+            deviceOptionsLoading = true;
+            fetch('/api/devices', { headers: { 'Content-Type': 'application/json' } })
+                .then((response) => response.json().catch(() => null).then((body) => ({ ok: response.ok, body })))
+                .then(({ ok, body }) => {
+                    deviceOptions = (ok && body && Array.isArray(body.devices)) ? body.devices : [];
+                })
+                .catch(() => { deviceOptions = []; })
+                .finally(() => {
+                    deviceOptionsLoading = false;
+                    renderSteps();
+                });
+        }
+
+        // Generic read/write for a schema field key on a raw step object.
+        // Most keys are flat (`instruction`, `script_id`); `notify.title` /
+        // `notify.body` / `notify.level` are dotted presentation keys whose
+        // real wire shape is a single nested `notify` object (see
+        // `base_field_types` in agent/workflow_step_schema.py) — the dot
+        // here means "nest into this object", not "this literal key".
+        function getStepField(step, key) {
+            const parts = key.split('.');
+            let cur = step;
+            for (const part of parts) {
+                if (cur && typeof cur === 'object') cur = cur[part];
+                else return undefined;
+            }
+            return cur;
+        }
+
+        function setStepField(step, key, value) {
+            const parts = key.split('.');
+            let cur = step;
+            for (let i = 0; i < parts.length - 1; i += 1) {
+                const part = parts[i];
+                if (typeof cur[part] !== 'object' || cur[part] === null || Array.isArray(cur[part])) {
+                    cur[part] = {};
+                }
+                cur = cur[part];
+            }
+            cur[parts[parts.length - 1]] = value;
+        }
+
+        function updateStepField(index, key, value) {
+            // No re-render: rewriting the DOM on every keystroke would steal focus.
+            setStepField(steps[index], key, value);
+        }
+
+        function updateStepFieldAndRender(index, key, value) {
+            setStepField(steps[index], key, value);
+            renderSteps();
+        }
+
+        function stringListValues(step, key) {
+            const raw = getStepField(step, key);
+            return Array.isArray(raw) ? raw : [];
+        }
+
+        function addStringListItem(index, key) {
+            const values = [...stringListValues(steps[index], key), ''];
+            setStepField(steps[index], key, values);
+            renderSteps();
+        }
+
+        function removeStringListItem(index, key, itemIndex) {
+            const values = stringListValues(steps[index], key).slice();
+            values.splice(itemIndex, 1);
+            setStepField(steps[index], key, values);
+            renderSteps();
+        }
+
+        function updateStringListItem(index, key, itemIndex, value) {
+            const values = stringListValues(steps[index], key).slice();
+            values[itemIndex] = value;
+            setStepField(steps[index], key, values);
+        }
+
+        // `actions` (kind `action_list`) is a list of *structured* action
+        // objects, not strings — the schema deliberately does not describe
+        // its per-action shape (see KIND_ACTION_LIST in
+        // agent/workflow_step_schema.py), because it already has a dedicated
+        // editor on the phone. The dashboard has never had one either, so
+        // rather than build a new click-driven editor here, this renders the
+        // raw JSON so the field is at least visible and editable without
+        // losing data — full editing stays on the phone app.
+        function updateActionListField(index, key, raw) {
+            try {
+                const parsed = raw.trim() ? JSON.parse(raw) : [];
+                setStepField(steps[index], key, parsed);
+            } catch (error) {
+                // Invalid JSON mid-edit: leave the stored value alone. The
+                // textarea already shows what the user typed; re-rendering
+                // from the (unparsed) stored value would fight their typing.
+            }
+        }
+
+        function selectOptionLabel(value) {
+            const levelKeys = { info: 's_level_info', success: 's_level_success', warning: 's_level_warning', error: 's_level_error' };
+            if (Object.prototype.hasOwnProperty.call(levelKeys, value)) return t(levelKeys[value]);
+            if (!value) return value;
+            return value.charAt(0).toUpperCase() + value.slice(1);
+        }
+
+        function renderTextField(step, index, field, label, help, multiline) {
+            const raw = getStepField(step, field.key);
+            const value = raw === undefined || raw === null ? '' : String(raw);
+            const control = multiline
+                ? `<textarea class="input" rows="2" oninput="updateStepField(${index}, '${field.key}', this.value)">${escapeHtml(value)}</textarea>`
+                : `<input class="input" value="${escapeHtml(value)}" placeholder="${escapeHtml(t('optional'))}" oninput="updateStepField(${index}, '${field.key}', this.value)">`;
+            return `
+                    <div class="field">
+                        <label>${escapeHtml(label)}</label>
+                        ${help ? `<div class="hint" style="margin:0 0 6px;">${escapeHtml(help)}</div>` : ''}
+                        ${control}
+                    </div>`;
+        }
+
+        function renderSelectField(step, index, field, label, help) {
+            const current = getStepField(step, field.key) || '';
+            let options = [];
+            let note = help;
+            if (Array.isArray(field.options)) {
+                options = field.options.map((value) => [value, selectOptionLabel(value)]);
+            } else if (field.options_source === 'scripts') {
+                options = scripts.map((script) => [script.id, script.name]);
+                if (!scripts.length) note = t('s_register_first');
+            } else if (field.options_source === 'devices') {
+                ensureDeviceOptionsLoaded();
+                if (deviceOptions === null) {
+                    note = t('s_loading_options');
+                } else {
+                    options = deviceOptions.map((device) => [device.id, device.model || device.name || device.id]);
+                    if (!options.length) note = t('s_no_devices') + ' ' + t('s_options_load_failed');
+                }
+            } else {
+                // No inline options and no known source to fetch from: a
+                // dropdown with nothing to pick from is worse than a plain
+                // text box, so fall back to one rather than hide the field.
+                return renderTextField(step, index, field, label, help, false);
+            }
+            const noneLabel = field.required ? t('s_select_required') : t('s_select_none');
+            const rows = options
+                .map(([value, optLabel]) => `<option value="${escapeHtml(value)}"${value === current ? ' selected' : ''}>${escapeHtml(optLabel)}</option>`)
                 .join('');
-            return `<option value="">(pick a registered script)</option>${rows}`;
+            // A value already set that fell out of the fetched list (a
+            // deleted script, an offline device) stays visible/selectable
+            // instead of silently looking cleared.
+            const keepCurrent = current && !options.some(([value]) => value === current)
+                ? `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`
+                : '';
+            return `
+                    <div class="field">
+                        <label>${escapeHtml(label)}</label>
+                        ${note ? `<div class="hint" style="margin:0 0 6px;">${escapeHtml(note)}</div>` : ''}
+                        <select class="input" onchange="updateStepFieldAndRender(${index}, '${field.key}', this.value)">
+                            <option value="">${escapeHtml(noneLabel)}</option>
+                            ${rows}
+                            ${keepCurrent}
+                        </select>
+                    </div>`;
+        }
+
+        function renderStringListField(step, index, field, label, help) {
+            const values = stringListValues(step, field.key);
+            const rows = values.map((value, itemIndex) => `
+                        <div class="row" style="margin-bottom:6px;">
+                            <input class="input" value="${escapeHtml(value)}"
+                                   oninput="updateStringListItem(${index}, '${field.key}', ${itemIndex}, this.value)">
+                            <button type="button" class="btn btn-secondary btn-xs" onclick="removeStringListItem(${index}, '${field.key}', ${itemIndex}); return false;">${escapeHtml(t('s_remove_item'))}</button>
+                        </div>`).join('');
+            return `
+                    <div class="field">
+                        <label>${escapeHtml(label)}</label>
+                        ${help ? `<div class="hint" style="margin:0 0 6px;">${escapeHtml(help)}</div>` : ''}
+                        ${rows}
+                        <button type="button" class="btn btn-secondary btn-xs" onclick="addStringListItem(${index}, '${field.key}'); return false;">${escapeHtml(t('s_add_item'))}</button>
+                    </div>`;
+        }
+
+        function renderActionListField(step, index, field, label, help) {
+            const raw = getStepField(step, field.key);
+            const text = raw === undefined ? '[]' : JSON.stringify(raw, null, 2);
+            return `
+                    <div class="field">
+                        <label>${escapeHtml(label)}</label>
+                        <div class="hint" style="margin:0 0 6px;">${escapeHtml(t('s_actions_hint'))}${help ? ' ' + escapeHtml(help) : ''}</div>
+                        <textarea class="input" rows="4" style="font-family:var(--mono, monospace); font-size:12px;"
+                                  oninput="updateActionListField(${index}, '${field.key}', this.value)">${escapeHtml(text)}</textarea>
+                    </div>`;
+        }
+
+        function renderStepField(step, index, field) {
+            const label = schemaText(field.label, field.key);
+            const help = schemaText(field.help, '');
+            switch (field.kind) {
+                case 'text': return renderTextField(step, index, field, label, help, false);
+                case 'long_text': return renderTextField(step, index, field, label, help, true);
+                case 'select': return renderSelectField(step, index, field, label, help);
+                case 'string_list': return renderStringListField(step, index, field, label, help);
+                case 'action_list': return renderActionListField(step, index, field, label, help);
+                default:
+                    // A field kind this build doesn't know how to render yet.
+                    // Skipping it is the harmless outcome — showing nothing
+                    // beats crashing the whole step editor over one field.
+                    return '';
+            }
+        }
+
+        function renderStepFieldArea(step, index) {
+            const type = step.type || 'llm';
+            const typeSchema = stepSchemaFor(type);
+            if (!typeSchema) {
+                // Either the schema hasn't loaded yet, or this step carries a
+                // type the current schema doesn't describe (an older/newer
+                // server, or a type dropped mid-session). Either way: render
+                // nothing rather than guessing a field shape.
+                return stepSchema ? '' : `<div class="hint" style="margin:0 0 12px;">${escapeHtml(t('s_schema_loading'))}</div>`;
+            }
+            return typeSchema.fields.map((field) => renderStepField(step, index, field)).join('');
+        }
+
+        function stepTypeOptions(step) {
+            const type = step.type || 'llm';
+            if (stepSchema && Array.isArray(stepSchema.types) && stepSchema.types.length) {
+                const known = new Set(stepSchema.types.map((entry) => entry.type));
+                const rows = stepSchema.types
+                    .map((entry) => `<option value="${escapeHtml(entry.type)}"${entry.type === type ? ' selected' : ''}>${escapeHtml(schemaText(entry.label, entry.type))}</option>`)
+                    .join('');
+                const extra = known.has(type) ? '' : `<option value="${escapeHtml(type)}" selected>${escapeHtml(type)}</option>`;
+                return rows + extra;
+            }
+            // Schema not loaded (yet, or at all): a minimal fallback so the
+            // step editor is never an empty dropdown.
+            return `<option value="llm"${type === 'llm' ? ' selected' : ''}>${escapeHtml(t('s_type_llm'))}</option>
+                            <option value="shell"${type === 'shell' ? ' selected' : ''}>${escapeHtml(t('s_type_shell'))}</option>`;
         }
 
         function renderSteps() {
@@ -1836,29 +2137,7 @@
             host.innerHTML = steps.map((step, index) => {
                 const type = step.type || 'llm';
                 const isShell = type === 'shell';
-                const body = isShell
-                    ? `
-                    <div class="row">
-                        <div class="field">
-                            <label>${escapeHtml(t('s_script'))}</label>
-                            <select class="input" onchange="updateStepAndRender(${index}, 'script_id', this.value)">
-                                ${scriptOptions(step)}
-                            </select>
-                        </div>
-                        <div class="field">
-                            <label>${escapeHtml(t('s_extra_args'))}</label>
-                            <input class="input" value="${escapeHtml((step.script_args || []).join(' '))}"
-                                   placeholder="e.g. R59N3035LQL"
-                                   oninput="updateStepArgs(${index}, this.value)">
-                        </div>
-                    </div>
-                    ${scripts.length ? '' : `<div class="empty">${escapeHtml(t('s_register_first'))}</div>`}`
-                    : `
-                    <div class="field">
-                        <label>${escapeHtml(t('s_tool_hint'))}</label>
-                        <input class="input" value="${escapeHtml(step.tool_hint || '')}" placeholder="${escapeHtml(t('optional'))}"
-                               oninput="updateStep(${index}, 'tool_hint', this.value)">
-                    </div>`;
+                const fieldArea = renderStepFieldArea(step, index);
                 return `
                 <div class="step">
                     <div class="step-head">
@@ -1877,20 +2156,15 @@
                         <div class="field">
                             <label>${escapeHtml(t('s_type'))}</label>
                             <select class="input" onchange="updateStepAndRender(${index}, 'type', this.value)">
-                                <option value="llm"${type === 'llm' ? ' selected' : ''}>${escapeHtml(t('s_type_llm'))}</option>
-                                <option value="shell"${isShell ? ' selected' : ''}>${escapeHtml(t('s_type_shell'))}</option>
+                                ${stepTypeOptions(step)}
                             </select>
                         </div>
                     </div>
-                    ${body}
                     <div class="field">
                         <label>${escapeHtml(isShell ? t('s_what_script') : t('s_what_step'))}</label>
                         <textarea class="input" rows="2" oninput="updateStep(${index}, 'description', this.value)">${escapeHtml(step.description || '')}</textarea>
                     </div>
-                    <div class="field">
-                        <label>${escapeHtml(t('s_success_criteria'))}</label>
-                        <input class="input" value="${escapeHtml(step.success_criteria || '')}" oninput="updateStep(${index}, 'success_criteria', this.value)">
-                    </div>
+                    ${fieldArea}
                     <div class="row" style="margin-bottom:0;">
                         <div class="field" style="margin-bottom:0;">
                             <label>${escapeHtml(t('s_on_success'))}</label>
@@ -1926,11 +2200,6 @@
             renderSteps();
         }
 
-        function updateStepArgs(index, raw) {
-            const trimmed = raw.trim();
-            steps[index].script_args = trimmed ? trimmed.split(/\s+/) : [];
-        }
-
         function updateStep(index, field, value) {
             // No re-render: rewriting the DOM on every keystroke would steal focus.
             steps[index][field] = value;
@@ -1949,28 +2218,70 @@
             renderSteps();
         }
 
+        // The set of wire field keys a step of `type` is allowed to carry, on
+        // top of COMMON_STEP_FIELDS — derived from the same schema the field
+        // editor renders from, so what gets sent on save always matches what
+        // was offered to edit. `null` means the schema hasn't loaded: in
+        // that case collectSteps below keeps whatever the step already has
+        // rather than guessing a shape and stripping data.
+        function allowedFieldsForType(type) {
+            const typeSchema = stepSchemaFor(type);
+            if (!typeSchema) return null;
+            const fields = new Set();
+            // `notify.title` / `notify.body` / `notify.level` are per-widget
+            // presentation keys for one real wire field (`notify`, a nested
+            // object) — see getStepField/setStepField above.
+            typeSchema.fields.forEach((field) => fields.add(field.key.split('.')[0]));
+            return fields;
+        }
+
+        // True if a value (string, array, nested object, or scalar) carries
+        // anything worth keeping. Used so a step is not silently dropped on
+        // save just because it has no name/description — a `notify` step
+        // filled in only via notify.title/body, or an `android_action` step
+        // that only has actions recorded, is still a step the user meant to
+        // keep.
+        function hasMeaningfulValue(value) {
+            if (value === null || value === undefined) return false;
+            if (typeof value === 'string') return value.trim().length > 0;
+            if (Array.isArray(value)) return value.some(hasMeaningfulValue);
+            if (typeof value === 'object') return Object.values(value).some(hasMeaningfulValue);
+            return Boolean(value);
+        }
+
         function collectSteps() {
             return steps
-                .filter((step) =>
-                    (step.name || '').trim() || (step.description || '').trim() || step.script_id)
+                .filter((step) => {
+                    if ((step.name || '').trim() || (step.description || '').trim()) return true;
+                    if (step.script_id) return true;
+                    const allowed = allowedFieldsForType(step.type || 'llm');
+                    const keysToCheck = allowed ? [...allowed] : Object.keys(step);
+                    return keysToCheck.some((key) => hasMeaningfulValue(getStepField(step, key)));
+                })
                 .map((step, index) => {
+                    const type = step.type || 'llm';
+                    const allowed = allowedFieldsForType(type);
                     const collected = {
-                        ...step,
                         id: stepId(step, index),
-                        type: step.type || 'llm',
+                        type,
                         name: (step.name || '').trim(),
                         description: (step.description || '').trim(),
-                        success_criteria: (step.success_criteria || '').trim(),
                     };
-                    if (collected.type === 'shell') {
-                        // tool_hint is an LLM concept; sending it on a script
-                        // step just adds noise to the stored definition.
-                        delete collected.tool_hint;
-                        collected.script_args = step.script_args || [];
-                    } else {
-                        collected.tool_hint = (step.tool_hint || '').trim() || null;
-                        delete collected.script_id;
-                        delete collected.script_args;
+                    if (step.on_failure !== undefined) collected.on_failure = step.on_failure;
+                    if (step.on_success !== undefined) collected.on_success = step.on_success;
+                    Object.keys(step).forEach((key) => {
+                        if (COMMON_STEP_FIELDS.has(key)) return;
+                        const keep = allowed === null || allowed.has(key) || PRESERVE_LEGACY_FIELDS.has(key);
+                        if (keep) collected[key] = step[key];
+                    });
+                    if (typeof collected.success_criteria === 'string') {
+                        collected.success_criteria = collected.success_criteria.trim();
+                    }
+                    if (typeof collected.tool_hint === 'string') {
+                        collected.tool_hint = collected.tool_hint.trim() || null;
+                    }
+                    if (type === 'shell') {
+                        collected.script_args = Array.isArray(step.script_args) ? step.script_args : [];
                     }
                     return collected;
                 });
@@ -2692,7 +3003,7 @@
         // --- Bootstrap ------------------------------------------------------
 
         async function reloadAll() {
-            const [agentResult, scheduleResult, taskResult, ruleResult, approvalResult, scriptResult, runResult] = await Promise.all([
+            const [agentResult, scheduleResult, taskResult, ruleResult, approvalResult, scriptResult, runResult, stepSchemaResult] = await Promise.all([
                 api('/agents?limit=200'),
                 api('/schedules'),
                 api('/tasks?limit=200'),
@@ -2700,6 +3011,7 @@
                 api('/approvals/pending'),
                 api('/scripts'),
                 api('/runs?limit=60'),
+                api('/workflow/step-schema'),
             ]);
             agents = (agentResult && agentResult.agents) || [];
             schedules = (scheduleResult && scheduleResult.schedules) || [];
@@ -2709,6 +3021,12 @@
             approvals = (approvalResult && approvalResult.approvals) || [];
             tasksById = {};
             ((taskResult && taskResult.tasks) || []).forEach((task) => { tasksById[task.id] = task; });
+            // A failed/errored fetch leaves whatever schema is already cached
+            // in place rather than wiping it — a transient reload failure
+            // should not blank out the step editor mid-edit.
+            if (stepSchemaResult && Array.isArray(stepSchemaResult.types)) {
+                stepSchema = stepSchemaResult;
+            }
             renderAgentList();
             renderAgentPicker();
             renderSchedules();
@@ -2717,6 +3035,7 @@
             renderPolicyRules();
             renderApprovals();
             renderApprovalBanner();
+            renderSteps();
         }
 
         // A run parked on an unanswered permission keeps its schedule skipping,

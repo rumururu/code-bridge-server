@@ -94,6 +94,12 @@ from policy.policy_gate import evaluate_direct_action_gate
 from terminal_action_service import execute_terminal_command_for_current_server
 
 from .deps import verify_api_key
+from .script_proposals import (
+    draft_pending_proposals,
+    list_proposals_for_session,
+    proposal_view,
+    sync_proposals_for_session,
+)
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -531,6 +537,14 @@ def _builder_response(
         is_ready_to_commit=session.is_ready_to_commit,
         should_offer_task=False,
         task_draft=session.task_draft,
+        # Every response carries the conversation's script proposals, not just
+        # the turn that raised one: the body arrives after the turn is answered
+        # (see routes.script_proposals), so a client that only ever reads turns
+        # still catches up on the next one.
+        script_proposals=[
+            proposal_view(proposal)
+            for proposal in list_proposals_for_session(session.session_id)
+        ],
         status=status,
         job_id=job_id,
         # Kept in the wire format for older clients, but nothing produces a
@@ -584,6 +598,14 @@ def _apply_successful_configurator_response(
     parsed = session.apply_llm_response(
         raw_response,
         user_message=user_message,
+    )
+    # A script the Configurator asked for becomes a proposal here, in
+    # `drafting`. Nothing is written or registered by this call — it only
+    # records what was asked for, so the drafting job (kicked off once the
+    # turn has been answered) knows what to write.
+    sync_proposals_for_session(
+        session.session_id,
+        session.current_draft.script_requests,
     )
     session.touch()
     return _builder_response(
@@ -671,6 +693,14 @@ async def _run_builder_converse_job(job_id: str) -> None:
         job.touch()
         session.lock.release()
 
+    # Outside the lock, and after the job has settled: the client is already
+    # reading the reply while the script gets written. A drafting failure is
+    # the proposal's failure, not the turn's, so it must not touch job.status.
+    try:
+        await draft_pending_proposals(job.session_id)
+    except Exception as exc:  # noqa: BLE001 - never let this fail a finished turn
+        logger.warning("builder_script_proposal_drafting_failed error=%s", exc)
+
 
 def _validate_task_draft(task_draft: TaskDraft) -> None:
     goal = getattr(task_draft, "goal", None)
@@ -687,7 +717,10 @@ def _validate_task_draft(task_draft: TaskDraft) -> None:
     response_model=BuilderTurnResponse,
     response_model_exclude_none=True,
 )
-async def builder_converse(body: BuilderTurn) -> BuilderTurnResponse:
+async def builder_converse(
+    body: BuilderTurn,
+    background_tasks: BackgroundTasks,
+) -> BuilderTurnResponse:
     session = _get_or_create_builder_session(body)
 
     if not session.lock.acquire(blocking=False):
@@ -712,11 +745,17 @@ async def builder_converse(body: BuilderTurn) -> BuilderTurnResponse:
         except RuntimeError as exc:
             return _configurator_failure_response(session, reason=str(exc))
 
-        return _apply_successful_configurator_response(
+        response = _apply_successful_configurator_response(
             session,
             raw_response=raw_response,
             user_message=body.user_message,
         )
+        # Drafting runs after this response is on the wire. It is a second LLM
+        # call with its own 180s budget, and this route answers inside 20s or
+        # tells the client to poll — waiting for it here would make every turn
+        # that asks for a script look like a hung builder.
+        background_tasks.add_task(draft_pending_proposals, session.session_id)
+        return response
     finally:
         session.lock.release()
 

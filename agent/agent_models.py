@@ -57,7 +57,16 @@ class AgentToolDraft(BaseModel):
 
 
 class WorkflowStep(BaseModel):
-    """Draft workflow step for an agent run."""
+    """Draft workflow step for an agent run.
+
+    ``type`` must list every type in ``workflow_v2.ALLOWED_STEP_TYPES``. The
+    two the runtime gained last — ``shell`` and ``notify`` — were missing here
+    for as long as they existed, so a Configurator draft block containing the
+    shell step the prompt asks it to write failed validation and the whole
+    turn's draft was dropped as "invalid draft block". The conversation could
+    describe a script step and never produce one. ``test_configurator_script_
+    proposal.py`` asserts the two sets still match.
+    """
 
     model_config = ConfigDict(extra="allow")
 
@@ -65,6 +74,8 @@ class WorkflowStep(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     type: Literal[
         "llm",
+        "shell",
+        "notify",
         "mcp_tool",
         "browser_action",
         "app_action",
@@ -82,6 +93,29 @@ class WorkflowStep(BaseModel):
     on_failure: str | dict[str, Any] = Field(default="ask_user")
 
 
+class ScriptRequestDraft(BaseModel):
+    """A script the Configurator needs but cannot name, because it does not exist.
+
+    A ``shell`` step names a registered script by id, so until someone
+    registers one the conversation had nowhere to go: the Configurator could
+    only describe the script in prose and the user had to leave, open the
+    dashboard, have one written, register it and come back to re-explain. This
+    is that description in a shape the server can act on.
+
+    It is a *request*, never an installation: it carries no script body, no
+    path and no ``script_id``. What the model writes here is only ever used as
+    the intent handed to the script writer, and the result of that is shown to
+    the user before it exists anywhere on disk.
+    """
+
+    name: str = Field(min_length=1, max_length=80)
+    purpose: str = Field(min_length=1, max_length=400)
+    expected_output: str = Field(default="", max_length=400)
+    # Which step will run it, so approval can fill that step's script_id
+    # instead of making the user match them up by hand.
+    step_id: str | None = None
+
+
 class AgentDraft(BaseModel):
     """Incremental Agent Builder draft carried between Configurator turns."""
 
@@ -93,6 +127,7 @@ class AgentDraft(BaseModel):
     tools: list[AgentToolDraft] = Field(default_factory=list)
     flow: list[WorkflowStep] = Field(default_factory=list)
     memory_seeds: list[str] = Field(default_factory=list)
+    script_requests: list[ScriptRequestDraft] = Field(default_factory=list)
 
     @field_validator("memory_seeds", mode="before")
     @classmethod
@@ -137,6 +172,37 @@ class BuilderTurn(BaseModel):
     draft: AgentDraft | None = None
 
 
+class ScriptProposalView(BaseModel):
+    """A proposed script as the conversation shows it.
+
+    ``status`` is the whole safety story of this object:
+
+    - ``drafting`` — the script writer is running; there is no body yet.
+    - ``ready`` — a body exists **in memory only**. Nothing has been written to
+      disk and nothing has been registered, so no workflow step can run it.
+    - ``failed`` — drafting failed and ``error`` says why. ``body`` stays null;
+      nothing is invented to fill the gap.
+    - ``registered`` — a person approved it through the approval endpoint and
+      ``script_id`` is the registered script a shell step may now name.
+
+    Nothing moves from ``ready`` to ``registered`` on its own. That transition
+    exists only in :func:`routes.script_proposals.approve_script_proposal`,
+    which is reachable only from the dashboard — "write me a script" must never
+    become "run whatever you just wrote".
+    """
+
+    proposal_id: str
+    name: str
+    purpose: str
+    expected_output: str = ""
+    step_id: str | None = None
+    status: Literal["drafting", "ready", "failed", "registered"]
+    interpreter: str = "bash"
+    body: str | None = None
+    error: str | None = None
+    script_id: str | None = None
+
+
 class BuilderTurnResponse(BaseModel):
     """Response body for an Agent Builder Configurator turn."""
 
@@ -146,6 +212,7 @@ class BuilderTurnResponse(BaseModel):
     is_ready_to_commit: bool
     should_offer_task: bool = Field(default=False, deprecated=True)
     task_draft: TaskDraft | None = None
+    script_proposals: list[ScriptProposalView] = Field(default_factory=list)
     status: str = "completed"
     job_id: str | None = None
     fallback: bool = False
