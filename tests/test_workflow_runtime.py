@@ -190,7 +190,11 @@ class WorkflowRuntimeTest(unittest.TestCase):
         message = seen_messages[0]
         self.assertIn("- instruction: Inspect the failed build.", message)
         self.assertIn("- observation: Review the latest task output first.", message)
-        self.assertIn("- memory read: Load prior build caveats.", message)
+        # memory_read is a selector resolved against the agent's memories, not
+        # prose relayed verbatim; this agent has no memories, so nothing
+        # matches and neither the query text nor an empty section appears.
+        self.assertNotIn("- memory read:", message)
+        self.assertNotIn("- relevant memories:", message)
         self.assertIn(
             "- memory write: Remember newly discovered build caveats.",
             message,

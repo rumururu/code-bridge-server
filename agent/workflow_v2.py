@@ -38,6 +38,102 @@ ALLOWED_STEP_TYPES = {
     "condition",
 }
 
+# Fields every step type accepts, regardless of what it does with them. `id`
+# and `type`/`step_type` identify the step; `name`/`description` are always
+# author-facing text; `on_failure`/`on_success` are always consulted by the
+# orchestrator after a step settles (see `_apply_workflow_failure_policy` /
+# `_apply_workflow_success_policy` in task_orchestrator.py), independent of
+# step type.
+COMMON_STEP_FIELDS: frozenset[str] = frozenset(
+    {"id", "type", "step_type", "name", "description", "on_failure", "on_success"}
+)
+
+# WORKFLOW_STEP_SCHEMA: the per-type field contract from
+# docs/concept/spec/WORKFLOW_STEP_FIELDS_SPEC.md ("Per-type field sets"). This
+# is the single definition normalize_workflow_step enforces below, and the
+# definition a future `GET /api/agent/workflow/step-schema` route
+# (AGENT_COMPOSITION_SPEC.md Phase 2) will publish verbatim so every authoring
+# surface renders the same field list the normalizer accepts — two sources
+# would drift, which is the failure the schema-publishing step exists to
+# prevent. Keys are step types from ALLOWED_STEP_TYPES; values are the
+# type-specific fields on top of COMMON_STEP_FIELDS.
+WORKFLOW_STEP_SCHEMA: dict[str, frozenset[str]] = {
+    "shell": frozenset({"script_id", "script_args"}),
+    "llm": frozenset(
+        {
+            "instruction",
+            "observation",
+            "memory_read",
+            "memory_write",
+            "success_criteria",
+            "tool_hint",
+        }
+    ),
+    "notify": frozenset({"notify"}),
+    "browser_action": frozenset({"actions", "tool_hint"}),
+    "app_action": frozenset({"actions", "device_id", "android_device_id"}),
+    "android_action": frozenset({"actions", "device_id", "android_device_id"}),
+    "mobile_action": frozenset({"actions", "device_id", "android_device_id"}),
+    "device_action": frozenset({"actions", "device_id", "android_device_id"}),
+    "mcp_tool": frozenset({"tool_hint"}),
+    "approval_gate": frozenset(),
+    "manual_handoff": frozenset(),
+    "condition": frozenset(),
+}
+
+# Backward-compatibility carve-out. Do not add fields here to work around a
+# new validation failure — read the reasoning below first.
+#
+# Before this module scoped fields per type, `normalize_workflow_step`
+# computed `tool_hint`, `success_criteria` and `actions` unconditionally for
+# *every* step, regardless of type (it called `_clean_optional_text` /
+# `_clean_text` / `normalize_actions` on all three no matter what `type` was).
+# Every agent saved through that code — including live scheduled agents in
+# this project's own database — can carry any of the three on a step type
+# that the spec above does not list them for. One concrete example:
+# `agent_9f6af9fdeed24da8804ca8eb5d3368cc` (a real, currently-scheduled agent)
+# has a `shell` step with a human-written `success_criteria` ("사이클 정상
+# 종료") and stamped `tool_hint: null` / `actions: []`.
+#
+# `normalize_workflow` is not a one-time migration: `_workflow_steps_for_task`
+# calls it fresh from the stored `flow_json` on every task run, and nothing
+# writes the normalized shape back to the agent record. So rejecting these
+# three outside their scoped types would not just refuse a new bad draft — it
+# would make an already-working agent stop running (silently: the caller
+# catches `WorkflowNormalizationError` and treats the workflow as zero steps)
+# the next time its schedule fires, with no code change to the agent itself.
+# That is exactly the "do not break existing agents" failure this task exists
+# to avoid, so these three are exempted from type scoping rather than
+# rejected: normalize_workflow_step accepts them on any step type and keeps
+# them in the normalized output unchanged, precisely matching the behaviour
+# every step already had. This is safe, not a reopened hole: the runtime
+# already ignored `success_criteria`/`tool_hint`/`actions` on types that don't
+# read them (nothing outside the llm prompt build reads `success_criteria`;
+# see WORKFLOW_STEP_FIELDS_SPEC.md), so accepting them here does not make them
+# start doing anything new. WORKFLOW_STEP_SCHEMA above still only *advertises*
+# them for the types the spec scopes them to, so once an authoring surface
+# renders from that schema (Phase 2/3), it stops offering them elsewhere —
+# this carve-out only affects step shapes that already exist.
+_UNRESTRICTED_LEGACY_FIELDS: frozenset[str] = frozenset(
+    {"tool_hint", "success_criteria", "actions"}
+)
+
+
+def _reject_fields_outside_type(
+    raw_step: dict[str, Any], *, step_type: str, index: int
+) -> None:
+    allowed = (
+        COMMON_STEP_FIELDS
+        | WORKFLOW_STEP_SCHEMA.get(step_type, frozenset())
+        | _UNRESTRICTED_LEGACY_FIELDS
+    )
+    for field in raw_step:
+        if field not in allowed:
+            raise WorkflowNormalizationError(
+                f"step {index}: '{field}' is not a field of a {step_type} step"
+            )
+
+
 ALLOWED_ACTION_TYPES = {
     "navigate",
     "click",
@@ -83,6 +179,11 @@ def normalize_workflow(raw_steps: Any) -> list[dict[str, Any]]:
     - normalized ``type``
     - structured ``on_failure`` policy object
     - normalized ``actions`` list when provided
+
+    A field outside the normalized type's set (``WORKFLOW_STEP_SCHEMA``) is
+    rejected rather than silently dropped — see ``_reject_fields_outside_type``
+    — except for the small legacy-compat carve-out documented on
+    ``_UNRESTRICTED_LEGACY_FIELDS``.
     """
 
     if raw_steps is None:
@@ -117,6 +218,7 @@ def normalize_workflow_step(
     seen = seen_ids or set()
     step_id = _normalize_step_id(step.get("id"), index=index, seen_ids=seen)
     step_type = _normalize_step_type(step.get("type") or step.get("step_type"), index)
+    _reject_fields_outside_type(raw_step, step_type=step_type, index=index)
 
     step["id"] = step_id
     step["type"] = step_type

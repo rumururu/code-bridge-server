@@ -1197,6 +1197,9 @@ async def _execute_llm_workflow_step(
 ) -> bool:
     store = get_agent_store()
     step_id = str(step["id"])
+    step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+    agent_id = _step_agent_id(store.get_task(task_id) or {})
+    matched_memories = _memories_for_step(store, agent_id, step_input)
     store.update_task_step(step_id, {"status": "running"})
     store.append_event(
         run_id=run_id,
@@ -1224,6 +1227,7 @@ async def _execute_llm_workflow_step(
                 step,
                 launch_message,
                 previous_steps=previous_steps or [],
+                matched_memories=matched_memories,
             ),
         )
     except Exception as exc:
@@ -1259,6 +1263,13 @@ async def _execute_llm_workflow_step(
         # Truncated: a step output row is read in a list, and the full turn is
         # still in the event log if anyone needs all of it.
         output["result"] = _truncate_workflow_evidence(sink.result_text, 4000)
+    _remember_step_result(
+        store,
+        agent_id=agent_id,
+        run_id=run_id,
+        step_input=step_input,
+        result_text=sink.result_text,
+    )
     _complete_step(
         task=store.get_task(task_id) or {"id": task_id},
         step_id=step_id,
@@ -2229,15 +2240,13 @@ def _workflow_step_message(
     launch_message: str,
     *,
     previous_steps: list[dict[str, Any]] | None = None,
+    matched_memories: list[dict[str, Any]] | None = None,
 ) -> str:
     step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
     instruction = _workflow_text(
         step_input.get("instruction") or step_input.get("description")
     )
     observation = _workflow_text(step_input.get("observation"))
-    memory_read = _workflow_jsonish(
-        step_input.get("memory_read") or step_input.get("memoryRead")
-    )
     memory_write = _workflow_jsonish(
         step_input.get("memory_write") or step_input.get("memoryWrite")
     )
@@ -2256,8 +2265,16 @@ def _workflow_step_message(
         lines.append(f"- instruction: {instruction}")
     if observation:
         lines.append(f"- observation: {observation}")
-    if memory_read:
-        lines.append(f"- memory read: {memory_read}")
+    # memory_read is a query, not prose to relay verbatim: it was already
+    # resolved to the agent memories it matches (see ``_memories_for_step``).
+    # Nothing here means nothing matched — say nothing rather than inventing
+    # a section, and never paste the raw selector text into the prompt.
+    if matched_memories:
+        lines.append("- relevant memories:")
+        for memory in matched_memories:
+            content = _workflow_text(memory.get("content"))
+            if content:
+                lines.append(f"  - {content}")
     if memory_write:
         lines.append(f"- memory write: {memory_write}")
     if tool_hint:
@@ -2289,6 +2306,115 @@ def _workflow_step_message(
         ]
     )
     return "\n".join(lines)
+
+
+#: Memories are authored as read/write over "what happened", but sentences
+#: ("check the request id and outcome of prior installs") rarely reappear
+#: verbatim in memory content. Tokenizing into keywords and matching any of
+#: them is a predictable, ranking-free stand-in for full-text search — not a
+#: relevance engine, just "does this memory look related".
+_MEMORY_KEYWORD_PATTERN = re.compile(r"[\w가-힣]+", re.UNICODE)
+_MEMORY_READ_MATCH_LIMIT = 5
+
+
+def _memory_read_keywords(query: str) -> list[str]:
+    if not query:
+        return []
+    return [
+        token.lower()
+        for token in _MEMORY_KEYWORD_PATTERN.findall(query)
+        if len(token) >= 2
+    ]
+
+
+def _match_agent_memories(
+    memories: list[dict[str, Any]],
+    query: str,
+    *,
+    limit: int = _MEMORY_READ_MATCH_LIMIT,
+) -> list[dict[str, Any]]:
+    keywords = _memory_read_keywords(query)
+    if not keywords:
+        return []
+    matches: list[dict[str, Any]] = []
+    for memory in memories:
+        content = str(memory.get("content") or "").lower()
+        if not content:
+            continue
+        if any(keyword in content for keyword in keywords):
+            matches.append(memory)
+        if len(matches) >= limit:
+            break
+    return matches
+
+
+def _step_agent_id(task: dict[str, Any]) -> str | None:
+    agent_id = task.get("assigned_agent_id")
+    return agent_id if isinstance(agent_id, str) and agent_id else None
+
+
+def _memories_for_step(
+    store: Any,
+    agent_id: str | None,
+    step_input: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Resolve ``memory_read`` to the agent memories it selects.
+
+    ``memory_read`` is a query the author writes, not prose meant for the
+    model verbatim — the whole point of wiring it is that the step's prompt
+    carries the matched memories instead of the query text.
+    """
+    if not agent_id:
+        return []
+    query = _workflow_jsonish(
+        step_input.get("memory_read") or step_input.get("memoryRead")
+    )
+    if not query:
+        return []
+    memories = store.list_memories(agent_id, limit=100) or []
+    return _match_agent_memories(memories, query)
+
+
+def _remember_step_result(
+    store: Any,
+    *,
+    agent_id: str | None,
+    run_id: str,
+    step_input: dict[str, Any],
+    result_text: str | None,
+) -> None:
+    """Persist a step's result as an agent memory when ``memory_write`` asks.
+
+    What gets stored is the step's real result, not a rule-based summary of
+    it — content this repo has no business inventing stays uninvented, so a
+    step that produced nothing writes nothing rather than a fabricated note.
+    Storage is best-effort: the step's actual work already succeeded by the
+    time this runs, so a memory-store failure is logged and swallowed rather
+    than turned into a failed step.
+    """
+    if not agent_id:
+        return
+    memory_write = _workflow_jsonish(
+        step_input.get("memory_write") or step_input.get("memoryWrite")
+    )
+    if not memory_write:
+        return
+    if not result_text or not result_text.strip():
+        return
+    content = _truncate_workflow_evidence(result_text.strip(), 4000)
+    try:
+        store.add_memory(
+            agent_id=agent_id,
+            content=content,
+            source_run_id=run_id,
+            source_event_type="workflow_step",
+        )
+    except Exception:
+        logger.exception(
+            "failed to persist workflow step memory agent_id=%s run_id=%s",
+            agent_id,
+            run_id,
+        )
 
 
 # Failed steps are evidence too — usually the most important kind. A workflow
