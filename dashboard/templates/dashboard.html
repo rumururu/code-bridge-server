@@ -2161,6 +2161,11 @@
                 no_paired_devices_desc: 'Scan the QR code with the Code Bridge app to connect.',
                 open_qr_pairing: 'Open QR Pairing',
                 connected: 'Connected',
+                not_connected: 'Not connected',
+                llm_off: 'Off',
+                llm_enabled: 'Provider enabled',
+                llm_disabled: 'Provider disabled',
+                llm_access_failed: 'Could not change provider',
                 // Common
                 remove: 'Remove',
                 cancel: 'Cancel',
@@ -2243,6 +2248,11 @@
                 no_paired_devices_desc: 'Code Bridge 앱으로 QR 코드를 스캔하여 연결하세요.',
                 open_qr_pairing: 'QR 페어링 열기',
                 connected: '연결됨',
+                not_connected: '연결 안 됨',
+                llm_off: '사용 안 함',
+                llm_enabled: '사용하도록 설정했습니다',
+                llm_disabled: '사용하지 않도록 설정했습니다',
+                llm_access_failed: '변경하지 못했습니다',
                 offline: '오프라인',
                 // Common
                 remove: '삭제',
@@ -2943,10 +2953,19 @@
                 <div class="list-item">
                     <div class="list-item-info">
                         <span class="list-item-name">
-                            <span class="connected-indicator ${company.connected ? 'active' : 'inactive'}"></span>
+                            <span class="connected-indicator ${company.connected && company.enabled !== false ? 'active' : 'inactive'}"></span>
                             ${company.name}
                         </span>
-                        <span class="list-item-meta">${company.connected ? 'Connected' : 'Not connected'}</span>
+                        <span class="list-item-meta">${
+                            !company.connected
+                                ? (t('not_connected') || 'Not connected')
+                                : company.enabled === false
+                                    // Switched off is not the same as missing —
+                                    // saying "not connected" would offer to
+                                    // install a CLI that is already there.
+                                    ? (t('llm_off') || 'Off')
+                                    : (t('connected') || 'Connected')
+                        }</span>
                     </div>
                     <label class="checkbox-wrapper">
                         <input type="checkbox"
@@ -2958,12 +2977,26 @@
             `).join('');
         }
 
+        // This announced success without looking at the reply — and the reply
+        // was a 404, because the endpoint did not exist. Nothing was stored,
+        // the toast said otherwise, and the box came back checked on the next
+        // render with no sign anything had failed.
         async function toggleLlmAccess(companyId, enabled) {
-            await fetchApi('/api/system/llm/access', {
+            const result = await fetchApi('/api/system/llm/access', {
                 method: 'PUT',
                 body: JSON.stringify({ company_id: companyId, enabled: enabled })
             });
-            showToast(enabled ? 'LLM enabled' : 'LLM disabled', 'success');
+            const failed = !result || result.detail || result.error;
+            if (failed) {
+                showToast(
+                    result?.detail || result?.error || t('llm_access_failed') || 'Could not change provider',
+                    'error'
+                );
+                fetchDashboard().then(updateUI);   // Put the box back where the server has it.
+                return;
+            }
+            showToast(enabled ? t('llm_enabled') : t('llm_disabled'), 'success');
+            fetchDashboard().then(updateUI);
         }
 
         let hasShownInitialPairingModal = false;

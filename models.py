@@ -146,6 +146,13 @@ class LlmSelectionUpdate(BaseModel):
     model: str
 
 
+class LlmAccessUpdate(BaseModel):
+    """Request body for switching a provider on or off."""
+
+    company_id: str
+    enabled: bool
+
+
 class CodexSettingsUpdate(BaseModel):
     """Request body for updating Codex-specific settings."""
 

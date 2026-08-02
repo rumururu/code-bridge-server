@@ -6,7 +6,13 @@ from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import JSONResponse, Response
 from auth.firebase_auth import get_firebase_auth
 from llm.llm_commands import execute_llm_command, get_llm_command_snapshot
-from models import CodexSettingsUpdate, IpLoginUpdate, LlmProviderInstallRequest, LlmSelectionUpdate
+from models import (
+    CodexSettingsUpdate,
+    IpLoginUpdate,
+    LlmAccessUpdate,
+    LlmProviderInstallRequest,
+    LlmSelectionUpdate,
+)
 from system.system_settings_service import (
     cancel_llm_provider_install_job_for_current_server,
     get_codex_settings_for_current_server,
@@ -18,6 +24,7 @@ from system.system_settings_service import (
     update_codex_settings_for_current_server,
     update_heartbeat_settings_for_current_server,
     update_ip_login_settings_for_current_server,
+    update_llm_access_for_current_server,
     update_llm_selection_for_current_server,
 )
 from .deps import verify_api_key, verify_api_key_or_localhost
@@ -79,6 +86,19 @@ async def execute_llm_command_route(payload: dict[str, Any] = Body(...)) -> dict
 async def update_llm_selection(payload: LlmSelectionUpdate) -> dict[str, Any] | Response:
     """Select active LLM provider and model for chat."""
     result = update_llm_selection_for_current_server(payload.company_id, payload.model)
+    return as_route_response(result)
+
+
+# The dashboard is the place this is set, and it talks from localhost with no
+# API key — the same reason ip-login uses this dependency.
+@router.put(
+    "/llm/access",
+    dependencies=[Depends(verify_api_key_or_localhost)],
+    response_model=None,
+)
+async def update_llm_access(payload: LlmAccessUpdate) -> dict[str, Any] | Response:
+    """Switch one LLM provider on or off for every model picker."""
+    result = update_llm_access_for_current_server(payload.company_id, payload.enabled)
     return as_route_response(result)
 
 

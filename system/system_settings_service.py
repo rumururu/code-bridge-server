@@ -11,6 +11,7 @@ from llm.llm_settings import (
     get_codex_sandbox_mode,
     get_llm_options_snapshot,
     set_codex_sandbox_mode,
+    set_company_enabled,
     set_selected_llm,
 )
 from core.base_result import BaseRouteResult
@@ -58,6 +59,18 @@ def update_llm_selection_for_current_server(company_id: str, model: str) -> Syst
     """Update selected LLM provider/model with validation handling."""
     try:
         payload = set_selected_llm(company_id, model)
+    except ValueError as exc:
+        return SystemSettingsResult.error(400, str(exc))
+
+    return SystemSettingsResult.ok(payload)
+
+
+def update_llm_access_for_current_server(
+    company_id: str, enabled: bool
+) -> SystemSettingsResult:
+    """Switch a provider on or off, refusing to leave nothing usable."""
+    try:
+        payload = set_company_enabled(company_id, enabled)
     except ValueError as exc:
         return SystemSettingsResult.error(400, str(exc))
 

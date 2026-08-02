@@ -26,6 +26,10 @@ except ImportError:
 SELECTED_COMPANY_KEY = "llm.selected_company"
 SELECTED_MODEL_KEY = "llm.selected_model"
 CODEX_SANDBOX_MODE_KEY = "llm.codex.sandbox_mode"
+# Providers the user has switched off. Stored as the exceptions rather than
+# the whole set so a provider added in a later release starts on, which is
+# what someone who has never heard of it expects.
+DISABLED_COMPANIES_KEY = "llm.disabled_companies"
 
 # Codex sandbox modes
 CODEX_SANDBOX_MODES = [
@@ -60,6 +64,13 @@ LLM_PROVIDER_INSTALL_METHODS: dict[str, list[dict[str, Any]]] = {
             "id": "npm",
             "label": "Install with npm",
             "command": ["npm", "install", "-g", "@google/gemini-cli"],
+        },
+    ],
+    "antigravity": [
+        {
+            "id": "npm",
+            "label": "Install with npm",
+            "command": ["npm", "install", "-g", "@google/antigravity"],
         },
     ],
 }
@@ -109,6 +120,16 @@ BUILTIN_PROVIDERS: list[LlmProvider] = [
         models=[
             "gemini-2.5-pro",
             "gemini-2.5-flash",
+        ],
+    ),
+    LlmProvider(
+        id="antigravity",
+        name="Google (Antigravity)",
+        command="agy",
+        chat_supported=True,
+        models=[
+            "gemini-3-pro",
+            "gemini-3-flash",
         ],
     ),
 ]
@@ -388,13 +409,61 @@ def warmup_cli_cache() -> None:
 # --- Snapshot Building ---
 
 
+def get_disabled_company_ids() -> set[str]:
+    raw = get_settings_db().get(DISABLED_COMPANIES_KEY)
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return set()
+    if not isinstance(raw, list):
+        return set()
+    return {str(item) for item in raw if isinstance(item, str)}
+
+
+def set_company_enabled(company_id: str, enabled: bool) -> dict[str, Any]:
+    """Switch a provider on or off for everything that picks a model.
+
+    Disabling clears `selectable`, which is the single gate every model list
+    already passes through — the dev chat, the Configurator and the agent
+    runner all read it — so a provider that is out of quota or that you simply
+    do not want used stops being offered everywhere at once instead of in the
+    one place someone remembered to filter.
+    """
+    provider = _get_provider(company_id)
+    if not provider:
+        raise ValueError("Unknown LLM provider")
+
+    disabled = get_disabled_company_ids()
+    if enabled:
+        disabled.discard(provider.id)
+    else:
+        disabled.add(provider.id)
+
+    remaining = [
+        p for p in PROVIDERS
+        if p.id not in disabled and _check_cli_available(p.command)[0] and p.chat_supported
+    ]
+    if not remaining:
+        # Disabling the last usable provider leaves nothing to answer with,
+        # and the failure would surface later as an unrelated chat error.
+        raise ValueError("At least one LLM provider must stay enabled")
+
+    get_settings_db().set(DISABLED_COMPANIES_KEY, json.dumps(sorted(disabled)))
+    return get_llm_options_snapshot()
+
+
 def _build_provider_snapshot(provider: LlmProvider) -> dict[str, Any]:
     """Build status snapshot for a provider.
 
     Models are dynamically detected from config files on each call.
     """
     installed, error_msg = _check_cli_available(provider.command)
-    selectable = installed and provider.chat_supported
+    enabled = provider.id not in get_disabled_company_ids()
+    # `selectable` is what every model picker consults, so switching a provider
+    # off here removes it from all of them rather than from whichever list the
+    # caller remembered to filter.
+    selectable = installed and provider.chat_supported and enabled
 
     # Get models - dynamic detection for known providers
     if provider.id == "openai":
@@ -403,6 +472,8 @@ def _build_provider_snapshot(provider: LlmProvider) -> dict[str, Any]:
         models = _get_claude_models()
     elif provider.id == "google":
         models = _get_gemini_models()
+    elif provider.id == "antigravity":
+        models = [{"id": m, "label": m, "source": "builtin"} for m in provider.models]
     else:
         # Fallback - use defined models
         models = [{"id": m, "label": m, "source": "builtin"} for m in provider.models]
@@ -434,6 +505,7 @@ def _build_provider_snapshot(provider: LlmProvider) -> dict[str, Any]:
         "command": provider.command,
         "connected": installed,  # "connected" means CLI is installed
         "chat_supported": provider.chat_supported,
+        "enabled": enabled,
         "selectable": selectable,
         "status_message": error_msg,
         "models": models,
@@ -497,6 +569,7 @@ def get_llm_options_snapshot() -> dict[str, Any]:
             "command": s["command"],
             "connected": s["connected"],
             "chat_supported": s["chat_supported"],
+            "enabled": s["enabled"],
             "selectable": s["selectable"],
             "status_message": s["status_message"],
             "models": s["models"],
