@@ -287,6 +287,32 @@
         }
         .banner .spacer { flex: 1; }
 
+        /* One step below the product nav and above the content, so what it
+           offers is unmistakably about Agents. */
+        .page-bar {
+            display: flex; align-items: center; gap: 8px;
+            padding: 10px 24px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            position: sticky; top: var(--header-h, 57px); z-index: 90;
+        }
+        .page-bar-spacer { flex: 1; }
+        .subnav { display: flex; gap: 4px; }
+        .subnav button {
+            border: 1px solid transparent; background: transparent; cursor: pointer;
+            padding: 6px 12px; border-radius: 7px;
+            font: inherit; font-size: 13.5px; font-weight: 560;
+            color: var(--text-secondary);
+        }
+        .subnav button:hover { color: var(--text-primary); background: var(--seam-soft); }
+        .subnav button[aria-current="page"] {
+            color: var(--text-primary); background: var(--signal-bg); border-color: var(--accent-color);
+        }
+        @media (max-width: 760px) {
+            .page-bar { flex-wrap: wrap; position: static; }
+            .subnav { width: 100%; overflow-x: auto; }
+        }
+
         .lang-selector { display: inline-flex; gap: 2px; margin-right: 6px; }
         .lang-btn {
             padding: 4px 10px; border: 0; background: transparent; cursor: pointer;
@@ -558,10 +584,21 @@
                 <button class="lang-btn active" data-lang="en" onclick="setLanguage('en')">EN</button>
                 <button class="lang-btn" data-lang="ko" onclick="setLanguage('ko')">한국어</button>
             </div>
-            <button class="btn btn-secondary" onclick="goSetup()" data-i18n="setup_link">Scripts &amp; permissions</button>
-            <button class="btn btn-secondary" onclick="reloadAll()" data-i18n="refresh">Refresh</button>
-            <button class="btn" onclick="goCreate()" data-i18n="new_agent">New agent</button>
         </div>
+    </div>
+
+    <!-- Where you are inside Agents, and what you can do here. These used to
+         sit top-right on the same line as the global nav, which made them read
+         as chrome for the whole product rather than actions belonging to this
+         section — and put them outside the path anyone actually looks along. -->
+    <div class="page-bar">
+        <nav class="subnav" aria-label="Agents">
+            <button type="button" id="subManage" onclick="goManage()" data-i18n="sub_roster">Agents</button>
+            <button type="button" id="subSetup" onclick="goSetup()" data-i18n="setup_link">Scripts &amp; permissions</button>
+        </nav>
+        <span class="page-bar-spacer"></span>
+        <button class="btn btn-secondary" onclick="reloadAll()" data-i18n="refresh">Refresh</button>
+        <button class="btn" onclick="goCreate()" data-i18n="new_agent">New agent</button>
     </div>
 
     <div class="crumb" id="crumb" style="display:none;">
@@ -1015,6 +1052,7 @@
                 edit_agent: 'Edit agent', no_reply: '(no reply)',
                 saving: 'Saving…', saved: 'Saved', save_failed: 'Save failed',
                 turn_failed: 'The turn failed', no_steps_yet: 'No steps yet.',
+                sub_roster: 'Agents',
                 s_step: 'Step', s_type: 'Type', s_tool_hint: 'Tool hint',
                 s_what_step: 'What happens in this step', s_what_script: 'What this script does',
                 s_success_criteria: 'Success criteria', s_on_success: 'If it succeeds', s_on_failure: 'If it fails',
@@ -1120,6 +1158,7 @@
                 edit_agent: '에이전트 수정', no_reply: '(응답 없음)',
                 saving: '저장 중…', saved: '저장됨', save_failed: '저장 실패',
                 turn_failed: '요청 처리에 실패했습니다', no_steps_yet: '아직 단계가 없습니다.',
+                sub_roster: '에이전트 목록',
                 s_step: '단계', s_type: '종류', s_tool_hint: '도구 힌트',
                 s_what_step: '이 단계에서 하는 일', s_what_script: '이 스크립트가 하는 일',
                 s_success_criteria: '성공 기준', s_on_success: '성공하면', s_on_failure: '실패하면',
@@ -1201,6 +1240,14 @@
 
         // The workspace is sized against the real header rather than a guessed
         // constant, which drifts the moment the nav wraps on a narrow window.
+        function syncHeaderHeight() {
+            const header = document.querySelector('.header');
+            if (!header) return;
+            document.documentElement.style.setProperty(
+                '--header-h', `${Math.round(header.getBoundingClientRect().height)}px`);
+        }
+        window.addEventListener('resize', syncHeaderHeight);
+
         function syncBuildHeight() {
             const layout = document.querySelector('.build-layout');
             if (!layout) return;
@@ -1378,8 +1425,18 @@
                 const node = document.getElementById('view' + key[0].toUpperCase() + key.slice(1));
                 if (node) node.dataset.active = key === name ? '1' : '0';
             });
+            // The subnav says where you are between the two places inside
+            // Agents; the breadcrumb is only for building, which is neither.
+            const onManage = name === 'manage';
+            const subManage = document.getElementById('subManage');
+            const subSetup = document.getElementById('subSetup');
+            if (subManage) subManage.toggleAttribute('aria-current', onManage);
+            if (subSetup) subSetup.toggleAttribute('aria-current', name === 'setup');
+            if (subManage && onManage) subManage.setAttribute('aria-current', 'page');
+            if (subSetup && name === 'setup') subSetup.setAttribute('aria-current', 'page');
+
             const crumb = document.getElementById('crumb');
-            crumb.style.display = name === 'manage' ? 'none' : '';
+            crumb.style.display = name === 'create' ? '' : 'none';
             document.getElementById('crumbHere').textContent = here || '';
             window.scrollTo({ top: 0, behavior: 'auto' });
             requestAnimationFrame(syncBuildHeight);
@@ -2678,6 +2735,7 @@
         }
 
         syncScheduleKind();
+        syncHeaderHeight();
         syncBuildHeight();
         applyTranslations();
         updateLangButtons();
