@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 
 BUILDER_SESSION_IDLE_TTL = timedelta(minutes=30)
 
+# Placeholder inside _SYSTEM_PROMPT_TEMPLATE that _workflow_step_schema_block()
+# fills in. A plain .replace(), not str.format(): the template is full of
+# literal `{` / `}` (every JSON-shaped example in the prompt), so .format()
+# would need every one of those escaped and would break the moment someone
+# adds another example without remembering to double the braces.
+_WORKFLOW_STEP_SCHEMA_MARKER = "{{WORKFLOW_STEP_SCHEMA_BLOCK}}"
+
 _DRAFT_BLOCK_RE = re.compile(
     r"```[ \t]*(draft|task_draft)[^\n]*\n(.*?)```",
     re.IGNORECASE | re.DOTALL,
@@ -56,32 +63,7 @@ AgentDraft {
   memory_seeds      // optional initial memory items
 }
 
-WorkflowStep {
-  id                // stable machine id, e.g. "login_check"
-  type              // "shell" | "llm" | "notify" | "browser_action" |
-                    // "manual_handoff" | "approval_gate" | "condition" |
-                    // "mcp_tool"
-  script_id         // shell steps only: id of a REGISTERED script (never a
-                    // command line — the workflow cannot carry one)
-  script_args       // shell steps only: optional list of extra arguments
-  notify            // notify steps only: { title, body, level } where level is
-                    // "info" | "success" | "warning" | "error"
-  name              // short label (e.g. "Login")
-  description       // legacy summary; keep for compatibility
-  instruction       // optional: explicit work the agent should do in this step
-  observation       // optional: what state/evidence to inspect before acting
-  memory_read       // optional: what memories/context to retrieve for this step
-  memory_write      // optional: what durable learning to save after this step
-  tool_hint         // optional: which mcp_id is likely used here
-  actions           // optional list for browser_action steps:
-                    // {type:"navigate|click|type|wait|assert|extract|screenshot", ...}
-  success_criteria  // how the step is known to have succeeded
-  on_failure        // prefer structured object:
-                    // {type:"retry", max_attempts:1, then:{type:"ask_user", resume:"same_step"}}
-                    // {type:"ask_user", resume:"same_step", prompt:"..."}
-                    // {type:"manual_handoff", resume:"same_step", prompt:"..."}
-                    // {type:"goto_step", target_step_id:"..."} or {type:"abort"}
-}
+{{WORKFLOW_STEP_SCHEMA_BLOCK}}
 
 Rules:
 
@@ -263,6 +245,60 @@ def _registered_scripts_block() -> str:
     return "\n".join(lines)
 
 
+def _workflow_step_schema_block() -> str:
+    """Generate the ``WorkflowStep { ... }`` listing from the published schema.
+
+    Reuses :mod:`agent.workflow_step_schema` — built from the same
+    ``WORKFLOW_STEP_SCHEMA`` ``normalize_workflow_step`` enforces — instead of
+    the hand-written field list this replaced (AGENT_COMPOSITION_SPEC.md
+    Phase 2.3). That list used to offer every field on every type regardless
+    of whether the normalizer would accept it there (e.g. ``device_id`` on an
+    ``llm`` step), so a draft the Configurator wrote in good faith could be
+    silently stripped at commit. Generating it means a field the server
+    rejects for a type can never appear in that type's listing here, and a
+    field the server *does* accept can never be missing from it.
+    """
+
+    from agent.workflow_step_schema import base_field_types, field_help_en
+    from agent.workflow_v2 import ALLOWED_STEP_TYPES, NOTIFY_LEVELS
+
+    field_types = base_field_types()
+    type_options = " | ".join(f'"{t}"' for t in sorted(ALLOWED_STEP_TYPES))
+
+    def scope_note(types_for_field: list[str]) -> str:
+        if set(types_for_field) == set(ALLOWED_STEP_TYPES):
+            return "all step types"
+        return ", ".join(types_for_field) + " steps only"
+
+    lines = [
+        "WorkflowStep {",
+        '  id                // stable machine id, e.g. "login_check"',
+        f"  type              // {type_options}",
+    ]
+    for field_key in sorted(field_types):
+        types_for_field = field_types[field_key]
+        label = field_key.ljust(17)
+        if field_key == "notify":
+            level_options = " | ".join(f'"{level}"' for level in NOTIFY_LEVELS)
+            lines.append(
+                f"  {label} // {scope_note(types_for_field)}: "
+                f"{{ title, body, level }} where level is {level_options}"
+            )
+            continue
+        lines.append(f"  {label} // {scope_note(types_for_field)}: {field_help_en(field_key)}")
+    lines.append('  name              // short label (e.g. "Login")')
+    lines.append("  description       // legacy summary; keep for compatibility")
+    lines.append(
+        "  on_failure        // prefer structured object:\n"
+        '                    // {type:"retry", max_attempts:1, then:{type:"ask_user", resume:"same_step"}}\n'
+        '                    // {type:"ask_user", resume:"same_step", prompt:"..."}\n'
+        '                    // {type:"manual_handoff", resume:"same_step", prompt:"..."}\n'
+        '                    // {type:"goto_step", target_step_id:"..."} or {type:"abort"}'
+    )
+    lines.append("}")
+    return "\n".join(lines)
+
+
 def build_configurator_system_prompt(_unused: list[Any] | None = None) -> str:
     """Return the Configurator system prompt.
 
@@ -276,7 +312,10 @@ def build_configurator_system_prompt(_unused: list[Any] | None = None) -> str:
     it made up fails at execution rather than in the conversation.
     """
 
-    return _SYSTEM_PROMPT_TEMPLATE + _registered_scripts_block()
+    template = _SYSTEM_PROMPT_TEMPLATE.replace(
+        _WORKFLOW_STEP_SCHEMA_MARKER, _workflow_step_schema_block()
+    )
+    return template + _registered_scripts_block()
 
 
 @dataclass(frozen=True)

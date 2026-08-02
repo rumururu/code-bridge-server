@@ -118,6 +118,17 @@ async def builder_commit(body: BuilderCommitRequest) -> Any:
     return await agents_routes.builder_commit(body)
 
 
+@router.get("/workflow/step-schema", response_model=None)
+async def get_workflow_step_schema() -> dict[str, Any]:
+    """Same schema the phone gets from `/api/agent/workflow/step-schema`.
+
+    That route is api-key-gated (agents_router is shared with the
+    tunnel-exposed app); the dashboard has no key, so it needs this mirror
+    like every other agent-builder read below.
+    """
+    return await agents_routes.get_workflow_step_schema()
+
+
 @router.post("/agents/{agent_id}/dry-run", response_model=None)
 async def start_dry_run(
     agent_id: str,

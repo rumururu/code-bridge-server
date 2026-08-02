@@ -84,6 +84,7 @@ from agent.task_orchestrator import (
 from agent.browser_action_executor import execute_browser_actions
 from agent.tool_artifacts import ARTIFACT_ROOT, record_tool_action_result
 from agent.workflow_v2 import WorkflowNormalizationError, normalize_workflow
+from agent.workflow_step_schema import get_step_schema as get_workflow_step_schema_payload
 from approvals.approval_service import decide_approval
 from approvals.approval_store import get_approval_store
 from chat.chat_session_service import create_chat_session, get_chat_provider_selection
@@ -1015,6 +1016,23 @@ def _builder_step_has_external_send_action(actions: list[dict[str, Any]]) -> boo
         if any(marker in text for marker in ("보내기", "send", "submit", "발송", "제출")):
             return True
     return False
+
+
+@router.get(
+    "/workflow/step-schema",
+    dependencies=[Depends(verify_api_key)],
+    response_model=None,
+)
+async def get_workflow_step_schema() -> dict[str, Any]:
+    """Every workflow step type's fields, ready to draw a form from.
+
+    Single source: `agent.workflow_step_schema` derives this from the same
+    `WORKFLOW_STEP_SCHEMA` that `normalize_workflow_step` enforces, so a
+    field a client renders here is guaranteed to be one the server will
+    accept, and a field the server accepts cannot silently go unrendered —
+    see AGENT_COMPOSITION_SPEC.md Phase 2.
+    """
+    return get_workflow_step_schema_payload()
 
 
 @router.get("/browser-runtime/readiness", dependencies=[Depends(verify_api_key)], response_model=None)

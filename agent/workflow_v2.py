@@ -118,6 +118,12 @@ _UNRESTRICTED_LEGACY_FIELDS: frozenset[str] = frozenset(
     {"tool_hint", "success_criteria", "actions"}
 )
 
+# The fixed set `_normalize_notify_level` accepts, named so
+# `agent.workflow_step_schema` can publish the same values as a `notify.level`
+# select's options instead of retyping them — two literal copies of this set
+# is exactly the drift Phase 2 of AGENT_COMPOSITION_SPEC.md exists to close.
+NOTIFY_LEVELS: tuple[str, ...] = ("info", "success", "warning", "error")
+
 
 def _reject_fields_outside_type(
     raw_step: dict[str, Any], *, step_type: str, index: int
@@ -252,7 +258,7 @@ def normalize_workflow_step(
 
 def _normalize_notify_level(raw: Any) -> str:
     value = str(raw or "info").strip().lower()
-    return value if value in {"info", "success", "warning", "error"} else "info"
+    return value if value in NOTIFY_LEVELS else "info"
 
 
 def normalize_failure_policy(raw_policy: Any) -> dict[str, Any]:
