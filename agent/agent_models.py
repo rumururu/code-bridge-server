@@ -290,6 +290,25 @@ class DryRunRequest(BaseModel):
     task_id: str | None = None
 
 
+class AgentRunOnceRequest(BaseModel):
+    """Request body for executing an agent's task for real, once, right now.
+
+    Unlike :class:`DryRunRequest` this triggers ``POST
+    /agents/{agent_id}/run-once`` — real shell steps, real LLM calls, real
+    notifications. ``task_id`` is optional for the same reason it is on the
+    dry-run request: most agents have exactly one assigned task, so the route
+    resolves it automatically; it only needs to be named when an agent has
+    more than one.
+    """
+
+    task_id: str | None = None
+    provider_id: str | None = None
+    model: str | None = None
+    cwd: str | None = None
+    prompt: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+
+
 class AgentRunCreate(BaseModel):
     """Request body for creating a durable agent run."""
 

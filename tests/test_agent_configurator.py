@@ -10,7 +10,10 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from agent.configurator import create_builder_session  # noqa: E402
+from agent.configurator import (  # noqa: E402
+    build_configurator_system_prompt,
+    create_builder_session,
+)
 
 
 class AgentConfiguratorTest(unittest.TestCase):
@@ -1224,6 +1227,122 @@ Generic mobile QA workflow.
             ),
             "note workflow should persist send-result memory",
         )
+
+    def test_scheduled_flow_that_gains_approval_gate_discloses_stall_risk(self) -> None:
+        """A deterministically-added gate must warn the user in the same turn.
+
+        `_naver_note_flow` inserts an `approval_gate` step (`approve_note_send`)
+        ahead of the send action per rules 13/14 -- correctly. But that step
+        parks every single run for a human (task_orchestrator._wait_for_user_step
+        dispatches it unconditionally), and here the schedule is set in the very
+        same turn the gate is added. If nothing discloses that, the user walks
+        away believing they built an unattended daily agent when they actually
+        built a chore that stalls the first morning nobody answers it -- the
+        defect this initiative exists to close.
+        """
+
+        session = create_builder_session(system_prompt="test")
+
+        parsed = session.apply_llm_response(
+            """
+네이버 쪽지 발송 에이전트 초안을 만들게요.
+
+```draft
+{
+  "name": "Naver Note Sender",
+  "description": "매일 아침 지정된 대상에게 네이버 쪽지를 보내는 에이전트",
+  "system_prompt": "로그인과 캡차는 우회하지 않고 사용자에게 요청한다.",
+  "provider_id": "openai",
+  "tools": [],
+  "flow": [],
+  "memory_seeds": []
+}
+```
+""",
+            user_message=(
+                "mktoolbox로 로그인해서 rumururu@naver.com으로 매일 09:00에 "
+                "네이버 쪽지 보내는 워크플로우를 만들어줘"
+            ),
+        )
+
+        self.assertIsNotNone(session.task_draft)
+        self.assertEqual(session.task_draft.schedule, "daily 09:00")
+        self.assertTrue(
+            any(step.type == "approval_gate" for step in session.current_draft.flow)
+        )
+
+        # The disclosure must be in the reply actually handed back to the
+        # caller (routes/agents.py surfaces `parsed.assistant_message`
+        # verbatim as the user-visible reply), not just logged somewhere.
+        self.assertIn("멈추", parsed.assistant_message)
+        self.assertIn("무인", parsed.assistant_message)
+        self.assertIn(
+            "어떤 권한(permission) 설정도 이 승인 단계 자체를 건너뛰게 하지는 못합니다.",
+            parsed.assistant_message,
+        )
+        # Never let the disclosure imply a permission grant is a fix.
+        self.assertNotIn("권한을 허용하면", parsed.assistant_message)
+        self.assertNotIn("권한 규칙을 추가하면", parsed.assistant_message)
+
+    def test_unscheduled_flow_with_approval_gate_does_not_disclose(self) -> None:
+        """The same gate in a manually-run agent must not trigger the warning.
+
+        A gate the user calls by hand is expected and unremarkable; repeating
+        the stall warning on every manually-run agent would be noise, not
+        safety, so it must only fire when a schedule is actually present.
+        """
+
+        session = create_builder_session(system_prompt="test")
+
+        parsed = session.apply_llm_response(
+            """
+네이버 쪽지 발송 에이전트 초안을 만들게요.
+
+```draft
+{
+  "name": "Naver Note Sender",
+  "description": "네이버 쪽지로 지정된 대상에게 메시지를 보내는 에이전트",
+  "system_prompt": "로그인과 캡차는 우회하지 않고 사용자에게 요청한다.",
+  "provider_id": "openai",
+  "tools": [],
+  "flow": [],
+  "memory_seeds": []
+}
+```
+""",
+            user_message=(
+                "mktoolbox로 로그인해서 rumururu@naver.com으로 네이버 쪽지 보내는 "
+                "워크플로우를 만들어줘"
+            ),
+        )
+
+        self.assertIsNone(session.task_draft)
+        self.assertTrue(
+            any(step.type == "approval_gate" for step in session.current_draft.flow)
+        )
+        self.assertNotIn("완전한 무인 실행", parsed.assistant_message)
+        self.assertNotIn("skip_if_active", parsed.assistant_message.casefold())
+
+    def test_system_prompt_never_implies_permission_bypasses_gate(self) -> None:
+        """The static prompt rule must state the true runtime contract.
+
+        `_wait_for_user_step` dispatches `approval_gate`/`manual_handoff`
+        unconditionally (task_orchestrator.py); no policy rule is consulted.
+        The prompt must tell the model that plainly instead of leaving room
+        for it to imply a permission grant can pass the gate -- a confident
+        false statement is worse than the silence this initiative found.
+        """
+
+        prompt = build_configurator_system_prompt()
+
+        self.assertIn("approval_gate", prompt)
+        self.assertIn("manual_handoff", prompt)
+        self.assertIn(
+            "Do NOT say a permission rule, standing approval, or policy setting can\n"
+            "   make an `approval_gate` or `manual_handoff` step skip itself",
+            prompt,
+        )
+        self.assertIn("false statement", prompt)
 
 
 def _step_by_id(flow, step_id):

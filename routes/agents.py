@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 from contextlib import suppress
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ from agent.configurator import (
     delete_builder_session,
     enrich_draft_from_user_intent,
     get_builder_session,
+    looks_like_manual_timing,
+    task_goal_from_draft,
 )
 from agent.agent_models import (
     AgentCreate,
@@ -43,6 +46,7 @@ from agent.agent_models import (
     AgentDraft,
     AgentEventCreate,
     AgentUpdate,
+    AgentRunOnceRequest,
     BuilderCommitRequest,
     BuilderStepDebugRequest,
     BuilderTurn,
@@ -251,7 +255,17 @@ def _agent_with_next_fire(agent: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _resolve_dry_run_task(agent_id: str, task_id: str | None) -> dict[str, Any] | None:
+def _resolve_agent_task(agent_id: str, task_id: str | None) -> dict[str, Any] | None:
+    """Find the task this agent's next run — real or simulated — would use.
+
+    An explicit ``task_id`` is validated against the agent (404 if it does not
+    exist, 409 if it belongs to someone else). With none given, the agent's
+    first assigned task stands in: most agents have exactly one, and asking
+    the user to name it every time they just want to try the thing they built
+    would be busywork. Returns ``None`` when the agent has no task at all —
+    callers decide what that means for them (dry-run still has something to
+    preview; a real run does not, and says so).
+    """
     store = _store()
     if task_id:
         task = store.get_task(task_id)
@@ -333,13 +347,50 @@ def _schedule_expression_from_draft(schedule: str | None) -> dict[str, Any] | No
         unit = korean_interval.group(2) or korean_interval.group(4)
         return _interval(int(amount) * _KO_UNITS[unit])
 
-    daily = re.search(r"(?:daily\s+at|daily|every\s+day\s+at)\s+(\d{1,2}:\d{2})", text)
-    if daily:
-        return {"kind": "daily_at", "time": daily.group(1)}
+    _MORNING = {"오전", "아침", "새벽", "am"}
+    _AFTERNOON = {"오후", "저녁", "밤", "pm"}
 
-    korean_daily_clock = re.search(r"매일\s*(\d{1,2}:\d{2})", text)
+    def _daily(hour: int, minute: int, period: str | None) -> dict[str, Any] | None:
+        # 오후 12시 is midday and 오전 12시 is midnight; adding 12 to both would
+        # put one of them a full half-day out.
+        if period in _AFTERNOON and hour < 12:
+            hour += 12
+        elif period in _MORNING and hour == 12:
+            hour = 0
+        if hour > 23 or minute > 59:
+            return None
+        return {"kind": "daily_at", "time": f"{hour:02d}:{minute:02d}"}
+
+    # "daily at 9am", "every day at 9:30 pm" — and the same said back to front.
+    # Checked before the 24-hour form, which would otherwise read the "9" of
+    # "9:30 pm" as 09:30 and schedule the run twelve hours early.
+    daily_meridiem = re.search(
+        r"(?:daily\s+at|every\s+day\s+at)\s+(\d{1,2})(?::([0-5]\d))?\s*(am|pm)\b"
+        r"|(\d{1,2})(?::([0-5]\d))?\s*(am|pm)\s+(?:daily|every\s+day)\b",
+        text,
+    )
+    if daily_meridiem:
+        hour = daily_meridiem.group(1) or daily_meridiem.group(4)
+        minute = daily_meridiem.group(2) or daily_meridiem.group(5)
+        period = daily_meridiem.group(3) or daily_meridiem.group(6)
+        return _daily(int(hour), int(minute or 0), period)
+
+    daily = re.search(r"(?:daily\s+at|daily|every\s+day\s+at)\s+(\d{1,2}):(\d{2})", text)
+    if daily:
+        return _daily(int(daily.group(1)), int(daily.group(2)), None)
+
+    # "매일 09:00" and "매일 아침 09:00" — a spoken period in front of a clock
+    # time is how the Configurator itself writes schedules back to the user.
+    korean_daily_clock = re.search(
+        r"매일\s*(오전|오후|아침|저녁|밤|새벽)?\s*(\d{1,2}):([0-5]\d)",
+        text,
+    )
     if korean_daily_clock:
-        return {"kind": "daily_at", "time": korean_daily_clock.group(1)}
+        return _daily(
+            int(korean_daily_clock.group(2)),
+            int(korean_daily_clock.group(3)),
+            korean_daily_clock.group(1),
+        )
 
     # "매일 아침 9시", "매일 오후 3시 30분" — the way people actually say it.
     korean_daily_hour = re.search(
@@ -348,18 +399,208 @@ def _schedule_expression_from_draft(schedule: str | None) -> dict[str, Any] | No
         text,
     )
     if korean_daily_hour:
-        period = korean_daily_hour.group(1)
-        hour = int(korean_daily_hour.group(2))
-        minute = int(korean_daily_hour.group(3) or 0)
-        if hour > 23 or minute > 59:
-            return None
-        if period in {"오후", "저녁", "밤"} and hour < 12:
-            hour += 12
-        elif period in {"오전", "아침", "새벽"} and hour == 12:
-            hour = 0
-        return {"kind": "daily_at", "time": f"{hour:02d}:{minute:02d}"}
+        return _daily(
+            int(korean_daily_hour.group(2)),
+            int(korean_daily_hour.group(3) or 0),
+            korean_daily_hour.group(1),
+        )
 
     return None
+
+
+_SCHEDULE_FRAGMENT_SPLIT_RE = re.compile(r"[\n\r.!?;,]+")
+
+# What `agent/schedule_store.py::_validate_expression` will actually accept.
+# Quoted back to the user when their phrasing is outside it, because "could not
+# schedule that" without saying what *is* schedulable leaves them guessing.
+SUPPORTED_SCHEDULE_FORMS = (
+    "N분/시간/일 간격 (최소 60초)",
+    "매일 HH:MM",
+)
+
+
+def _first_schedule_fragment(text: str) -> str | None:
+    """Return the smallest piece of ``text`` that reads as a schedule.
+
+    Splitting first keeps the quoted phrase short enough to show back to the
+    user ("매일 아침 9시에" rather than the whole paragraph it sat in), and it
+    keeps the parser's own "no schedule" words (수동, manual, …) scoped to the
+    clause they appear in.
+    """
+    if not isinstance(text, str):
+        return None
+    for fragment in _SCHEDULE_FRAGMENT_SPLIT_RE.split(text):
+        fragment = fragment.strip()
+        if not fragment:
+            continue
+        if _schedule_expression_from_draft(fragment) is not None:
+            return fragment[:120]
+    return None
+
+
+def _conversation_schedule_phrase(session: BuilderSession) -> str | None:
+    """Read the conversation's last word on when this agent should run.
+
+    Newest first, and the first message that expresses *any* timing intent
+    settles it: a user who says "매일 9시" and then "아니야, 수동으로" gets no
+    schedule, while silence after a stated time leaves that time standing.
+
+    Assistant turns count as a statement of the schedule because that is how
+    the defect actually reached the user: they described the job in prose and
+    the Configurator was the one that said "매일 아침 09:00 자동 실행". Only the
+    user can revoke it, though — the assistant musing about manual runs is not
+    a decision.
+    """
+    for message in reversed(session.messages):
+        role = message.get("role")
+        content = message.get("content")
+        if role == "system" or not isinstance(content, str) or not content.strip():
+            continue
+        phrase = _first_schedule_fragment(content)
+        if phrase is not None:
+            return phrase
+        if role == "user" and looks_like_manual_timing(content):
+            return None
+    return None
+
+
+def _task_draft_for_commit(
+    session: BuilderSession,
+    draft: AgentDraft,
+    task_draft: TaskDraft | None,
+) -> tuple[TaskDraft | None, str | None]:
+    """Reconcile the committed task draft with what the conversation promised.
+
+    A conversation that establishes a recurring run and a commit that carries
+    no ``task_draft`` is a contradiction, and until now the commit won it
+    silently: no task, therefore no schedule, therefore an agent that could
+    never fire while the user had just been told it runs every morning.
+
+    It is resolved *here*, by synthesising the task, rather than by demanding
+    the Configurator always emit a ``task_draft`` block. The prompt already
+    asks for one; the model still omits it, and no prompt wording makes that
+    guaranteed. Nothing is invented in the process — the goal is the agent's
+    own description (the thing the user just approved) and the schedule is the
+    literal phrase they or the Configurator wrote. The alternative, refusing
+    the commit, would throw away a finished agent over a missing echo of what
+    the conversation already said.
+
+    Returns the draft plus the origin recorded in the commit result, so the
+    caller can say where the task it created came from.
+    """
+    if task_draft is not None and (task_draft.schedule or "").strip():
+        return task_draft, "task_draft"
+
+    phrase = _conversation_schedule_phrase(session)
+    if phrase is None:
+        return task_draft, ("task_draft" if task_draft is not None else None)
+    if task_draft is None:
+        return (
+            TaskDraft(goal=task_goal_from_draft(draft), schedule=phrase),
+            "synthesized_from_schedule_intent",
+        )
+    return (
+        task_draft.model_copy(update={"schedule": phrase}),
+        "task_draft_with_conversation_schedule",
+    )
+
+
+def _create_commit_schedule(
+    *,
+    task_id: str,
+    task_draft: TaskDraft,
+    draft: AgentDraft,
+    goal: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Create the schedule the task asked for, and report either way.
+
+    The second return value is the ``commit_result.schedule`` fact. It is never
+    "created" unless a row exists, and never silent when one does not: the
+    previous ``except ValueError: pass`` is the reason an unschedulable phrase
+    produced an agent that looked scheduled.
+    """
+    phrase = (task_draft.schedule or "").strip()
+    if not phrase:
+        return None, {
+            "created": False,
+            "reason": "no_schedule_requested",
+            "message": "예약 시각을 정하지 않아 예약을 만들지 않았습니다. 이 작업은 직접 실행해야 합니다.",
+        }
+
+    expression = _schedule_expression_from_draft(phrase)
+    if expression is None:
+        logger.warning(
+            "builder_commit_schedule_unparsed task_id=%s phrase=%r",
+            task_id,
+            phrase,
+        )
+        return None, {
+            "created": False,
+            "reason": "unparsed_schedule_text",
+            "requested_text": phrase,
+            "supported_forms": list(SUPPORTED_SCHEDULE_FORMS),
+            "message": (
+                f"'{phrase}'을(를) 예약 형식으로 바꾸지 못해 예약을 만들지 않았습니다. "
+                f"지원 형식: {', '.join(SUPPORTED_SCHEDULE_FORMS)}."
+            ),
+        }
+
+    try:
+        schedule = get_schedule_store().create(
+            task_id=task_id,
+            expression=expression,
+            name=phrase,
+            provider_id=draft.provider_id,
+            model=draft.model,
+            cwd=task_draft.cwd,
+            prompt=goal,
+            enabled=True,
+        )
+    except ValueError as exc:
+        logger.warning(
+            "builder_commit_schedule_rejected task_id=%s phrase=%r error=%s",
+            task_id,
+            phrase,
+            exc,
+        )
+        return None, {
+            "created": False,
+            "reason": "rejected_by_schedule_store",
+            "requested_text": phrase,
+            "expression": expression,
+            "detail": str(exc),
+            "message": (
+                f"'{phrase}'에서 만든 예약을 저장하지 못해 예약이 없습니다: {exc}"
+            ),
+        }
+
+    return schedule, {
+        "created": True,
+        "id": schedule["id"],
+        "expression": schedule["expression"],
+        "enabled": bool(schedule["enabled"]),
+        "next_run_at": schedule["next_run_at"],
+        "requested_text": phrase,
+        "message": f"'{phrase}' 예약을 만들었습니다. 다음 실행: {schedule['next_run_at']}.",
+    }
+
+
+def _commit_summary(
+    *,
+    agent_fact: dict[str, Any],
+    task_fact: dict[str, Any],
+    schedule_fact: dict[str, Any],
+) -> str:
+    """One sentence a user can act on, covering only what actually exists."""
+    lines = [f"에이전트 '{agent_fact.get('name') or agent_fact['id']}'을(를) 만들었습니다."]
+    if task_fact.get("created"):
+        lines.append(f"작업을 만들었습니다: {task_fact.get('goal') or task_fact['id']}.")
+    else:
+        lines.append("실행할 작업은 만들지 않았습니다.")
+    lines.append(str(schedule_fact.get("message") or ""))
+    if not schedule_fact.get("created"):
+        lines.append("이 에이전트는 스스로 실행되지 않습니다. 직접 실행해야 합니다.")
+    return " ".join(line for line in lines if line)
 
 
 def _pseudo_agent_protected_response() -> JSONResponse:
@@ -820,6 +1061,15 @@ async def get_builder_converse_job(job_id: str) -> dict[str, Any]:
     response_model=None,
 )
 async def builder_commit(body: BuilderCommitRequest) -> dict[str, Any]:
+    """Commit the draft, and report exactly what now exists.
+
+    ``commit_result`` is the point of this endpoint's response, not a decoration
+    on it: agent, task and schedule each either created (with its id) or not
+    (with a machine-readable ``reason`` and a sentence naming what could not be
+    built). Success used to be indistinguishable from "created a name and
+    skipped the rest", which is how a user came away believing an agent with no
+    task and no schedule ran every morning.
+    """
     session = get_builder_session(body.session_id)
     if session is None:
         raise HTTPException(
@@ -835,6 +1085,9 @@ async def builder_commit(body: BuilderCommitRequest) -> dict[str, Any]:
         task_draft=task_draft,
         user_message=_builder_commit_intent(draft, task_draft),
     )
+    # `enrich_draft_from_user_intent` only ever sees the draft's own text, so a
+    # schedule that lives in the conversation ("매일 아침 9시") never reached it.
+    task_draft, task_origin = _task_draft_for_commit(session, draft, task_draft)
     _validate_commit_draft(draft)
     if task_draft is not None:
         _validate_task_draft(task_draft)
@@ -859,6 +1112,11 @@ async def builder_commit(body: BuilderCommitRequest) -> dict[str, Any]:
             )
 
     result: dict[str, Any] = {"agent": agent}
+    agent_fact: dict[str, Any] = {
+        "created": True,
+        "id": agent["id"],
+        "name": agent.get("name"),
+    }
     if task_draft is not None:
         goal = str(task_draft.goal).strip()
         task = store.create_task(
@@ -875,26 +1133,46 @@ async def builder_commit(body: BuilderCommitRequest) -> dict[str, Any]:
                 "cwd": task_draft.cwd,
             },
         )
-        expression = _schedule_expression_from_draft(task_draft.schedule)
-        if expression is not None:
-            try:
-                get_schedule_store().create(
-                    task_id=task["id"],
-                    expression=expression,
-                    name=task_draft.schedule,
-                    provider_id=draft.provider_id,
-                    model=draft.model,
-                    cwd=task_draft.cwd,
-                    prompt=goal,
-                    enabled=True,
-                )
-            except ValueError:
-                # Keep commit behavior stable for free-form schedule text that
-                # cannot be normalized into the current schedule expression set.
-                pass
         result["task"] = task
+        task_fact = {
+            "created": True,
+            "id": task["id"],
+            "goal": goal,
+            "origin": task_origin or "task_draft",
+        }
+        schedule, schedule_fact = _create_commit_schedule(
+            task_id=task["id"],
+            task_draft=task_draft,
+            draft=draft,
+            goal=goal,
+        )
+        if schedule is not None:
+            result["schedule"] = schedule
+    else:
+        task_fact = {
+            "created": False,
+            "reason": "no_task_intent",
+            "message": "대화에서 실행할 작업이나 반복 실행 시각을 정하지 않아 작업을 만들지 않았습니다.",
+        }
+        schedule_fact = {
+            "created": False,
+            "reason": "no_task",
+            "message": "예약할 작업이 없어 예약을 만들지 않았습니다.",
+        }
 
     result["agent"] = _agent_with_next_fire(store.get_agent(agent["id"]) or agent)
+    result["commit_result"] = {
+        "agent": agent_fact,
+        "task": task_fact,
+        "schedule": schedule_fact,
+        # The single question the user actually asked: will this run by itself?
+        "runs_unattended": bool(schedule_fact.get("created") and schedule_fact.get("enabled")),
+        "summary": _commit_summary(
+            agent_fact=agent_fact,
+            task_fact=task_fact,
+            schedule_fact=schedule_fact,
+        ),
+    }
     delete_builder_session(body.session_id)
     return result
 
@@ -1131,7 +1409,7 @@ async def start_dry_run(
     background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     agent = _require_agent(agent_id)
-    task = _resolve_dry_run_task(agent_id, body.task_id)
+    task = _resolve_agent_task(agent_id, body.task_id)
     goal = (task.get("goal") or task.get("title")) if task else "Dry run preview"
     run = _store().create_run(
         agent_id=agent_id,
@@ -1155,6 +1433,98 @@ async def start_dry_run(
         },
     )
     return {"run_id": run["id"], "run": run}
+
+
+@router.post(
+    "/agents/{agent_id}/run-once",
+    dependencies=[Depends(verify_api_key)],
+    response_model=None,
+)
+async def run_agent_once(
+    agent_id: str,
+    body: AgentRunOnceRequest,
+) -> dict[str, Any]:
+    """Execute this agent's task for real, exactly once, right now.
+
+    This is the fix for a real gap: before this route existed, the only
+    "run it" button in the product was the dry run, and the only genuine
+    execution path (``POST /tasks/{task_id}/schedules/{id}/trigger``) required
+    a schedule that an agent might not have. A user who just built an agent
+    from one sentence had no way to see what it would actually do — they
+    could preview it forever and never once run it.
+
+    It does not open a second execution path. It resolves the agent's task
+    the same way the dry-run route does (:func:`_resolve_agent_task`) and
+    then calls the exact same ``prepare_task_orchestration`` /
+    ``execute_task_orchestration`` pair that a scheduled fire uses
+    (``agent/scheduler.py::_fire_schedule``) and that
+    ``POST /tasks/{task_id}/start`` already exposes. Reusing that machinery
+    instead of writing a parallel "run an agent" path is deliberate: a second
+    path drifts from the scheduled one over time, and the entire point of
+    this endpoint is to let someone see what will really happen at 9am — that
+    guarantee only holds if it is *the same* path.
+
+    No task, no run. A schedule fires a task, and a task is what names the
+    agent — there is no direct agent-to-schedule link, so "run this agent"
+    can only ever mean "run its task". Rather than fabricate an ephemeral
+    task the user never created (which would run *something*, but not
+    necessarily the something they meant, and would leave a task behind they
+    never asked for), an agent with no assigned task gets a plain 422 saying
+    it has nothing to run and why — not a 500, and not a silent no-op that
+    reads as success.
+
+    This sits on the shared, api-key-gated router rather than the
+    dashboard-only one (``routes/dashboard_agents.py``), on purpose and by
+    contrast with ``POST /scripts``: registering a script hands a workflow
+    step the ability to point at a new executable on this machine, which is
+    why that stays PC-only. Running an agent the user already approved is not
+    that act — ``POST /tasks/{task_id}/start`` and
+    ``POST /schedules/{id}/trigger`` are already reachable this same way from
+    a paired phone, and hiding *this* route behind localhost would strand the
+    one client (the app, see WAVE 3's ``lib/`` changes) that most needs to
+    offer it next to the simulate button.
+
+    If this route ever silently fell back to a preview, or the caller could
+    not tell it apart from ``/dry-run`` by name alone, the defect this whole
+    initiative exists to fix — dry run reading as a real run — would simply
+    move here.
+    """
+    agent = _require_agent(agent_id)
+    task = _resolve_agent_task(agent_id, body.task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "이 에이전트에는 실행할 작업이 없어 실제로 실행할 수 없습니다. "
+                "예약은 작업을 실행하고 작업이 에이전트를 가리키므로, 먼저 이 "
+                "에이전트에 작업을 만들어야 합니다."
+            ),
+        )
+
+    try:
+        prepared = prepare_task_orchestration(
+            task["id"],
+            provider_id=body.provider_id or agent.get("provider_id"),
+            model=body.model or agent.get("model"),
+            cwd=body.cwd or _task_cwd(task),
+            prompt=body.prompt,
+            requested_capabilities=body.capabilities or None,
+            auto_start=True,
+            dry_run=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if prepared is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent task '{task['id']}' not found",
+        )
+
+    execution = prepared.get("execution")
+    if isinstance(execution, dict):
+        _spawn_background(execute_task_orchestration(execution))
+
+    return {**prepared, "real_run": True, "dry_run": False}
 
 
 @router.patch("/agents/{agent_id}", dependencies=[Depends(verify_api_key)], response_model=None)

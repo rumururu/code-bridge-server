@@ -190,7 +190,12 @@ class DryRunTest(unittest.TestCase):
         events = self._store().list_events(run["id"])
         self.assertEqual(updated["status"], "completed")
         self.assertEqual(events[-1]["event_type"], "run.complete")
-        self.assertIn("2 steps simulated", events[-1]["app_event"]["summary"])
+        summary = events[-1]["app_event"]["summary"]
+        self.assertIn("2 steps simulated", summary)
+        # The fact a reader must not miss comes first: this is the exact
+        # symptom agent-usability-repair started from — a dry run reporting
+        # step successes read as a real run having happened.
+        self.assertTrue(summary.startswith("Simulation only — nothing was executed"))
 
     def test_compute_next_fire_at_returns_nearest_enabled_schedule(self):
         agent = self._create_agent()

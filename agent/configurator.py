@@ -9,7 +9,7 @@ import re
 import sqlite3
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -181,6 +181,39 @@ Rules:
 
    Do NOT ask a separate follow-up about registering an internal work item.
    The schedule question above is the single decision point.
+
+7. Adding an `approval_gate` or `manual_handoff` step is correct whenever
+   rule 12, 13, or 14 calls for one — keep adding them there. But if the
+   flow you are building ALSO carries a schedule (rule 6 populated
+   `task_draft.schedule`), that gate has a cost the user has not been told:
+   the runtime parks the run and waits for a human on every single fire,
+   whether or not anyone is there to answer, and because a schedule skips a
+   fire while the previous run is still active, one unanswered wait then
+   silently skips every fire after it too. A user who asked for something
+   unattended and got this gate believes they built an unattended agent;
+   they actually built a daily chore that stalls the first time nobody is
+   watching.
+
+   Say this plainly, in the user's language, in the SAME turn you add the
+   gate to a scheduled flow — not as a footnote later. For example:
+   "이 단계 때문에 이 에이전트는 완전히 무인으로 돌지 않고, 실행마다 멈춰서
+   사용자의 확인을 기다립니다. 응답이 없으면 다음 일정도 계속 건너뜁니다."
+
+   Then offer only the choices that actually exist:
+     - keep the gate and accept the agent is not unattended (a human must
+       answer it every run), or
+     - drop the gate.
+
+   Do NOT say a permission rule, standing approval, or policy setting can
+   make an `approval_gate` or `manual_handoff` step skip itself — nothing
+   does. That class of step always stops and waits for a human, on every
+   run, until it is removed from the flow. Telling the user a permission
+   grant "fixes" this is a false statement, which is worse than saying
+   nothing at all.
+
+   Do not raise this warning when there is no schedule: a gate in a
+   manually-run agent is expected and normal, and repeating the warning on
+   every turn is noise, not safety.
 
 8. Keep system_prompt suggestion concise (under 800 chars). The
    Agent will receive memory items at run time, so do not preload
@@ -458,12 +491,23 @@ class BuilderSession:
                 self.task_draft = None
         elif _looks_like_manual_timing(user_message):
             self.task_draft = None
+        flow_before_enrichment = self.current_draft.flow
         self.current_draft, self.task_draft = enrich_draft_from_user_intent(
             self.current_draft,
             previous_draft=before,
             task_draft=self.task_draft,
             user_message=user_message,
         )
+        gate_disclosure = _deterministic_gate_disclosure(
+            before_flow=flow_before_enrichment,
+            after_flow=self.current_draft.flow,
+            task_draft=self.task_draft,
+        )
+        if gate_disclosure is not None:
+            parsed = replace(
+                parsed,
+                assistant_message=_with_disclosure(parsed.assistant_message, gate_disclosure),
+            )
         if parsed.is_ready_to_commit:
             self.is_ready_to_commit = True
         self.messages.append({"role": "assistant", "content": parsed.assistant_message})
@@ -626,6 +670,71 @@ def _task_draft_has_content(task_draft: TaskDraft) -> bool:
             task_draft.workspace_id,
         )
     )
+
+
+# Step types that `_wait_for_user_step` (task_orchestrator.py) dispatches
+# unconditionally: it parks the run and waits for a human on every single
+# occurrence, and nothing in the policy engine consults or bypasses that
+# dispatch. Any code that inserts one of these into a flow silently creates a
+# run that cannot finish unattended.
+_GATE_STEP_TYPES = {"approval_gate", "manual_handoff"}
+
+
+def _deterministic_gate_disclosure(
+    *,
+    before_flow: list[WorkflowStep],
+    after_flow: list[WorkflowStep],
+    task_draft: TaskDraft | None,
+) -> str | None:
+    """Warn the user the turn a park-for-human step lands in a scheduled flow.
+
+    `_join_request_steps`, `_install_app_steps`, and `_naver_note_flow` add an
+    `approval_gate` step ahead of a sensitive external action -- correctly,
+    per rules 13/14 below. But that step type is dispatched unconditionally
+    every run (see `_GATE_STEP_TYPES` above), and it was inserted here rather
+    than written by the model, so the model never saw it and never had a
+    chance to mention its cost in its own reply. Without this check the
+    disclosure in rule 7 only ever fires for gates the model wrote itself;
+    a gate this file adds behind the scenes would stay silent and the exact
+    defect this initiative exists to close -- a user who asked for something
+    unattended getting a daily chore with no warning -- would reappear.
+
+    Returns ``None`` (raises nothing, warns nothing) when there is no
+    schedule: a gate in a manually-run agent is expected, and warning about
+    it anyway would be noise, not safety.
+    """
+
+    schedule = (task_draft.schedule or "").strip() if task_draft is not None else ""
+    if not schedule:
+        return None
+
+    before_ids = {_step_identity(step) for step in before_flow}
+    new_gate_steps = [
+        step
+        for step in after_flow
+        if step.type in _GATE_STEP_TYPES and _step_identity(step) not in before_ids
+    ]
+    if not new_gate_steps:
+        return None
+
+    names = ", ".join(step.name or step.id or step.type for step in new_gate_steps)
+    return (
+        f"참고: 방금 추가된 '{names}' 단계는 실행마다 멈춰서 사용자의 확인/승인을 "
+        f"기다리는 단계입니다. 일정('{schedule}')대로 자동 실행되더라도 이 단계에서는 "
+        "매번 사람이 응답할 때까지 멈추고, 응답이 없으면 다음 일정도 계속 건너뜁니다 — "
+        "완전한 무인 실행은 아니게 됩니다. 이 승인 단계를 유지하고 무인 실행은 포기하시거나, "
+        "이 단계를 없애 주세요. 어떤 권한(permission) 설정도 이 승인 단계 자체를 "
+        "건너뛰게 하지는 못합니다."
+    )
+
+
+def _with_disclosure(message: str, disclosure: str) -> str:
+    message = (message or "").strip()
+    if not message:
+        return disclosure
+    if disclosure in message:
+        return message
+    return f"{message}\n\n{disclosure}"
 
 
 def enrich_draft_from_user_intent(
@@ -2579,6 +2688,16 @@ def _looks_like_manual_timing(user_message: str) -> bool:
             "one off",
         )
     )
+
+
+# Public names for the two timing judgements the commit path has to make as
+# well. Commit reads the conversation directly (see
+# `_conversation_schedule_phrase` in routes/agents.py) and must reach the same
+# verdict as the turn that produced it — a second, slightly different copy of
+# "did the user ask for this to run by itself?" is how the builder started
+# promising schedules it never created.
+looks_like_manual_timing = _looks_like_manual_timing
+task_goal_from_draft = _task_goal_from_draft
 
 
 def _collapse_blank_lines(text: str) -> str:

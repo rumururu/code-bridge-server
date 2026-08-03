@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, Response
 
 from agent.agent_models import (
     AgentCreate,
+    AgentRunOnceRequest,
     AgentTaskCreate,
     AgentUpdate,
     BuilderCommitRequest,
@@ -139,6 +140,16 @@ async def start_dry_run(
     return await agents_routes.start_dry_run(agent_id, body, background_tasks)
 
 
+@router.post("/agents/{agent_id}/run-once", response_model=None)
+async def run_agent_once(agent_id: str, body: AgentRunOnceRequest) -> dict[str, Any]:
+    """Same real execution the phone gets from ``/api/agent/agents/{id}/run-once``.
+
+    See ``routes.agents.run_agent_once`` for why this exists and what it
+    actually does — this is a thin mirror, not a second implementation.
+    """
+    return await agents_routes.run_agent_once(agent_id, body)
+
+
 # --- Tasks and schedules -------------------------------------------------
 #
 # An agent on its own never fires. It runs because a task is assigned to it and
@@ -235,6 +246,19 @@ async def list_policy_operations() -> dict[str, Any]:
     the same way the rest of this file does.
     """
     return policies_routes.list_policy_operations()
+
+
+@router.get("/policies/step-operations", response_model=None)
+async def list_step_operations() -> dict[str, Any]:
+    """Which policy operations each workflow step type will need, from the
+    runtime's own gating logic (see ``policy/required_operations.py``).
+
+    The readiness rail fetches this once at bootstrap, the same way it
+    fetches ``/policies/operations`` and ``/workflow/step-schema``, and
+    applies it locally to each agent's ``flow_json`` instead of keeping a
+    second, hand-written copy of the mapping in the template.
+    """
+    return policies_routes.list_step_operations()
 
 
 @router.get("/policies/rules", response_model=None)

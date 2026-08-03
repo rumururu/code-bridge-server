@@ -186,6 +186,24 @@
         .rail-chip[data-on="0"]:hover { color: var(--warning-color); border-color: var(--warning-color); background: var(--pulse-bg); }
         .rail-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: 0 0 auto; }
 
+        /* --- Fix-in-place modal ----------------------------------------------
+           Each chip's fix used to be "go to a different screen and rebuild the
+           context you just left". This opens the fix over whatever the user
+           was already looking at instead. */
+        .modal-overlay {
+            position: fixed; inset: 0; z-index: 500;
+            background: rgba(0, 0, 0, 0.45);
+            display: none; align-items: flex-start; justify-content: center;
+            padding: 48px 16px; overflow-y: auto;
+        }
+        .modal-box {
+            background: var(--bg-card); border: 1px solid var(--border-color);
+            border-radius: 10px; max-width: 540px; width: 100%;
+            padding: 18px 20px 20px; box-shadow: 0 16px 40px rgba(0, 0, 0, 0.3);
+        }
+        .modal-box-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+        .modal-box-head h2 { margin: 0; font-size: 15px; }
+
         /* --- Roster --------------------------------------------------------- */
         .roster-item {
             padding: 11px 12px; border-radius: 8px; cursor: pointer;
@@ -647,8 +665,11 @@
                             <div id="paneSteps">
                                 <div id="stepsSummary"></div>
                                 <div class="actions">
+                                    <button class="btn btn-secondary" onclick="simulateSelectedAgent()" data-i18n="agent_simulate_btn">Simulate</button>
+                                    <button class="btn btn-secondary" onclick="runSelectedAgentOnce()" data-i18n="agent_run_once_btn">Run once now</button>
                                     <button class="btn btn-secondary" onclick="editSelectedAgent()" data-i18n="edit_definition">Edit definition</button>
                                     <button class="btn btn-danger" id="archiveBtn" onclick="archiveAgent()" data-i18n="archive">Archive</button>
+                                    <span id="agentRunStatus" class="status"></span>
                                 </div>
                             </div>
 
@@ -944,6 +965,16 @@
 
     <div id="toast"></div>
 
+    <div class="modal-overlay" id="fixModalOverlay" onclick="if (event.target === this) closeFixModal();">
+        <div class="modal-box">
+            <div class="modal-box-head">
+                <h2 id="fixModalTitle"></h2>
+                <button type="button" class="btn btn-secondary btn-xs" onclick="closeFixModal()" data-i18n="modal_close">Close</button>
+            </div>
+            <div id="fixModalBody"></div>
+        </div>
+    </div>
+
     <script>
         const API = '/api/dashboard/agent';
 
@@ -1090,6 +1121,56 @@
                 sp_registered_as: 'Registered as', sp_untitled: 'Untitled script',
                 sp_approve_failed: 'Could not register the script',
                 sp_registered_toast: 'Script registered — the step now points at it',
+
+                modal_close: 'Close',
+                modal_schedule_title: 'Schedule {name}',
+                modal_schedule_hint: 'A schedule fires a task, and the task runs this agent — created here the same way as from the Schedule tab.',
+                modal_schedule_submit: 'Create schedule',
+                modal_schedule_need_goal: 'Describe what each run should do',
+                modal_schedule_confirm: 'This runs {when}, with nobody approving it first. Continue?',
+                modal_schedule_task_failed: 'Could not create the task this schedule needs',
+                modal_schedule_failed: 'Schedule creation failed',
+                modal_schedule_added_toast: 'Schedule added — this agent now runs on its own',
+                modal_permissions_title: 'Allow this agent to run unattended',
+                modal_permissions_hint: 'This flow can reach for the operations below. Without a standing rule, the first scheduled run that needs one stops and waits for approval — and every later run is skipped while it waits.',
+                modal_permissions_submit: 'Allow without prompting',
+                modal_permissions_confirm: 'This lets future scheduled runs use these operations without asking you first. Continue?',
+                modal_permissions_failed: 'Could not save this rule',
+                modal_permissions_added_toast: 'Permission granted — this agent can now run unattended',
+                modal_scripts_title: 'Attach a script',
+                modal_scripts_hint: 'Pick an already-registered script for each step below. Registering a new one stays a separate, deliberate step — do that in Scripts & permissions first if the one you need is not listed.',
+                modal_scripts_submit: 'Attach',
+                modal_scripts_need_all: 'Pick a script for every step listed',
+                modal_scripts_failed: 'Could not save this agent',
+                modal_scripts_added_toast: 'Script attached',
+
+                commit_modal_title: 'What was actually created',
+                commit_agent_line: "Agent '{name}' created.",
+                commit_task_created: 'Task created: {goal}',
+                commit_task_none: 'No task was created — there is nothing yet for a schedule to run.',
+                commit_schedule_created: 'Runs automatically {repeat}. Next: {next}.',
+                commit_schedule_none: 'No schedule was created.',
+                commit_schedule_requested: 'Could not read as a schedule:',
+                commit_schedule_supported: 'Supported formats:',
+                commit_unattended_yes: 'This agent runs unattended, on its own schedule.',
+                commit_unattended_no: 'This agent will NOT run on its own — you have to start it yourself.',
+                commit_fix_schedule: 'Add a schedule now',
+
+                agent_simulate_btn: 'Simulate', agent_run_once_btn: 'Run once now',
+                sim_confirm_title: 'Simulate this agent now?',
+                sim_confirm_body: 'Previews each step. Nothing runs for real — no files touched, no tools called.',
+                sim_running: 'Simulating…', sim_failed: 'Simulation failed',
+                sim_completed: 'Simulated only — nothing was executed',
+                run_once_confirm_title: 'Run this agent for real, right now?',
+                run_once_confirm_body: 'This is not a preview. It runs real shell commands, makes real AI calls, and can send real notifications — right now, once. This cannot be undone.',
+                run_once_running: 'Running…', run_once_failed: 'Run failed',
+                run_once_started: 'Run started — real actions, not a preview',
+                run_dry_badge: 'SIMULATED',
+                run_dry_banner: 'Simulated only — nothing was executed.',
+
+                r_gate: 'Manual step',
+                fix_gate: 'A scheduled run stops here every time for a human response — no permission setting can skip it',
+                step_parks_note: 'This step pauses the run and waits for you to respond, every time — no permission setting can skip it.',
             },
             ko: {
                 nav_dashboard: '대시보드', nav_agents: '에이전트', nav_settings: '설정',
@@ -1227,6 +1308,56 @@
                 sp_registered_as: '등록된 스크립트', sp_untitled: '이름 없는 스크립트',
                 sp_approve_failed: '스크립트를 등록하지 못했습니다',
                 sp_registered_toast: '스크립트가 등록되어 이 단계가 이제 이를 가리킵니다',
+
+                modal_close: '닫기',
+                modal_schedule_title: '{name} 스케줄',
+                modal_schedule_hint: '스케줄이 작업을 실행하고, 그 작업이 이 에이전트를 돌립니다 — 스케줄 탭에서 만드는 것과 같은 방식으로 여기서 만듭니다.',
+                modal_schedule_submit: '스케줄 만들기',
+                modal_schedule_need_goal: '매 실행마다 무엇을 할지 적어주세요',
+                modal_schedule_confirm: '{when} 아무도 승인하지 않고 실행됩니다. 계속할까요?',
+                modal_schedule_task_failed: '이 스케줄에 필요한 작업을 만들지 못했습니다',
+                modal_schedule_failed: '스케줄 생성에 실패했습니다',
+                modal_schedule_added_toast: '스케줄이 추가되었습니다 — 이 에이전트는 이제 스스로 돕니다',
+                modal_permissions_title: '이 에이전트의 무인 실행을 허용',
+                modal_permissions_hint: '이 플로우는 아래 작업들을 요청할 수 있습니다. 상시 규칙이 없으면 예약 실행이 그중 하나를 처음 필요로 하는 순간 멈춰서 승인을 기다리고, 기다리는 동안 이후 실행은 전부 건너뜁니다.',
+                modal_permissions_submit: '묻지 않고 허용',
+                modal_permissions_confirm: '이후 예약 실행이 이 작업들을 묻지 않고 사용하게 됩니다. 계속할까요?',
+                modal_permissions_failed: '이 규칙을 저장하지 못했습니다',
+                modal_permissions_added_toast: '권한을 부여했습니다 — 이 에이전트는 이제 무인으로 실행될 수 있습니다',
+                modal_scripts_title: '스크립트 연결',
+                modal_scripts_hint: '아래 각 단계에 이미 등록된 스크립트를 골라주세요. 새 스크립트 등록은 별도의 의도적인 단계로 남습니다 — 필요한 것이 목록에 없다면 먼저 스크립트·권한에서 등록하세요.',
+                modal_scripts_submit: '연결',
+                modal_scripts_need_all: '목록의 모든 단계에 스크립트를 골라주세요',
+                modal_scripts_failed: '이 에이전트를 저장하지 못했습니다',
+                modal_scripts_added_toast: '스크립트를 연결했습니다',
+
+                commit_modal_title: '실제로 만들어진 것',
+                commit_agent_line: "에이전트 '{name}'을(를) 만들었습니다.",
+                commit_task_created: '작업을 만들었습니다: {goal}',
+                commit_task_none: '작업을 만들지 않았습니다 — 스케줄이 실행할 것이 아직 없습니다.',
+                commit_schedule_created: '{repeat} 자동으로 실행됩니다. 다음 실행: {next}.',
+                commit_schedule_none: '예약을 만들지 않았습니다.',
+                commit_schedule_requested: '예약 형식으로 읽지 못한 문구:',
+                commit_schedule_supported: '지원 형식:',
+                commit_unattended_yes: '이 에이전트는 스스로 예약대로 실행됩니다.',
+                commit_unattended_no: '이 에이전트는 스스로 실행되지 않습니다 — 직접 실행해야 합니다.',
+                commit_fix_schedule: '지금 예약 추가',
+
+                agent_simulate_btn: '모의 실행', agent_run_once_btn: '지금 한 번 실행',
+                sim_confirm_title: '지금 모의 실행을 해볼까요?',
+                sim_confirm_body: '각 단계를 미리 보여줄 뿐, 실제로는 아무것도 실행되지 않습니다.',
+                sim_running: '모의 실행 중…', sim_failed: '모의 실행 실패',
+                sim_completed: '모의 실행 완료 — 실제로 실행된 것은 없습니다',
+                run_once_confirm_title: '지금 이 에이전트를 실제로 실행할까요?',
+                run_once_confirm_body: '미리보기가 아닙니다. 실제 셸 명령을 실행하고, 실제로 AI를 호출하며, 실제 알림을 보낼 수 있습니다 — 지금 한 번. 되돌릴 수 없습니다.',
+                run_once_running: '실행 중…', run_once_failed: '실행 실패',
+                run_once_started: '실행을 시작했습니다 — 미리보기가 아니라 실제입니다',
+                run_dry_badge: '모의 실행',
+                run_dry_banner: '모의 실행입니다 — 실제로 실행된 것은 없습니다.',
+
+                r_gate: '수동 대기',
+                fix_gate: '예약된 실행이 매번 이 단계에서 멈춰 사람의 응답을 기다립니다 — 어떤 권한 설정도 이를 건너뛰게 하지 못합니다',
+                step_parks_note: '이 단계는 실행마다 멈춰서 응답을 기다립니다 — 어떤 권한 설정도 이를 건너뛰게 하지 못합니다.',
             },
         };
 
@@ -1337,12 +1468,27 @@
         let selectedRunId = null;
         let policyRules = [];
         let policyOperations = [];
+        // Step type -> required policy operations, from GET /policies/step-operations
+        // (server/policy/required_operations.py). Replaces the hand-written
+        // OPERATION_FOR_STEP map this file used to keep, which drifted from
+        // runtime reality by omitting `llm` entirely.
+        let stepOperations = {};
         let approvals = [];
         let tasksById = {};
         let selectedAgentId = null;
         let steps = [];
         let builderSession = null;
         let builderDraft = null;
+
+        // --- Fix-in-place modal state -----------------------------------
+        //
+        // Which agent (and, depending on which chip opened it, which missing
+        // operations or which step indices) the currently-open modal is
+        // acting on. Cleared on close so a stale submit can never apply to
+        // the wrong agent.
+        let fixModalAgentId = null;
+        let fixModalMissingOps = [];
+        let fixModalStepIndices = [];
 
         // --- Script proposals -------------------------------------------
         //
@@ -1731,20 +1877,47 @@
             renderBuilderApply();
         }
 
+        // Step types `_wait_for_user_step` (task_orchestrator.py) dispatches
+        // unconditionally on every occurrence, scheduled or not — mirrors
+        // agent/configurator.py::_GATE_STEP_TYPES. No policy rule reaches this
+        // dispatch, so a step of one of these types always parks the run for a
+        // human; that is a fact about the step, not something a permission can
+        // fix.
+        const GATE_STEP_TYPES = new Set(['approval_gate', 'manual_handoff']);
+
+        // next_run_at (and similar) arrive as UTC instants (server/core/timestamps.py);
+        // this is the one place that turns one into the viewer's local wall clock,
+        // so a KST 09:00 schedule never prints as the 00:00Z it is stored as.
+        function formatAbsoluteLocal(iso) {
+            if (!iso) return '';
+            const stamp = new Date(iso);
+            if (Number.isNaN(stamp.getTime())) return '';
+            return stamp.toLocaleString(currentLang === 'ko' ? 'ko-KR' : 'en-US', {
+                month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+            });
+        }
+
         // --- Readiness ------------------------------------------------------
         //
         // The four preconditions an unattended agent silently fails on. Each is
         // computed from data already loaded, so the rail never claims more than
         // the server actually knows.
+        //
+        // The "unattended" chip in particular must not invent its own opinion
+        // of which step type needs which operation — that hand-written guess
+        // (a map literal that used to live right here) is exactly what let the
+        // rail say "ready" for a flow whose `llm` step was the one about to
+        // stall. `stepOperations` is fetched once from
+        // GET /policies/step-operations, which derives the mapping from the
+        // same runtime gating logic the scheduler actually uses
+        // (server/policy/required_operations.py), so this file only applies
+        // it — it never decides it.
 
-        const OPERATION_FOR_STEP = {
-            shell: 'process.terminal',
-            browser_action: 'browser.control',
-            device_action: 'device.control',
-            android_action: 'device.control',
-            mobile_action: 'device.control',
-            app_action: 'device.control',
-        };
+        function operationsForStep(step) {
+            const type = step && step.type;
+            const operations = stepOperations[type];
+            return Array.isArray(operations) ? operations : [];
+        }
 
         function stepsOf(agent) {
             return Array.isArray(agent && agent.flow_json) ? agent.flow_json : [];
@@ -1761,32 +1934,42 @@
             const flow = stepsOf(agent);
             const shellSteps = flow.filter((step) => step.type === 'shell');
             const scriptIds = new Set(scripts.map((script) => script.id));
-            const needed = new Set(
-                flow.map((step) => OPERATION_FOR_STEP[step.type]).filter(Boolean)
-            );
+            const needed = new Set(flow.flatMap(operationsForStep));
             const granted = new Set(
                 policyRules.filter((rule) => rule.effect === 'allow').map((rule) => rule.operation)
             );
             const mine = schedulesFor(agent.id);
-            return [
+            const hasEnabledSchedule = mine.some((schedule) => schedule.enabled !== false);
+            const items = [
                 {
                     key: 'steps', label: t('r_steps'), ok: flow.length > 0,
                     fix: t('fix_steps'), go: () => { selectAgent(agent.id).then(() => editSelectedAgent()); },
                 },
                 {
                     key: 'scripts', label: t('r_scripts'), ok: shellSteps.every((step) => scriptIds.has(step.script_id)),
-                    fix: t('fix_scripts'), go: () => goSetup(),
+                    fix: t('fix_scripts'), go: () => openScriptFixModal(agent.id),
                 },
                 {
-                    key: 'schedule', label: t('r_schedule'), ok: mine.some((schedule) => schedule.enabled !== false),
+                    key: 'schedule', label: t('r_schedule'), ok: hasEnabledSchedule,
                     fix: t('fix_schedule'),
-                    go: () => { selectAgent(agent.id).then(() => showDetail('schedule')); },
+                    go: () => openScheduleFixModal(agent.id),
                 },
                 {
                     key: 'unattended', label: t('r_unattended'), ok: [...needed].every((op) => granted.has(op)),
-                    fix: t('fix_unattended'), go: () => goSetup(),
+                    fix: t('fix_unattended'), go: () => openPermissionsFixModal(agent.id),
                 },
             ];
+            // Only surfaced once it is an actual problem: a gate step pausing a
+            // manually-started run is normal and not worth a chip. Nothing here
+            // can "fix" this the way the other chips do — see GATE_STEP_TYPES —
+            // so its go() only opens the steps editor, same as the steps chip.
+            if (hasEnabledSchedule && flow.some((step) => GATE_STEP_TYPES.has(step.type))) {
+                items.push({
+                    key: 'gate', label: t('r_gate'), ok: false,
+                    fix: t('fix_gate'), go: () => { selectAgent(agent.id).then(() => editSelectedAgent()); },
+                });
+            }
+            return items;
         }
 
         function nextRunFor(agent) {
@@ -1833,6 +2016,279 @@
             if (item && !item.ok && typeof item.go === 'function') item.go();
         }
 
+        // --- Fix-in-place modal ----------------------------------------------
+        //
+        // What a readiness chip's fix used to do: navigate away, and leave the
+        // user to rebuild the context ("which agent, which step") they had
+        // just left. These open the fix over the agent that was already
+        // selected instead, using the same machinery the full Schedule/Setup
+        // panes use — this is not a second implementation of scheduling or
+        // permission-granting, just a shorter path to the one that exists.
+
+        function openFixModal(title, bodyHtml) {
+            document.getElementById('fixModalTitle').textContent = title;
+            document.getElementById('fixModalBody').innerHTML = bodyHtml;
+            document.getElementById('fixModalOverlay').style.display = 'flex';
+        }
+
+        function closeFixModal() {
+            document.getElementById('fixModalOverlay').style.display = 'none';
+            document.getElementById('fixModalBody').innerHTML = '';
+            fixModalAgentId = null;
+            fixModalMissingOps = [];
+            fixModalStepIndices = [];
+        }
+
+        function syncFixScheduleKind() {
+            const kind = document.getElementById('fixSchedKind');
+            if (!kind) return;
+            const daily = kind.value === 'daily_at';
+            document.getElementById('fixSchedTimeField').style.display = daily ? '' : 'none';
+            document.getElementById('fixSchedMinutesField').style.display = daily ? 'none' : '';
+        }
+
+        // Schedule missing: an agent does not own a schedule directly — a
+        // schedule fires a *task*, and the task names the agent
+        // (server/agent/schedule_store.py) — so this creates the task first,
+        // exactly as the Schedule tab's "Add schedule" already does, then the
+        // schedule on top of it. One button click, two API calls, because
+        // that is the real shape of the contract.
+        function openScheduleFixModal(agentId) {
+            const agent = agents.find((candidate) => candidate.id === agentId);
+            if (!agent) return;
+            fixModalAgentId = agentId;
+            const body = `
+                <p class="hint">${escapeHtml(t('modal_schedule_hint'))}</p>
+                <div class="row">
+                    <div class="field">
+                        <label for="fixSchedKind">${escapeHtml(t('sched_repeat'))}</label>
+                        <select id="fixSchedKind" class="input" onchange="syncFixScheduleKind()">
+                            <option value="daily_at">${escapeHtml(t('sched_daily'))}</option>
+                            <option value="interval">${escapeHtml(t('sched_interval'))}</option>
+                        </select>
+                    </div>
+                    <div class="field" id="fixSchedTimeField">
+                        <label for="fixSchedTime">${escapeHtml(t('sched_time'))}</label>
+                        <input id="fixSchedTime" class="input" placeholder="09:00" value="09:00">
+                    </div>
+                    <div class="field" id="fixSchedMinutesField" style="display:none;">
+                        <label for="fixSchedMinutes">${escapeHtml(t('sched_minutes'))}</label>
+                        <input id="fixSchedMinutes" class="input" type="number" min="1" value="60">
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="fixSchedGoal">${escapeHtml(t('sched_goal'))}</label>
+                    <input id="fixSchedGoal" class="input" placeholder="${escapeHtml(t('ph_sched_goal'))}" value="${escapeHtml(agent.description || '')}">
+                </div>
+                <div class="actions">
+                    <button class="btn" onclick="submitScheduleFix()">${escapeHtml(t('modal_schedule_submit'))}</button>
+                    <span id="fixModalStatus" class="status"></span>
+                </div>`;
+            openFixModal(t('modal_schedule_title').replace('{name}', agent.name || agentId), body);
+            syncFixScheduleKind();
+        }
+
+        async function submitScheduleFix() {
+            const agent = agents.find((candidate) => candidate.id === fixModalAgentId);
+            if (!agent) return;
+            const goal = document.getElementById('fixSchedGoal').value.trim();
+            if (!goal) {
+                setStatus('fixModalStatus', t('modal_schedule_need_goal'), true);
+                return;
+            }
+            const kind = document.getElementById('fixSchedKind').value;
+            const expression = kind === 'daily_at'
+                ? { kind: 'daily_at', time: document.getElementById('fixSchedTime').value.trim() }
+                : { kind: 'interval', seconds: Math.max(1, Number(document.getElementById('fixSchedMinutes').value)) * 60 };
+            if (!confirm(t('modal_schedule_confirm').replace('{when}', describeExpression(expression)))) return;
+
+            setStatus('fixModalStatus', t('saving'));
+            // Same two-step creation `createSchedule()` uses: a schedule fires
+            // a task, never an agent directly, so the task is created first
+            // and the agent is assigned to it.
+            const taskResult = await api('/tasks', {
+                method: 'POST',
+                body: JSON.stringify({
+                    title: goal.slice(0, 80),
+                    goal,
+                    assigned_agent_id: agent.id,
+                    kind: 'general',
+                    source: 'dashboard',
+                }),
+            });
+            if (!taskResult || taskResult.error) {
+                setStatus('fixModalStatus', (taskResult && taskResult.error) || t('modal_schedule_task_failed'), true);
+                return;
+            }
+            const task = taskResult.task;
+            const scheduleResult = await api(`/tasks/${encodeURIComponent(task.id)}/schedules`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    expression,
+                    name: goal.slice(0, 80),
+                    provider_id: agent.provider_id || null,
+                    model: agent.model || null,
+                    prompt: goal,
+                    enabled: true,
+                }),
+            });
+            if (!scheduleResult || scheduleResult.error) {
+                setStatus('fixModalStatus', (scheduleResult && scheduleResult.error) || t('modal_schedule_failed'), true);
+                return;
+            }
+            closeFixModal();
+            toast(t('modal_schedule_added_toast'));
+            reloadAll();
+        }
+
+        // Unattended permissions missing: grant every operation this agent's
+        // flow can actually reach for (the same `needed` set the chip itself
+        // is computed from — see stepOperations/operationsForStep above), not
+        // a client-guessed subset, in one confirmed action.
+        function openPermissionsFixModal(agentId) {
+            const agent = agents.find((candidate) => candidate.id === agentId);
+            if (!agent) return;
+            const flow = stepsOf(agent);
+            const needed = [...new Set(flow.flatMap(operationsForStep))];
+            const granted = new Set(
+                policyRules.filter((rule) => rule.effect === 'allow').map((rule) => rule.operation)
+            );
+            const missing = needed.filter((operation) => !granted.has(operation));
+            fixModalAgentId = agentId;
+            fixModalMissingOps = missing;
+            if (!missing.length) return;
+            const rows = missing.map((value) => {
+                const op = policyOperations.find((candidate) => candidate.value === value) || { value };
+                return `<div class="hint" style="margin:0 0 8px;">&bull; ${escapeHtml(operationLabel(op))}</div>`;
+            }).join('');
+            const body = `
+                <p class="hint">${escapeHtml(t('modal_permissions_hint'))}</p>
+                ${rows}
+                <div class="field">
+                    <label for="fixRuleScope">${escapeHtml(t('scope'))}</label>
+                    <input id="fixRuleScope" class="input" value="global">
+                </div>
+                <div class="actions">
+                    <button class="btn" onclick="submitPermissionsFix()">${escapeHtml(t('modal_permissions_submit'))}</button>
+                    <span id="fixModalStatus" class="status"></span>
+                </div>`;
+            openFixModal(t('modal_permissions_title'), body);
+        }
+
+        async function submitPermissionsFix() {
+            if (!fixModalMissingOps.length) return;
+            const scopeInput = document.getElementById('fixRuleScope');
+            const scope = (scopeInput && scopeInput.value.trim()) || 'global';
+            if (!confirm(t('modal_permissions_confirm'))) return;
+            setStatus('fixModalStatus', t('saving'));
+            // Granted one at a time (the rules API has no batch endpoint). On
+            // failure, the operations already granted are dropped from
+            // fixModalMissingOps so a retry click only asks for what is still
+            // missing rather than filing a duplicate rule for one that just
+            // succeeded.
+            const remaining = [...fixModalMissingOps];
+            while (remaining.length) {
+                const operation = remaining[0];
+                const result = await api('/policies/rules', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        operation,
+                        scope,
+                        effect: 'allow',
+                        created_by: 'dashboard',
+                        expires_at: null,
+                    }),
+                });
+                if (!result || result.error) {
+                    fixModalMissingOps = remaining;
+                    setStatus('fixModalStatus', (result && result.error) || t('modal_permissions_failed'), true);
+                    return;
+                }
+                remaining.shift();
+            }
+            fixModalMissingOps = [];
+            closeFixModal();
+            toast(t('modal_permissions_added_toast'));
+            reloadAll();
+        }
+
+        // Script missing on a shell step: attach an already-registered script.
+        // Registering a *new* one stays out of reach here on purpose — see the
+        // docstring on approve_script_proposal in routes/dashboard_agents.py —
+        // so if nothing is registered yet, the honest fix is still the jump to
+        // Setup, same as the "no script registered" warning banner offers.
+        function openScriptFixModal(agentId) {
+            const agent = agents.find((candidate) => candidate.id === agentId);
+            if (!agent) return;
+            const flow = stepsOf(agent);
+            const scriptIds = new Set(scripts.map((script) => script.id));
+            const missingSteps = flow
+                .map((step, index) => ({ step, index }))
+                .filter(({ step }) => step.type === 'shell' && !scriptIds.has(step.script_id));
+            if (!missingSteps.length) return;
+            if (!scripts.length) {
+                goSetup();
+                return;
+            }
+            fixModalAgentId = agentId;
+            fixModalStepIndices = missingSteps.map(({ index }) => index);
+            const options = scripts.map((script) => `<option value="${escapeHtml(script.id)}">${escapeHtml(script.name)}</option>`).join('');
+            const rows = missingSteps.map(({ step, index }) => `
+                <div class="field">
+                    <label>${escapeHtml(step.name || step.id || `Step ${index + 1}`)}</label>
+                    <select class="input" id="fixScriptSelect_${index}">
+                        <option value="">${escapeHtml(t('s_select_required'))}</option>
+                        ${options}
+                    </select>
+                </div>`).join('');
+            const body = `
+                <p class="hint">${escapeHtml(t('modal_scripts_hint'))}</p>
+                ${rows}
+                <div class="actions">
+                    <button class="btn" onclick="submitScriptFix()">${escapeHtml(t('modal_scripts_submit'))}</button>
+                    <span id="fixModalStatus" class="status"></span>
+                </div>`;
+            openFixModal(t('modal_scripts_title'), body);
+        }
+
+        async function submitScriptFix() {
+            const agent = agents.find((candidate) => candidate.id === fixModalAgentId);
+            if (!agent || !fixModalStepIndices.length) return;
+            const picks = {};
+            for (const index of fixModalStepIndices) {
+                const select = document.getElementById(`fixScriptSelect_${index}`);
+                const value = select ? select.value : '';
+                if (!value) {
+                    setStatus('fixModalStatus', t('modal_scripts_need_all'), true);
+                    return;
+                }
+                picks[index] = value;
+            }
+            setStatus('fixModalStatus', t('saving'));
+            // flow_json carries display-only script_name/script_path on shell
+            // steps (added server-side, see _with_script_names in
+            // routes/agents.py) — sending those back would be rejected as
+            // fields outside the shell step schema, so they are stripped
+            // before patching in just the script_id each picker chose.
+            const updatedFlow = stepsOf(agent).map((step, index) => {
+                const { script_name, script_path, ...clean } = step;
+                return Object.prototype.hasOwnProperty.call(picks, index)
+                    ? { ...clean, script_id: picks[index] }
+                    : clean;
+            });
+            const result = await api(`/agents/${encodeURIComponent(agent.id)}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ flow_json: updatedFlow }),
+            });
+            if (!result || result.error) {
+                setStatus('fixModalStatus', (result && result.error) || t('modal_scripts_failed'), true);
+                return;
+            }
+            closeFixModal();
+            toast(t('modal_scripts_added_toast'));
+            reloadAll();
+        }
+
         // --- Detail ----------------------------------------------------------
 
         function renderDetail(agent) {
@@ -1851,6 +2307,7 @@
                             <span class="badge">${escapeHtml(step.type || 'llm')}</span>
                         </div>
                         <div class="hint" style="margin:4px 0 0;">${escapeHtml(step.description || '')}</div>
+                        ${GATE_STEP_TYPES.has(step.type) ? `<div class="note">${escapeHtml(t('step_parks_note'))}</div>` : ''}
                     </div>`).join('')
                 : `<div class="empty">${escapeHtml(currentLang === 'ko'
                         ? '단계가 없습니다. 스케줄이 이 에이전트를 불러도 실행할 것이 없습니다.'
@@ -2383,6 +2840,7 @@
                             </select>
                         </div>
                     </div>
+                    ${GATE_STEP_TYPES.has(type) ? `<div class="note">${escapeHtml(t('step_parks_note'))}</div>` : ''}
                     <div class="field">
                         <label>${escapeHtml(isShell ? t('s_what_script') : t('s_what_step'))}</label>
                         <textarea class="input" rows="2" oninput="updateStep(${index}, 'description', this.value)">${escapeHtml(step.description || '')}</textarea>
@@ -2557,13 +3015,117 @@
                 return;
             }
             setStatus('editorStatus', t('saved'));
-            toast(id ? t('agent_updated') : t('agent_created'));
             const saved = result.agent || result;
+            // Only /builder/commit returns commit_result (routes/agents.py
+            // builder_commit) — the fact of what was actually created, not a
+            // guess. A plain PATCH/POST to /agents never fabricates a task or
+            // schedule, so there is nothing here for it to report.
+            const commitResult = result.commit_result || null;
             resetBuilder();
             await reloadAll();
             if (saved && saved.id) await selectAgent(saved.id);
             // Creating is done; the roster is where you see what is still missing.
             goManage();
+            if (commitResult) {
+                // This replaces a generic "saved" toast on purpose: a toast is
+                // how a user was once told "매일 아침 09:00 자동 실행" for an
+                // agent with no schedule at all, gone before they could read it
+                // twice. What actually exists stays open until closed.
+                renderCommitResultModal(saved, commitResult);
+            } else {
+                toast(id ? t('agent_updated') : t('agent_created'));
+            }
+        }
+
+        // What builder/commit actually built, in the user's own language —
+        // never commit_result.summary/message, which the server always writes
+        // in Korean regardless of the dashboard's language toggle.
+        function renderCommitResultModal(agent, commitResult) {
+            const agentName = (agent && (agent.name || agent.id)) || (commitResult.agent && commitResult.agent.name) || '';
+            const taskFact = commitResult.task || {};
+            const scheduleFact = commitResult.schedule || {};
+            const unattended = !!commitResult.runs_unattended;
+            const parts = [];
+
+            parts.push(`<p class="hint">${escapeHtml(t('commit_agent_line').replace('{name}', agentName))}</p>`);
+
+            parts.push(taskFact.created
+                ? `<div class="roster-meta" style="margin:0 0 8px;"><span class="ok">&#10003;</span> ${escapeHtml(t('commit_task_created').replace('{goal}', taskFact.goal || ''))}</div>`
+                : `<div class="roster-meta" style="margin:0 0 8px;"><span class="fault">&#9675;</span> ${escapeHtml(t('commit_task_none'))}</div>`);
+
+            if (scheduleFact.created) {
+                const when = formatAbsoluteLocal(scheduleFact.next_run_at);
+                const repeat = describeExpression(scheduleFact.expression);
+                parts.push(`<div class="roster-meta" style="margin:0 0 8px;"><span class="ok">&#10003;</span> ${escapeHtml(
+                    t('commit_schedule_created').replace('{repeat}', repeat).replace('{next}', when || '—')
+                )}</div>`);
+            } else {
+                parts.push(`<div class="roster-meta" style="margin:0 0 8px;"><span class="fault">&#9675;</span> ${escapeHtml(t('commit_schedule_none'))}</div>`);
+                if (scheduleFact.requested_text) {
+                    parts.push(`<div class="hint" style="margin:0 0 4px;">${escapeHtml(t('commit_schedule_requested'))} “${escapeHtml(scheduleFact.requested_text)}”</div>`);
+                }
+                if (Array.isArray(scheduleFact.supported_forms) && scheduleFact.supported_forms.length) {
+                    parts.push(`<div class="hint" style="margin:0 0 8px;">${escapeHtml(t('commit_schedule_supported'))} ${escapeHtml(scheduleFact.supported_forms.join(', '))}</div>`);
+                }
+            }
+
+            parts.push(`<div class="note${unattended ? '' : ' blocking'}" style="margin-top:8px;">${escapeHtml(unattended ? t('commit_unattended_yes') : t('commit_unattended_no'))}</div>`);
+
+            const actions = [];
+            if (!scheduleFact.created && agent && agent.id) {
+                actions.push(`<button class="btn" onclick="closeFixModal(); openScheduleFixModal('${agent.id}');">${escapeHtml(t('commit_fix_schedule'))}</button>`);
+            }
+            actions.push(`<button class="btn btn-secondary" onclick="closeFixModal()">${escapeHtml(t('modal_close'))}</button>`);
+            parts.push(`<div class="actions">${actions.join('')}</div>`);
+
+            openFixModal(t('commit_modal_title'), parts.join(''));
+        }
+
+        // Simulation and real execution must never look alike, in wording or in
+        // what happens next — see lib/screens/agent/agent_detail_screen.dart
+        // (_startSimulation / _confirmAndRunNow) for the app-side wording this
+        // mirrors, and POST /agents/{id}/dry-run vs /run-once on the server for
+        // why they are two separate routes rather than one flag.
+        async function simulateSelectedAgent() {
+            const id = selectedAgentId;
+            if (!id) return;
+            if (!confirm(`${t('sim_confirm_title')}\n\n${t('sim_confirm_body')}`)) return;
+            setStatus('agentRunStatus', t('sim_running'));
+            const result = await api(`/agents/${encodeURIComponent(id)}/dry-run`, {
+                method: 'POST', body: JSON.stringify({}),
+            });
+            if (!result || result.error) {
+                setStatus('agentRunStatus', (result && result.error) || t('sim_failed'), true);
+                return;
+            }
+            setStatus('agentRunStatus', '');
+            toast(t('sim_completed'));
+            await reloadAll();
+            showDetail('runs');
+            const runId = result.run_id || (result.run && result.run.id);
+            if (runId) selectRun(runId);
+        }
+
+        // A real run has real side effects — real shell commands, real AI
+        // calls, real notifications — so the confirmation says that plainly
+        // instead of a generic "are you sure?".
+        async function runSelectedAgentOnce() {
+            const id = selectedAgentId;
+            if (!id) return;
+            if (!confirm(`${t('run_once_confirm_title')}\n\n${t('run_once_confirm_body')}`)) return;
+            setStatus('agentRunStatus', t('run_once_running'));
+            const result = await api(`/agents/${encodeURIComponent(id)}/run-once`, {
+                method: 'POST', body: JSON.stringify({}),
+            });
+            if (!result || result.error) {
+                setStatus('agentRunStatus', (result && result.error) || t('run_once_failed'), true);
+                return;
+            }
+            setStatus('agentRunStatus', '');
+            toast(t('run_once_started'));
+            await reloadAll();
+            showDetail('runs');
+            if (result.run && result.run.id) selectRun(result.run.id);
         }
 
         async function archiveAgent() {
@@ -3066,7 +3628,7 @@
             host.innerHTML = shown.slice(0, 15).map((run) => `
                 <div class="run-item${run.id === selectedRunId ? ' selected' : ''}" onclick="selectRun('${run.id}')">
                     <span class="dot ${runDotClass(run.status)}"></span>
-                    <span class="grow">${escapeHtml(run.title || run.id)}</span>
+                    <span class="grow">${escapeHtml(run.title || run.id)}${run.dry_run ? ` <span class="badge info">${escapeHtml(t('run_dry_badge'))}</span>` : ''}</span>
                     <span class="when">${escapeHtml(statusText(run.status))} · ${escapeHtml(ago(run.updated_at || run.created_at))}</span>
                 </div>`).join('');
         }
@@ -3076,18 +3638,23 @@
             renderRunList();
             const detail = document.getElementById('runDetail');
             const run = runs.find((candidate) => candidate.id === runId);
+            // A simulated run's result must open with the fact that nothing ran
+            // — this is the one place a dry run and a real run could otherwise
+            // look identical, since both render through the same step list.
+            const dryRunBanner = run && run.dry_run
+                ? `<div class="note">${escapeHtml(t('run_dry_banner'))}</div>` : '';
             if (!run || !run.task_id) {
-                detail.innerHTML = '<div class="empty">This run has no recorded steps.</div>';
+                detail.innerHTML = `${dryRunBanner}<div class="empty">This run has no recorded steps.</div>`;
                 return;
             }
             detail.innerHTML = '<div class="empty">Loading…</div>';
             const result = await api(`/tasks/${encodeURIComponent(run.task_id)}/steps`);
             const steps = (result && result.steps) || [];
             if (!steps.length) {
-                detail.innerHTML = '<div class="empty">This run has no recorded steps.</div>';
+                detail.innerHTML = `${dryRunBanner}<div class="empty">This run has no recorded steps.</div>`;
                 return;
             }
-            detail.innerHTML = steps.map((step) => renderStepResult(step)).join('');
+            detail.innerHTML = dryRunBanner + steps.map((step) => renderStepResult(step)).join('');
         }
 
         function renderStepResult(step) {
@@ -3275,12 +3842,13 @@
         // --- Bootstrap ------------------------------------------------------
 
         async function reloadAll() {
-            const [agentResult, scheduleResult, taskResult, ruleResult, operationResult, approvalResult, scriptResult, runResult, stepSchemaResult] = await Promise.all([
+            const [agentResult, scheduleResult, taskResult, ruleResult, operationResult, stepOperationResult, approvalResult, scriptResult, runResult, stepSchemaResult] = await Promise.all([
                 api('/agents?limit=200'),
                 api('/schedules'),
                 api('/tasks?limit=200'),
                 api('/policies/rules'),
                 api('/policies/operations'),
+                api('/policies/step-operations'),
                 api('/approvals/pending'),
                 api('/scripts'),
                 api('/runs?limit=60'),
@@ -3294,6 +3862,14 @@
             // catalog on a transient error would empty the operation select.
             if (operationResult && Array.isArray(operationResult.operations)) {
                 policyOperations = operationResult.operations;
+            }
+            // Same guard as above: keep the last-known mapping rather than
+            // treating a transient fetch failure as "no step needs anything",
+            // which would make the unattended chip lie in the safe-looking
+            // direction (falsely "ready") instead of failing loudly.
+            if (stepOperationResult && stepOperationResult.operations_by_step_type
+                && typeof stepOperationResult.operations_by_step_type === 'object') {
+                stepOperations = stepOperationResult.operations_by_step_type;
             }
             scripts = (scriptResult && scriptResult.scripts) || [];
             runs = (runResult && runResult.runs) || [];

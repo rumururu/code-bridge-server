@@ -638,7 +638,14 @@ class AgentStore(
             "agent_id": agent.get("id"),
             "task_id": task.get("id") if isinstance(task, dict) else None,
             "steps_simulated": simulated,
-            "summary": f"Dry run finished — {simulated} steps simulated",
+            # Leads with the fact a reader must not miss: this produced no
+            # side effects at all. The previous wording ("Dry run finished —
+            # N steps simulated") read step-by-step like a completed run, and
+            # a first-time user took "finished" plus a step count as "it
+            # worked" — see agent-usability-repair symptom #2.
+            "summary": (
+                f"Simulation only — nothing was executed. {simulated} steps simulated."
+            ),
         }
         self.update_run_simulated_summary(run_id, summary)
         return summary

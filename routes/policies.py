@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from chat.chat_stream_service import LLM_TOOL_APPROVAL_OPERATIONS
 from policy.policy_models import PolicyRuleCreate
 from policy.policy_store import get_policy_rule_store
+from policy.required_operations import step_type_operation_catalog
 
 from .deps import verify_api_key
 
@@ -58,6 +59,20 @@ def list_policy_operations() -> dict[str, Any]:
     ]
     operations.extend(dict(item) for item in _DIRECT_ACTION_OPERATIONS)
     return {"operations": operations}
+
+
+def list_step_operations() -> dict[str, Any]:
+    """Per-step-type required-operation map, for the readiness rail.
+
+    This is the dashboard's replacement for the hand-written
+    ``OPERATION_FOR_STEP`` object it used to keep in ``agents.html``: instead
+    of guessing which step types a scheduled run's approval gate cares about,
+    the rail fetches this once and applies it locally to each agent's own
+    ``flow_json``. See ``policy/required_operations.py`` for what "required"
+    means for an ``llm`` step (a documented superset, not a precise
+    prediction) versus every other step type (currently ungated at runtime).
+    """
+    return {"operations_by_step_type": step_type_operation_catalog()}
 
 
 @router.get("/rules", dependencies=[Depends(verify_api_key)], response_model=None)

@@ -36,6 +36,20 @@ class EnglishTest(unittest.TestCase):
             parse("every day at 21:30"), {"kind": "daily_at", "time": "21:30"}
         )
 
+    def test_am_pm(self):
+        # "check my disk daily at 9am" is the sentence that started this — an
+        # unreadable phrase was dropped without a word, so the agent it built
+        # was never scheduled and never said so.
+        self.assertEqual(parse("daily at 9am"), {"kind": "daily_at", "time": "09:00"})
+        self.assertEqual(
+            parse("every day at 9:30 pm"), {"kind": "daily_at", "time": "21:30"}
+        )
+        self.assertEqual(parse("9am daily"), {"kind": "daily_at", "time": "09:00"})
+
+    def test_the_two_noons(self):
+        self.assertEqual(parse("daily at 12pm"), {"kind": "daily_at", "time": "12:00"})
+        self.assertEqual(parse("daily at 12am"), {"kind": "daily_at", "time": "00:00"})
+
 
 class KoreanIntervalTest(unittest.TestCase):
     def test_prefix_form_still_works(self):
@@ -59,6 +73,14 @@ class KoreanIntervalTest(unittest.TestCase):
 class KoreanDailyTest(unittest.TestCase):
     def test_clock_form(self):
         self.assertEqual(parse("매일 09:00"), {"kind": "daily_at", "time": "09:00"})
+
+    def test_spoken_period_before_a_clock_time(self):
+        # How the Configurator writes a schedule back to the user: "매일 아침
+        # 09:00 자동 실행". The parser could read "매일 09:00" and "매일 아침
+        # 9시" but not this in-between form, so its own promise was the one
+        # phrasing it could not honour.
+        self.assertEqual(parse("매일 아침 09:00"), {"kind": "daily_at", "time": "09:00"})
+        self.assertEqual(parse("매일 오후 9:30"), {"kind": "daily_at", "time": "21:30"})
 
     def test_spoken_hour(self):
         self.assertEqual(parse("매일 아침 9시"), {"kind": "daily_at", "time": "09:00"})

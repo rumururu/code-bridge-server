@@ -11,6 +11,8 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -243,35 +245,81 @@ def _detect_gemini_models_from_config() -> list[dict[str, str]]:
     return detected
 
 
+# How long a model list from the CLI is trusted before asking again. The
+# names change when the CLI updates, which is rare; a request-time probe is
+# not worth what it costs (see below).
+_ANTIGRAVITY_MODELS_TTL_SECONDS = 600.0
+_antigravity_models_cache: tuple[float, list[dict[str, Any]]] | None = None
+_antigravity_models_lock = threading.Lock()
+
+
 def _get_antigravity_models() -> list[dict[str, Any]]:
-    """Ask the CLI what it can run.
+    """Ask the CLI what it can run, at most once every few minutes.
 
     The first cut of this provider shipped a hand-written list, and every name
     in it was wrong — `agy models` reports the real ones, and they change with
     the CLI rather than with this file.
+
+    The cache is not an optimisation, it is a correctness fix. This runs
+    inside `get_llm_options_snapshot`, which sits on request paths (chat
+    session creation, LLM commands) that execute on the event loop. A
+    synchronous `subprocess.run` there stops the *whole server* answering for
+    as long as the CLI takes — every port stays open and every request times
+    out, which reads as "the server is up but my phone can't reach it". A
+    slow `agy` turned one provider listing into a server-wide outage.
     """
+    global _antigravity_models_cache
+
     fallback = [{"id": m, "label": m, "source": "builtin"} for m in ("gemini-3.1-pro-high", "gemini-3.6-flash-medium")]
+
+    now = time.monotonic()
+    cached = _antigravity_models_cache
+    if cached is not None and now - cached[0] < _ANTIGRAVITY_MODELS_TTL_SECONDS:
+        return cached[1]
+
     command = shutil.which("agy")
     if not command:
+        _antigravity_models_cache = (now, fallback)
         return fallback
+
+    # One prober at a time: without this, N concurrent requests that all miss
+    # the cache each spawn their own CLI and each block, which is the same
+    # outage with more processes.
+    if not _antigravity_models_lock.acquire(blocking=False):
+        return cached[1] if cached is not None else fallback
     try:
         result = subprocess.run(
             [command, "models"],
             capture_output=True,
             text=True,
-            timeout=10,
+            # Short on purpose: this is time the server spends answering
+            # nobody. A CLI slower than this does not get to hold the
+            # process hostage — we serve the last known list instead.
+            timeout=3,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return fallback
+        _antigravity_models_cache = (now, cached[1] if cached is not None else fallback)
+        return _antigravity_models_cache[1]
+    finally:
+        _antigravity_models_lock.release()
     if result.returncode != 0:
-        return fallback
+        _antigravity_models_cache = (now, cached[1] if cached is not None else fallback)
+        return _antigravity_models_cache[1]
     models = [
         {"id": line.strip(), "label": line.strip(), "source": "cli"}
         for line in (result.stdout or "").splitlines()
         if line.strip() and not line.strip().startswith(("Usage", "Available", "-"))
     ]
-    return models or fallback
+    resolved = models or fallback
+    _antigravity_models_cache = (now, resolved)
+    return resolved
+
+
+def reset_antigravity_models_cache() -> None:
+    """Forget the cached model list — for tests, and for a settings reload."""
+    global _antigravity_models_cache
+    _antigravity_models_cache = None
 
 
 def _get_codex_models() -> list[dict[str, Any]]:
