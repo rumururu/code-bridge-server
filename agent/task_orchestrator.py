@@ -944,12 +944,22 @@ def _steps_for_run(store: Any, task_id: str, run_id: str) -> list[dict[str, Any]
     schedule skipping every firing behind it.
 
     Rows written before steps carried a ``run_id`` (and hand-built rows in
-    tests) have none; when nothing matches, fall back to the full list rather
-    than running no steps at all.
+    tests) have none, and those still have to run — so fall back to the full
+    list, but only when *no row on the task is stamped at all*. Falling back
+    whenever this particular run has no rows yet would re-open the exact hole
+    above: a run whose steps are missing for any other reason would inherit
+    every earlier fire's history and start replaying it. Legacy data is a
+    property of the task, not of one run, so that is what we test for.
     """
     steps = store.list_task_steps(task_id)
     scoped = [step for step in steps if step.get("run_id") == run_id]
-    return scoped or steps
+    if scoped:
+        return scoped
+    if any(step.get("run_id") for step in steps):
+        # The task stamps its steps, so this run genuinely owns none. Running
+        # someone else's is worse than running nothing.
+        return []
+    return steps
 
 
 async def _execute_workflow_orchestration(

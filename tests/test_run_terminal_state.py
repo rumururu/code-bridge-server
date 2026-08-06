@@ -493,5 +493,52 @@ class FailedRunNotifiesTest(_RunTerminalStateTestBase):
         self.assertEqual(get_notification_store().list_notifications(), [])
 
 
+class StepScopingFallbackTest(unittest.TestCase):
+    """The legacy fallback must not become a way back into the original bug.
+
+    `_steps_for_run` falls back to the task's whole step list so rows written
+    before steps carried a run_id still execute. If that fallback triggers
+    whenever *this run* has no rows — rather than when *no row on the task* is
+    stamped — then any run that reaches the loop without its own steps
+    inherits every earlier firing's history and starts replaying it, which is
+    exactly how a nightly agent came to run the same 52-minute device script
+    ten times in one fire.
+    """
+
+    @staticmethod
+    def _store(rows):
+        store = mock.Mock()
+        store.list_task_steps.return_value = rows
+        return store
+
+    def test_a_run_sees_only_its_own_steps(self):
+        rows = [
+            {"id": "s1", "run_id": "run_old"},
+            {"id": "s2", "run_id": "run_new"},
+        ]
+        scoped = task_orchestrator._steps_for_run(self._store(rows), "task_1", "run_new")
+        self.assertEqual([s["id"] for s in scoped], ["s2"])
+
+    def test_unstamped_rows_still_run(self):
+        """A task whose rows predate run stamping has to keep working."""
+        rows = [{"id": "s1"}, {"id": "s2"}]
+        scoped = task_orchestrator._steps_for_run(self._store(rows), "task_1", "run_new")
+        self.assertEqual([s["id"] for s in scoped], ["s1", "s2"])
+
+    def test_a_run_with_no_rows_on_a_stamped_task_gets_nothing(self):
+        """Running nothing beats running another run's work.
+
+        The task clearly stamps its steps, so a run owning none of them is a
+        bug somewhere else — inheriting 170 rows of history would turn that
+        bug into a replay loop.
+        """
+        rows = [
+            {"id": "s1", "run_id": "run_old"},
+            {"id": "s2", "run_id": "run_older"},
+        ]
+        scoped = task_orchestrator._steps_for_run(self._store(rows), "task_1", "run_new")
+        self.assertEqual(scoped, [])
+
+
 if __name__ == "__main__":
     unittest.main()
