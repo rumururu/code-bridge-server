@@ -797,7 +797,10 @@ async def _execute_single_workflow_task_step(
         launch_message=launch_message,
         step=step,
         previous_steps=_previous_completed_workflow_steps(
-            store.list_task_steps(task_id),
+            # This run's steps only: evidence handed to an LLM step must come
+            # from the run it is part of, not from whatever the same task did
+            # on some earlier night.
+            _steps_for_run(store, task_id, run_id),
             current_step=step,
         ),
     )
@@ -823,7 +826,7 @@ async def execute_task_orchestration(execution: dict[str, Any]) -> None:
     project_path = str(execution.get("project_path") or _global_task_path())
     launch_message = str(execution.get("launch_message") or "")
 
-    steps = store.list_task_steps(task_id)
+    steps = _steps_for_run(store, task_id, run_id)
     if _has_workflow_backed_steps(steps):
         await _execute_workflow_orchestration(
             task_id=task_id,
@@ -920,6 +923,35 @@ def _has_workflow_backed_steps(steps: list[dict[str, Any]]) -> bool:
     return False
 
 
+# What the scheduler calls "doing work" (agent/scheduler.py). A run in one of
+# these has not finished, so the schedule that owns it keeps skipping.
+_UNFINISHED_RUN_STATUSES = {"queued", "starting", "running"}
+
+
+def _steps_for_run(store: Any, task_id: str, run_id: str) -> list[dict[str, Any]]:
+    """The steps belonging to *this* run, in order.
+
+    ``list_task_steps`` is task-scoped, and every fire of a schedule creates a
+    fresh set of step rows on the same task — an agent that has run for three
+    months has hundreds. Walking that whole history instead of the current
+    run's own steps is how a scheduled agent ate itself on 2026-08-06: the
+    loop skipped every ``completed`` row, landed on a ``shell`` step left
+    ``running`` by a run three days earlier, ran it, and when it failed its
+    ``on_failure: goto_step: diagnose`` resolved to the *first* ``diagnose``
+    row on the task (long since completed), so the loop walked forward, hit
+    the same stale shell step again, and re-ran a 52-minute device script ten
+    times over 8h45m — the run never reaching a terminal state, and the
+    schedule skipping every firing behind it.
+
+    Rows written before steps carried a ``run_id`` (and hand-built rows in
+    tests) have none; when nothing matches, fall back to the full list rather
+    than running no steps at all.
+    """
+    steps = store.list_task_steps(task_id)
+    scoped = [step for step in steps if step.get("run_id") == run_id]
+    return scoped or steps
+
+
 async def _execute_workflow_orchestration(
     *,
     task_id: str,
@@ -931,6 +963,15 @@ async def _execute_workflow_orchestration(
     launch_message: str,
     steps: list[dict[str, Any]],
 ) -> None:
+    """Drive a workflow run and make sure it ends.
+
+    Every exit from the step loop below has to leave the run in a terminal
+    state (or deliberately parked on a human). An unfinished run is not just a
+    stale row: ``skip_if_active`` gives a *progressing* run no grace period at
+    all, so one run stuck at ``running`` silently swallows every later firing
+    of its schedule. Hence the belt-and-braces close-out at the end and the
+    catch-all around the loop.
+    """
     store = get_agent_store()
     store.update_run_status(run_id, "running")
     store.update_task(task_id, {"status": "running"})
@@ -945,6 +986,81 @@ async def _execute_workflow_orchestration(
         },
     )
 
+    try:
+        await _drive_workflow_steps(
+            task_id=task_id,
+            run_id=run_id,
+            provider_id=provider_id,
+            model=model,
+            project_name=project_name,
+            project_path=project_path,
+            launch_message=launch_message,
+            steps=steps,
+        )
+    except Exception as exc:
+        logger.exception(
+            "workflow orchestration failed task_id=%s run_id=%s", task_id, run_id
+        )
+        _finish_workflow_execution(
+            task_id=task_id,
+            run_id=run_id,
+            status="failed",
+            error={
+                "message": str(exc) or exc.__class__.__name__,
+                "type": exc.__class__.__name__,
+            },
+        )
+        return
+
+    _close_out_unfinished_run(task_id=task_id, run_id=run_id)
+
+
+def _close_out_unfinished_run(*, task_id: str, run_id: str) -> None:
+    """Fail a run whose work stopped without anyone ending it.
+
+    Reached only when a branch of the step loop returned without finishing or
+    parking the run. That is a bug in the loop when it happens, but leaving the
+    row at ``running`` turns that bug into a dead schedule, so close it here
+    and say plainly that nothing is driving it any more.
+    """
+    store = get_agent_store()
+    try:
+        run = store.get_run(run_id)
+    except Exception:
+        logger.exception("could not re-read run %s to confirm it finished", run_id)
+        return
+    if not isinstance(run, dict) or run.get("status") not in _UNFINISHED_RUN_STATUSES:
+        return
+    logger.error(
+        "workflow orchestration left run %s at %s with no work in progress; "
+        "closing it as failed",
+        run_id,
+        run.get("status"),
+    )
+    _finish_workflow_execution(
+        task_id=task_id,
+        run_id=run_id,
+        status="failed",
+        error={
+            "message": (
+                "The workflow stopped without finishing; nothing is driving this run."
+            )
+        },
+    )
+
+
+async def _drive_workflow_steps(
+    *,
+    task_id: str,
+    run_id: str,
+    provider_id: str,
+    model: str | None,
+    project_name: str,
+    project_path: str,
+    launch_message: str,
+    steps: list[dict[str, Any]],
+) -> None:
+    store = get_agent_store()
     step_index = 0
     transitions = 0
     max_transitions = max(10, len(steps) * 10)
@@ -1009,7 +1125,7 @@ async def _execute_workflow_orchestration(
                 )
                 if next_index is None:
                     return
-                steps = store.list_task_steps(task_id)
+                steps = _steps_for_run(store, task_id, run_id)
                 step_index = next_index
                 continue
             steps[step_index] = store.get_task_step(step["id"]) or step
@@ -1043,7 +1159,7 @@ async def _execute_workflow_orchestration(
                 )
                 if next_index is None:
                     return
-                steps = store.list_task_steps(task_id)
+                steps = _steps_for_run(store, task_id, run_id)
                 step_index = next_index
                 continue
             steps[step_index] = store.get_task_step(step["id"]) or step
@@ -1074,7 +1190,7 @@ async def _execute_workflow_orchestration(
                 )
                 if next_index is None:
                     return
-                steps = store.list_task_steps(task_id)
+                steps = _steps_for_run(store, task_id, run_id)
                 step_index = next_index
                 continue
             steps[step_index] = store.get_task_step(step["id"]) or step
@@ -1104,7 +1220,7 @@ async def _execute_workflow_orchestration(
                 )
                 if next_index is None:
                     return
-                steps = store.list_task_steps(task_id)
+                steps = _steps_for_run(store, task_id, run_id)
                 step_index = next_index
                 continue
             steps[step_index] = store.get_task_step(step["id"]) or step
@@ -1167,7 +1283,7 @@ async def _execute_workflow_orchestration(
             )
             if next_index is None:
                 return
-            steps = store.list_task_steps(task_id)
+            steps = _steps_for_run(store, task_id, run_id)
             step_index = next_index
             continue
         steps[step_index] = store.get_task_step(step["id"]) or step
@@ -2004,7 +2120,9 @@ def _finish_workflow_from_steps(*, task_id: str, run_id: str) -> None:
     """
     store = get_agent_store()
     failed_steps = [
-        step for step in store.list_task_steps(task_id) if step.get("status") == "failed"
+        step
+        for step in _steps_for_run(store, task_id, run_id)
+        if step.get("status") == "failed"
     ]
     if failed_steps:
         _finish_workflow_execution(
@@ -2391,6 +2509,130 @@ def _finish_workflow_execution(
         event_type=f"task.execution.{status}",
         app_event={"task_id": task_id, "result": result or {}, "error": error or {}},
     )
+    if status == "failed":
+        _notify_run_failed_best_effort(
+            store=store,
+            task=task,
+            run_id=run_id,
+            error=error,
+        )
+
+
+def _notify_run_failed_best_effort(
+    *,
+    store: Any,
+    task: dict[str, Any] | None,
+    run_id: str,
+    error: dict[str, Any] | None,
+) -> None:
+    """Tell the phone a run ended in failure, best-effort.
+
+    An unattended agent that dies at 3am and says nothing is the harm this
+    exists to prevent: the schedule keeps firing, the results panel keeps
+    filling with red, and nobody knows until someone opens the app days later.
+    A parked run already notifies (`_notify_waiting_for_user_best_effort`); a
+    failed one is at least as worth hearing about, because unlike a parked run
+    it will never resume on its own.
+
+    Strictly best-effort, for the same reason as the parked-run path: the run
+    is already finished and recorded by the time this runs. A notification
+    store failure or a dead FCM key must never change what the run says it
+    did — the worst acceptable outcome is the user reading it in the app
+    instead of on a lock screen.
+    """
+    try:
+        from agent.notification_store import get_notification_store
+
+        agent_id = task.get("assigned_agent_id") if isinstance(task, dict) else None
+        agent_name = None
+        if agent_id:
+            agent = store.get_agent(str(agent_id))
+            if isinstance(agent, dict):
+                agent_name = agent.get("name")
+        task_title = (task.get("title") if isinstance(task, dict) else None) or "A task"
+
+        title = f"{agent_name or 'An agent'} run failed"
+        body = "\n".join(
+            [f"{task_title}: {_run_failure_reason(error)}", *_failed_step_lines(store, run_id)]
+        )
+
+        notification = get_notification_store().create(
+            title=title,
+            body=body,
+            level="error",
+            run_id=run_id,
+            task_id=task.get("id") if isinstance(task, dict) else None,
+            agent_id=agent_id,
+        )
+        _push_notification_best_effort(
+            notification=notification,
+            title=title,
+            body=body,
+            level="error",
+        )
+    except Exception:
+        logger.exception(
+            "Run-failed notification failed for run_id=%s; the run is still failed",
+            run_id,
+        )
+
+
+def _run_failure_reason(error: dict[str, Any] | None) -> str:
+    """One line saying why, for a notification body.
+
+    "The run failed" with no reason is not actionable at 3am — the whole point
+    of the message is that the reader can decide whether to get up.
+    """
+    candidates: list[Any] = []
+    if isinstance(error, dict):
+        candidates.append(error.get("message"))
+        nested = error.get("error")
+        if isinstance(nested, dict):
+            candidates.append(nested.get("message"))
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return _truncate_workflow_evidence(candidate.strip(), 500)
+    return "No reason was recorded."
+
+
+def _failed_step_lines(store: Any, run_id: str) -> list[str]:
+    """Name the steps that failed, with whatever evidence they kept.
+
+    For a shell step that is the exit code and the tail of stderr, which is
+    the difference between "the nightly device cycle failed" and "the phone
+    was offline".
+    """
+    try:
+        run = store.get_run(run_id)
+        task_id = run.get("task_id") if isinstance(run, dict) else None
+        if not isinstance(task_id, str) or not task_id:
+            return []
+        lines: list[str] = []
+        for step in _steps_for_run(store, task_id, run_id):
+            if step.get("status") != "failed":
+                continue
+            evidence = _most_telling_evidence_line(
+                _workflow_step_output_summary(dict(step.get("output") or {}))
+            )
+            detail = f" — {evidence}" if evidence else ""
+            lines.append(f"Failed step: {step.get('title') or step.get('id')}{detail}")
+        return lines[:3]
+    except Exception:
+        logger.exception("could not summarize failed steps for run %s", run_id)
+        return []
+
+
+def _most_telling_evidence_line(summary: list[str]) -> str:
+    """Pick the one line from a step's evidence worth putting in a push.
+
+    A stderr tail ("adb: device offline") tells the reader whether to get out
+    of bed; "shell.status: failed" does not.
+    """
+    for marker in (".stderr:", ".error:", ".exit_code:", ".message:"):
+        for line in summary:
+            if marker in line:
+                return _truncate_workflow_evidence(line.strip(), 300)
+    return _truncate_workflow_evidence(summary[0].strip(), 300) if summary else ""
 
 
 def _workflow_step_message(
@@ -2914,6 +3156,15 @@ def _finish_execution(
         event_type=f"task.execution.{status}",
         app_event={"task_id": task_id, "result": result or {}, "error": error or {}},
     )
+    if status == "failed":
+        # Same reasoning as the workflow path: an agent without a flow still
+        # runs unattended on a schedule, and still has nobody watching it fail.
+        _notify_run_failed_best_effort(
+            store=store,
+            task=store.get_task(task_id),
+            run_id=run_id,
+            error=error,
+        )
 
 
 def _complete_step(
