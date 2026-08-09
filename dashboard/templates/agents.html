@@ -772,9 +772,15 @@
                             <input id="agentDescription" class="input" data-i18n-ph="ph_agent_desc" placeholder="What this agent is for" oninput="markDefEdited()">
                         </div>
                     </div>
+                    <!-- Filled by applyAgentOrigin(). An agent registered from a
+                         Claude Code agent file runs that file, reread on every run,
+                         so the box below is a stub and typing in it changes nothing —
+                         which is why it is also switched to readonly there. -->
+                    <div id="agentOriginNotice" class="note" style="display:none;"></div>
                     <div class="field">
                         <label for="agentPrompt" data-i18n="system_prompt">System prompt</label>
                         <textarea id="agentPrompt" class="input" rows="4" data-i18n-ph="ph_prompt" placeholder="You are ..." oninput="markDefEdited()"></textarea>
+                        <div id="agentPromptLockedHint" class="hint" style="margin:6px 0 0; display:none;"></div>
                     </div>
                     <details>
                         <summary style="cursor:pointer; color: var(--text-secondary); font-size:13px; margin-bottom:8px;" data-i18n="model_settings">Model settings</summary>
@@ -1027,6 +1033,10 @@
                 back: 'Back', create_agent: 'Create agent', save_changes: 'Save changes',
 
                 name: 'Name', description: 'Description', system_prompt: 'System prompt',
+                origin_file: 'Runs from a file',
+                origin_prompt_locked: 'Read-only. Edit the file to change the prompt.',
+                origin_unknown: 'Origin unknown',
+                origin_unknown_locked: 'Read-only until the server says where this agent came from.',
                 model_settings: 'Model settings', provider: 'Provider', model: 'Model',
                 hint_builder: 'Same Configurator the app talks to. It drafts the agent for you; press Create agent when it says it is ready.',
                 send: 'Send', reset: 'Reset',
@@ -1233,6 +1243,10 @@
                 back: '뒤로', create_agent: '에이전트 만들기', save_changes: '변경 저장',
 
                 name: '이름', description: '설명', system_prompt: '시스템 프롬프트',
+                origin_file: '파일에서 실행됨',
+                origin_prompt_locked: '읽기 전용입니다. 프롬프트를 바꾸려면 파일을 편집하세요.',
+                origin_unknown: '출처 알 수 없음',
+                origin_unknown_locked: '이 에이전트의 출처를 서버가 확인할 때까지 읽기 전용입니다.',
                 model_settings: '모델 설정', provider: '제공자', model: '모델',
                 hint_builder: '앱이 쓰는 것과 같은 Configurator입니다. 에이전트 초안을 잡아주고, 준비됐다고 하면 만들기를 누르세요.',
                 send: '보내기', reset: '초기화',
@@ -2367,8 +2381,16 @@
                 : `<div class="empty">${escapeHtml(currentLang === 'ko'
                         ? '단계가 없습니다. 스케줄이 이 에이전트를 불러도 실행할 것이 없습니다.'
                         : 'No steps. A schedule can fire this agent, but there is nothing for it to run.')}</div>`;
+            const origin = agent.origin || null;
+            const originEditable = origin ? origin.prompt_editable === true : false;
+            const originPath = origin && origin.source_path ? origin.source_path : '';
+            const originNote = originEditable ? '' : `
+                <div class="note">
+                    <strong>${escapeHtml(originPath ? t('origin_file') : t('origin_unknown'))}</strong>
+                    <div style="margin-top:2px; word-break:break-all;">${escapeHtml(originPath || t('origin_unknown_locked'))}</div>
+                </div>`;
             document.getElementById('stepsSummary').innerHTML =
-                `<p class="hint">${escapeHtml(agent.description || '')}</p>` + summary;
+                originNote + `<p class="hint">${escapeHtml(agent.description || '')}</p>` + summary;
 
             const picker = document.getElementById('schedAgent');
             if (picker) picker.value = agent.id;
@@ -2469,6 +2491,7 @@
                 document.getElementById(id).value = '';
             });
             document.getElementById('agentProvider').value = '';
+            applyAgentOrigin({ kind: 'authored', prompt_editable: true, source_path: null });
             document.getElementById('editorTitle').textContent = t('new_agent');
             setStatus('editorStatus', '');
             document.getElementById('saveBtn').textContent = t('create_agent');
@@ -2491,6 +2514,9 @@
             document.getElementById('agentModel').value = agent.model || '';
             document.getElementById('agentPrompt').value = agent.system_prompt || '';
             steps = Array.isArray(agent.flow_json) ? agent.flow_json.map((step) => ({ ...step })) : [];
+            // After `steps`, because it re-renders them: the instruction field
+            // of an llm step is locked by the same origin as the prompt above.
+            applyAgentOrigin(agent.origin);
             document.getElementById('editorTitle').textContent = agent.name || agent.id;
             setStatus('editorStatus', '');
             document.getElementById('saveBtn').textContent = t('save_changes');
@@ -2732,13 +2758,18 @@
         function renderTextField(step, index, field, label, help, multiline) {
             const raw = getStepField(step, field.key);
             const value = raw === undefined || raw === null ? '' : String(raw);
+            const locked = stepFieldLocked(step, field.key);
+            const lockAttr = locked ? ' readonly' : '';
             const control = multiline
-                ? `<textarea class="input" rows="2" oninput="updateStepField(${index}, '${field.key}', this.value)">${escapeHtml(value)}</textarea>`
-                : `<input class="input" value="${escapeHtml(value)}" placeholder="${escapeHtml(t('optional'))}" oninput="updateStepField(${index}, '${field.key}', this.value)">`;
+                ? `<textarea class="input" rows="2"${lockAttr} oninput="updateStepField(${index}, '${field.key}', this.value)">${escapeHtml(value)}</textarea>`
+                : `<input class="input" value="${escapeHtml(value)}"${lockAttr} placeholder="${escapeHtml(t('optional'))}" oninput="updateStepField(${index}, '${field.key}', this.value)">`;
+            const note = locked
+                ? (agentOrigin.source_path ? t('origin_prompt_locked') : t('origin_unknown_locked'))
+                : help;
             return `
                     <div class="field">
                         <label>${escapeHtml(label)}</label>
-                        ${help ? `<div class="hint" style="margin:0 0 6px;">${escapeHtml(help)}</div>` : ''}
+                        ${note ? `<div class="hint" style="margin:0 0 6px;">${escapeHtml(note)}</div>` : ''}
                         ${control}
                     </div>`;
         }
@@ -2861,6 +2892,56 @@
             // step editor is never an empty dropdown.
             return `<option value="llm"${type === 'llm' ? ' selected' : ''}>${escapeHtml(t('s_type_llm'))}</option>
                             <option value="shell"${type === 'shell' ? ' selected' : ''}>${escapeHtml(t('s_type_shell'))}</option>`;
+        }
+
+        // Where the agent in the editor came from. `prompt_editable` is the
+        // only field the UI branches on: a third origin added to the server
+        // later arrives as a `kind` this page has never heard of, and must
+        // still not get an editable prompt box out of that ignorance. No
+        // origin at all (an older server, a dropped field) is treated the same
+        // way — locked — because an agent wrongly shown as editable is the
+        // whole defect this exists to fix.
+        let agentOrigin = { kind: 'authored', prompt_editable: true, source_path: null };
+
+        function originPromptEditable() {
+            return agentOrigin && agentOrigin.prompt_editable === true;
+        }
+
+        function applyAgentOrigin(origin) {
+            agentOrigin = origin && typeof origin === 'object'
+                ? origin
+                : { kind: 'unknown', prompt_editable: false, source_path: null };
+            const editable = originPromptEditable();
+            const path = agentOrigin.source_path || '';
+            const notice = document.getElementById('agentOriginNotice');
+            const hint = document.getElementById('agentPromptLockedHint');
+            const prompt = document.getElementById('agentPrompt');
+
+            if (notice) {
+                notice.style.display = editable ? 'none' : '';
+                notice.innerHTML = editable ? '' :
+                    `<strong>${escapeHtml(path ? t('origin_file') : t('origin_unknown'))}</strong>` +
+                    (path ? `<div style="margin-top:2px; word-break:break-all;">${escapeHtml(path)}</div>` : '');
+            }
+            if (hint) {
+                hint.style.display = editable ? 'none' : '';
+                hint.textContent = editable ? ''
+                    : (path ? t('origin_prompt_locked') : t('origin_unknown_locked'));
+            }
+            if (prompt) prompt.readOnly = !editable;
+            renderSteps();
+        }
+
+        // An llm step's instruction is not relayed either: for a file-backed
+        // agent the orchestrator prints a pointer at the definition file in its
+        // place (task_orchestrator._workflow_step_message), so text typed here
+        // would be stored and never read. Shell and notify steps are untouched
+        // — they run in full.
+        function stepFieldLocked(step, fieldKey) {
+            if (fieldKey !== 'instruction') return false;
+            const type = (step && step.type) || 'llm';
+            if (type !== 'llm') return false;
+            return !originPromptEditable();
         }
 
         function renderSteps() {
@@ -3033,11 +3114,16 @@
             const body = {
                 name,
                 description: document.getElementById('agentDescription').value.trim() || null,
-                system_prompt: document.getElementById('agentPrompt').value,
                 provider_id: document.getElementById('agentProvider').value || null,
                 model: document.getElementById('agentModel').value.trim() || null,
                 flow_json: collectSteps(),
             };
+            // Omitted for a file-backed agent. The server refuses a changed
+            // prompt anyway, and sending the stub back would turn a save that
+            // only renamed the agent into a needless round trip through a 409.
+            if (originPromptEditable()) {
+                body.system_prompt = document.getElementById('agentPrompt').value;
+            }
             setStatus('editorStatus', t('saving'));
 
             // A new agent that came out of a conversation goes through the
@@ -3051,7 +3137,9 @@
                     ...builderDraft,
                     name: body.name,
                     description: body.description,
-                    system_prompt: body.system_prompt,
+                    system_prompt: body.system_prompt !== undefined
+                        ? body.system_prompt
+                        : builderDraft.system_prompt,
                     provider_id: body.provider_id,
                     model: body.model,
                     flow: body.flow_json,

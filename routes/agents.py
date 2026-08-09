@@ -67,6 +67,11 @@ from agent.agent_models import (
     BrowserHandoffActionCreate,
     TaskDraft,
 )
+from agent.agent_origin import (
+    AgentPromptNotEditableError,
+    assert_patch_reaches_execution,
+    resolve_agent_origin,
+)
 from agent.agent_store import (
     AgentStoreConflictError,
     PseudoAgentProtectedError,
@@ -243,6 +248,13 @@ def _as_utc_iso(stamp: str) -> str | None:
 
 
 def _agent_with_next_fire(agent: dict[str, Any]) -> dict[str, Any]:
+    """The stored agent plus everything a client needs that is not a column.
+
+    ``origin`` is the one that changes what the client is allowed to *offer*.
+    Without it an agent registered from a Claude Code agent file looks exactly
+    like one authored here, so every client hands the user a prompt box for
+    text that will never execute — see :mod:`agent.agent_origin`.
+    """
     agent_id = str(agent["id"])
     next_fire = compute_next_fire_at(agent_id)
     activation = _store().get_agent_activation_summary(agent_id)
@@ -252,6 +264,7 @@ def _agent_with_next_fire(agent: dict[str, Any]) -> dict[str, Any]:
         "next_fire_at": next_fire.isoformat() if next_fire else None,
         **_agent_run_activity(agent_id),
         "activation": activation,
+        "origin": resolve_agent_origin(agent_id).to_view(),
     }
 
 
@@ -1532,9 +1545,35 @@ async def update_agent(
     agent_id: str,
     body: AgentUpdate,
 ) -> dict[str, Any] | JSONResponse:
+    """Apply a patch, minus any part of it that would be stored and never run.
+
+    The refusal lives here, not in a screen. Every client — the phone, the
+    dashboard, a script somebody wrote — reaches an agent through this route,
+    so a guard that only exists in one of their UIs is a guard the product does
+    not have: the next client to be written wipes the stub that explains why
+    the prompt is not the prompt. See :mod:`agent.agent_origin` for which
+    fields are refused and, more importantly, which are not.
+    """
     patch = body.model_dump(exclude_unset=True)
     if "flow_json" in patch:
         patch["flow_json"] = _normalize_agent_workflow(patch["flow_json"])
+    existing = _store().get_agent(agent_id)
+    if existing:
+        try:
+            assert_patch_reaches_execution(
+                agent=existing,
+                patch=patch,
+                origin=resolve_agent_origin(agent_id),
+            )
+        except AgentPromptNotEditableError as exc:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "agent_prompt_not_editable",
+                    "detail": str(exc),
+                    "origin": exc.origin.to_view(),
+                },
+            )
     try:
         agent = _store().update_agent(agent_id, patch)
     except PseudoAgentProtectedError:
