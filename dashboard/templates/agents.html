@@ -743,6 +743,22 @@
                 </div>
                 <div class="card-body">
                     <div class="def-scroll">
+                    <!-- Importing an existing Claude Code subagent lands in Create, not
+                         Scripts & permissions: like the manual form and the Configurator
+                         chat beside it, one action here produces a full agent record
+                         (name, prompt, tools, one llm step) — a script registration
+                         never does that. It is a third way to reach "New agent", so it
+                         sits beside the other two rather than on the scripts screen.
+                         Collapsed by default so it does not compete with them until
+                         opened; opening it is also what triggers the one-time fetch of
+                         GET /subagents (see onSubagentImportToggle). -->
+                    <details id="subagentImportDetails" ontoggle="onSubagentImportToggle(this)">
+                        <summary style="cursor:pointer; color: var(--text-secondary); font-size:13px; margin-bottom:8px;" data-i18n="subagent_import_summary">Import a Claude Code subagent</summary>
+                        <div id="subagentImportBody">
+                            <div class="empty" data-i18n="subagent_loading">Loading&hellip;</div>
+                        </div>
+                    </details>
+
                     <p class="hint" data-i18n="hint_definition">This is the agent as it stands. Say what you want on the right and it fills in here; edit anything directly.</p>
 
                     <input type="hidden" id="agentId">
@@ -1171,6 +1187,25 @@
                 r_gate: 'Manual step',
                 fix_gate: 'A scheduled run stops here every time for a human response — no permission setting can skip it',
                 step_parks_note: 'This step pauses the run and waits for you to respond, every time — no permission setting can skip it.',
+
+                subagent_import_summary: 'Import a Claude Code subagent',
+                subagent_loading: 'Loading…',
+                subagent_load_failed: 'Could not load subagents',
+                subagent_runs_from_file: 'This runs from the file, not a copy. Every run reads the .md file fresh and executes whatever prompt and tools it declares at that moment — editing the prompt here changes nothing. If the file is moved, deleted, or becomes unparseable, the run fails naming it.',
+                subagent_tools_enforced_note: "Each candidate's declared tools below are enforced at run time, not decorative — but what attaches to the running session can be a subset of what the file lists (verified: a subagent declaring Read, Glob, Grep, Bash ran with only Read and Bash available). Treat the list as the outer bound of what a run can do, not a guarantee every named tool is present.",
+                subagent_permissions_hint: 'An imported agent is a single llm step, and an llm step can reach for any of these before it can run unattended. provider.tool is the broadest one — it covers any tool the model asks for beyond the other three, including MCP tools.',
+                subagent_none_found: 'No importable subagents found on this machine.',
+                subagent_tools_label: 'Declared tools',
+                subagent_tools_none: '(none declared)',
+                subagent_import_btn: 'Import',
+                subagent_importing: 'Importing…',
+                subagent_import_failed: 'Import failed',
+                subagent_imported_toast: 'Imported. It has no schedule or permission yet — fix those on the readiness rail below.',
+                subagent_already_imported_toast: 'Already imported — opening the existing agent.',
+                subagent_excluded_summary: '{n} excluded — not offered for import',
+                subagent_excluded_dispatch: 'Dispatched by another installed subagent — would refuse every scheduled run',
+                subagent_excluded_disclaimed: 'Its own description says it is not for direct invocation',
+                subagent_skipped_note: '{n} file(s) on this machine could not be parsed as a subagent.',
             },
             ko: {
                 nav_dashboard: '대시보드', nav_agents: '에이전트', nav_settings: '설정',
@@ -1358,6 +1393,25 @@
                 r_gate: '수동 대기',
                 fix_gate: '예약된 실행이 매번 이 단계에서 멈춰 사람의 응답을 기다립니다 — 어떤 권한 설정도 이를 건너뛰게 하지 못합니다',
                 step_parks_note: '이 단계는 실행마다 멈춰서 응답을 기다립니다 — 어떤 권한 설정도 이를 건너뛰게 하지 못합니다.',
+
+                subagent_import_summary: 'Claude Code 서브에이전트 가져오기',
+                subagent_loading: '불러오는 중…',
+                subagent_load_failed: '서브에이전트를 불러오지 못했습니다',
+                subagent_runs_from_file: '이 에이전트는 파일을 복사한 것이 아니라 파일 자체를 실행합니다. 실행할 때마다 .md 파일을 새로 읽어 그 순간 선언된 프롬프트와 도구를 그대로 실행합니다 — 여기서 프롬프트를 고쳐도 아무 효과가 없습니다. 파일이 이동·삭제되거나 파싱할 수 없게 되면, 실행은 그 파일을 지목하며 실패합니다.',
+                subagent_tools_enforced_note: '아래 각 후보가 선언한 도구는 실행 시 실제로 적용되며 장식이 아닙니다 — 다만 파일에 나열된 도구 전부가 실행 세션에 그대로 붙는 것은 아닙니다 (실측: Read, Glob, Grep, Bash를 선언한 서브에이전트가 실제로는 Read, Bash만 가진 세션으로 실행됨). 선언된 목록은 실행이 할 수 있는 일의 상한으로 보되, 나열된 도구가 전부 존재한다는 보장으로 보지 마세요.',
+                subagent_permissions_hint: '가져온 에이전트는 llm 단계 하나뿐이며, llm 단계는 무인 실행 전에 아래 작업 전부를 요청할 수 있습니다. provider.tool이 가장 넓은 범위입니다 — 나머지 세 가지를 제외한, MCP 도구를 포함해 모델이 요청하는 그 외 모든 도구를 포괄합니다.',
+                subagent_none_found: '이 기기에서 가져올 수 있는 서브에이전트를 찾지 못했습니다.',
+                subagent_tools_label: '선언된 도구',
+                subagent_tools_none: '(선언 없음)',
+                subagent_import_btn: '가져오기',
+                subagent_importing: '가져오는 중…',
+                subagent_import_failed: '가져오기 실패',
+                subagent_imported_toast: '가져왔습니다. 아직 스케줄과 권한이 없습니다 — 아래 준비 상태 표시에서 고치세요.',
+                subagent_already_imported_toast: '이미 가져온 파일입니다 — 기존 에이전트를 엽니다.',
+                subagent_excluded_summary: '{n}개 제외됨 — 가져오기 목록에 없음',
+                subagent_excluded_dispatch: '다른 설치된 서브에이전트가 실행시키는 대상 — 예약 실행마다 거부됩니다',
+                subagent_excluded_disclaimed: '설명에 직접 호출용이 아니라고 명시되어 있습니다',
+                subagent_skipped_note: '이 기기의 파일 {n}개는 서브에이전트로 파싱하지 못했습니다.',
             },
         };
 
@@ -1412,6 +1466,7 @@
             const saveBtn = document.getElementById('saveBtn');
             if (saveBtn) saveBtn.textContent = t(selectedAgentId ? 'save_changes' : 'create_agent');
             if (currentView === 'create') refreshBuildPanels();
+            if (subagentSweep) renderSubagentImport();
         }
 
         // The workspace is sized against the real header rather than a guessed
@@ -3837,6 +3892,158 @@
             // parked right now still has to be resumed from the app.
             toast(decision === 'approve_rule' ? 'Allowed from now on' : 'Recorded');
             reloadAll();
+        }
+
+        // --- Subagent import --------------------------------------------------
+        //
+        // A Claude Code subagent (YAML frontmatter + prompt body already sitting
+        // on this machine) reaches the dashboard through GET/POST
+        // /api/dashboard/agent/subagents (server/routes/subagents.py,
+        // agent/subagent_sources.py) — live endpoints with no prior UI path to
+        // either one. This section is that path.
+
+        // The whole sweep (`{candidates, excluded, skipped}`), or null before
+        // the first fetch. Cached rather than re-fetched on every open of the
+        // <details> — a filesystem sweep across every registered project's
+        // .claude/agents plus every installed plugin is not free, and nothing
+        // here changes without the user editing files on disk, which the
+        // explicit refresh button below covers.
+        let subagentSweep = null;
+        // source_path values with an import request in flight, so a slow
+        // request cannot be double-clicked into a second POST while the first
+        // is still resolving.
+        let subagentImporting = new Set();
+
+        function onSubagentImportToggle(details) {
+            if (details.open && !subagentSweep) loadSubagentSweep();
+        }
+
+        async function loadSubagentSweep() {
+            const host = document.getElementById('subagentImportBody');
+            host.innerHTML = `<div class="empty">${escapeHtml(t('subagent_loading'))}</div>`;
+            const result = await api('/subagents');
+            if (!result || result.error) {
+                host.innerHTML = `<div class="empty">${escapeHtml((result && result.error) || t('subagent_load_failed'))}</div>`;
+                return;
+            }
+            subagentSweep = result;
+            renderSubagentImport();
+        }
+
+        // Maps `excluded_reason` (agent/subagent_eligibility.py) to copy. Any
+        // reason this file does not recognise still shows up verbatim (the
+        // reason string itself, e.g. a future value added server-side before
+        // this map is updated) — never silently dropped, same principle as
+        // operationLabel's fallback for an unmapped operation.
+        function subagentExclusionLabel(reason) {
+            if (reason === 'dispatch_target') return t('subagent_excluded_dispatch');
+            if (reason === 'direct_invocation_disclaimed') return t('subagent_excluded_disclaimed');
+            return reason;
+        }
+
+        function renderSubagentCandidateRow(candidate) {
+            const tools = candidate.tools.length ? candidate.tools.join(', ') : t('subagent_tools_none');
+            const meta = [candidate.location, `${t('subagent_tools_label')}: ${tools}`];
+            if (candidate.model) meta.push(candidate.model);
+            return `
+                <div class="roster-item" style="cursor:default;">
+                    <div class="roster-name">${escapeHtml(candidate.name)}</div>
+                    ${candidate.description ? `<div class="hint" style="margin:2px 0 6px;">${escapeHtml(candidate.description)}</div>` : ''}
+                    <div class="roster-meta">${meta.map((value) => `<span>${escapeHtml(value)}</span>`).join('<span>&middot;</span>')}</div>
+                    <div class="actions" style="margin-top:8px;">
+                        <button class="btn btn-secondary btn-xs" data-candidate-id="${escapeHtml(candidate.candidate_id)}" onclick="importSubagent(this)">${escapeHtml(t('subagent_import_btn'))}</button>
+                    </div>
+                </div>`;
+        }
+
+        function renderSubagentImport() {
+            const host = document.getElementById('subagentImportBody');
+            if (!subagentSweep) return;
+            const candidates = subagentSweep.candidates || [];
+            const excluded = subagentSweep.excluded || [];
+            const skipped = subagentSweep.skipped || [];
+
+            // The one-step `llm` workflow every import produces needs exactly
+            // the operations `stepOperations['llm']` names — fetched once from
+            // GET /policies/step-operations and applied here with the same
+            // operationsForStep/operationLabel helpers the readiness rail and
+            // its permission-fix modal already use (see openPermissionsFixModal
+            // above), not a second hand-written list.
+            const needed = operationsForStep({ type: 'llm' });
+            const opsPreview = needed.map((value) => {
+                const op = policyOperations.find((candidate) => candidate.value === value) || { value };
+                return `<span class="badge">${escapeHtml(operationLabel(op))}</span>`;
+            }).join('');
+
+            const candidateRows = candidates.length
+                ? candidates.map(renderSubagentCandidateRow).join('')
+                : `<div class="empty">${escapeHtml(t('subagent_none_found'))}</div>`;
+
+            const excludedRows = excluded.map((item) => `
+                <div class="roster-item" style="cursor:default;">
+                    <div class="roster-name">${escapeHtml(item.name)}</div>
+                    <div class="roster-meta">${escapeHtml(subagentExclusionLabel(item.excluded_reason))}</div>
+                    <div class="hint" style="margin:2px 0 0;">${escapeHtml(item.excluded_detail)}</div>
+                </div>`).join('');
+
+            const excludedBlock = excluded.length ? `
+                <details style="margin-top:12px;">
+                    <summary style="cursor:pointer; color: var(--text-secondary); font-size:13px;">${escapeHtml(t('subagent_excluded_summary').replace('{n}', excluded.length))}</summary>
+                    <div style="margin-top:8px;">${excludedRows}</div>
+                </details>` : '';
+
+            const skippedNote = skipped.length
+                ? `<p class="hint">${escapeHtml(t('subagent_skipped_note').replace('{n}', skipped.length))}</p>`
+                : '';
+
+            host.innerHTML = `
+                <div class="note">${escapeHtml(t('subagent_runs_from_file'))}</div>
+                <div class="note">${escapeHtml(t('subagent_tools_enforced_note'))}</div>
+                <p class="hint">${escapeHtml(t('subagent_permissions_hint'))}</p>
+                <div style="margin: 0 0 12px;">${opsPreview}</div>
+                <div class="actions" style="margin: 0 0 10px;">
+                    <button class="btn btn-secondary btn-xs" onclick="loadSubagentSweep()">${escapeHtml(t('refresh'))}</button>
+                </div>
+                <div id="subagentCandidateList">${candidateRows}</div>
+                ${excludedBlock}
+                ${skippedNote}`;
+        }
+
+        // Importing does not need a modal: unlike granting a permission or
+        // creating a schedule, there is nothing here for the user to choose —
+        // the request is just the file path a fresh sweep already offered.
+        // What happens after is the part that matters (see the handoff below).
+        async function importSubagent(button) {
+            const candidateId = button.dataset.candidateId;
+            const candidate = ((subagentSweep && subagentSweep.candidates) || [])
+                .find((item) => item.candidate_id === candidateId);
+            if (!candidate || subagentImporting.has(candidate.source_path)) return;
+            subagentImporting.add(candidate.source_path);
+            const originalLabel = button.textContent;
+            button.disabled = true;
+            button.textContent = t('subagent_importing');
+            const result = await api('/subagents/import', {
+                method: 'POST',
+                body: JSON.stringify({ source_path: candidate.source_path }),
+            });
+            subagentImporting.delete(candidate.source_path);
+            if (!result || result.error) {
+                toast((result && result.error) || t('subagent_import_failed'));
+                button.disabled = false;
+                button.textContent = originalLabel;
+                return;
+            }
+            toast(result.created ? t('subagent_imported_toast') : t('subagent_already_imported_toast'));
+            // The import produced a one-step agent with no schedule and no
+            // granted permission — it cannot run yet. Landing on a success
+            // toast here is exactly the "created but cannot run" gap this
+            // project already fixed once (the readiness rail's fix-in-place
+            // modals) — so this hands off to that rail with the new agent
+            // selected, chips visibly unmet, instead of leaving the user on
+            // the Create screen believing the job is done.
+            await reloadAll();
+            await selectAgent(result.agent.id);
+            goManage();
         }
 
         // --- Bootstrap ------------------------------------------------------
