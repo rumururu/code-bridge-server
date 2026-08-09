@@ -1,59 +1,82 @@
-"""Discover Claude Code subagents on this machine and import one as an agent.
+"""Discover agent definition files on this machine and import one as an agent.
 
-A Claude subagent (YAML frontmatter + a markdown body that is its system
-prompt) already exists as a file the user wrote and trusts, but it only ever
-runs when a human invokes it from a Claude Code session — no schedule, no
-result history, no notification. Code Bridge has all of that. This module is
-the bridge: it walks the places subagent files live, parses what it finds,
-and turns a chosen one into a Code Bridge agent that *points at* that file.
+A *CLI agent* is an agent definition a person already authored with their
+coding CLI — YAML frontmatter plus a markdown body that is its system prompt.
+It exists as a file the user wrote and trusts, but it only ever runs when a
+human invokes it from that CLI's own session: no schedule, no result history,
+no notification. Code Bridge has all of that. This module is the bridge: it
+walks the places those files live, parses what it finds, and turns a chosen one
+into a Code Bridge agent that *points at* that file.
 
-Importing does not copy the prompt. The file is read again on every run and
-handed to the Claude session as an agent definition (see
-:mod:`agent.subagent_runtime`), so what executes is what the file says today
-and the ``tools:`` the author declared are actually enforced. What this module
-writes into the agent record is a reference stub
-(:func:`subagent_reference_prompt`) plus the one-step workflow the rest of the
-system expects an agent to have.
+The feature is deliberately not named after Claude's concept. It began as
+"subagent" — Claude Code's word for a definition a *parent agent dispatches* —
+which was wrong twice over: these are agents a user authored, not agents
+something else dispatches, and nothing about the idea is Claude-specific. What
+*is* Claude-specific right now is the implementation, and that is stated rather
+than hidden: Claude Code is the only CLI here whose agent definitions can
+actually be executed as definitions, so it is the only source.
 
-If this regresses, three different things break for the user:
+Adding a second CLI is not a matter of pointing this at another directory. The
+bar is that the CLI can be *handed* a definition, so the ``tools:`` its author
+declared are enforced when it runs. Two CLIs were checked and neither clears
+it:
 
-- **Discovery drift** (``discover_subagent_candidates``): a real subagent file
-  stops showing up as importable, or a malformed one crashes the whole sweep
-  instead of being reported and skipped. Either way "let the server discover
-  them" silently stops being true, and the failure is invisible until someone
-  notices an agent they expected to import just isn't in the list.
-- **Offering agents that cannot run alone**: most installed subagents are
-  workers a parent dispatches with a payload, and scheduling one produces a
-  refusal every night. They are filtered out — and reported in ``excluded``
-  with a reason, because an agent silently missing from the list is its own
-  bug. See :mod:`agent.subagent_eligibility`.
-- **Import drift** (``import_subagent``): importing produces an agent that
-  cannot run (empty ``system_prompt``, no workflow step, so the readiness rail
-  reads "steps: not ready"), or importing the same file twice quietly creates
-  a second agent instead of returning the first one.
+- **Codex** has no agent-definition concept at all — no directory, no
+  ``--agent``.
+- **Antigravity** (``agy``) has definition files on disk and an ``--agent``
+  flag, but the flag does not work: verified 2026-08, ``agy --agent <name>``
+  does not apply the named persona, and ``agy --agent <nonexistent> -p "OK"``
+  returns ``OK`` with no error, so it does not even validate. The only way to
+  run one would be to paste its prompt into the message, which would leave its
+  declared tools unenforced. An import that presents "your agent, on a
+  schedule" while actually running a plain session with a prompt pasted in is
+  not a weaker version of this feature; it is a different thing wearing its
+  name. So agy definitions are not discovered.
 
-Three discovery locations, matching how Claude Code itself resolves
-subagents:
+Nothing here guesses at a format, and a second source becomes a second entry in
+:func:`_all_source_locations` once a CLI can genuinely run one, not before.
+
+Three discovery locations, matching how Claude Code itself resolves agents:
 
 - **User**: ``~/.claude/agents/*.md``
 - **Project**: ``<project>/.claude/agents/*.md`` for the server's own working
-  directory and every project Code Bridge has registered (``ProjectDB``) —
-  Code Bridge manages many projects, and a subagent authored for one of them
-  lives in that project's own ``.claude/agents``, not the server's.
+  directory *and every project Code Bridge has registered* (``ProjectDB``) —
+  Code Bridge manages many projects, and an agent authored for one of them
+  lives in that project's own ``.claude/agents``, not the server's. Walking
+  only the server's cwd would silently hide every per-project agent the user
+  has, on a machine whose whole job is managing several projects.
 - **Plugin**: ``~/.claude/plugins/marketplaces/*/plugins/*/agents/*.md`` —
   the only location with real content on the machine this was built against;
   user and project dirs are commonly empty or absent entirely.
 
-Codex (``~/.codex/automations/``) and Antigravity have no discoverable agent
-format as of this writing (the former is an empty directory; the latter has
-no filesystem convention at all). Nothing here guesses at a format for them —
-:func:`discover_subagent_candidates` only walks the three Claude locations
-above, and a fourth source becomes a fourth entry in
-``_all_source_locations`` once its format is actually known, not before.
+Importing does not copy the prompt. The file is read again on every run and
+handed to the Claude session as an agent definition (see
+:mod:`agent.cli_agent_runtime`), so what executes is what the file says today
+and the ``tools:`` the author declared are actually enforced. What this module
+writes into the agent record is a reference stub
+(:func:`cli_agent_reference_prompt`) plus the one-step workflow the rest of the
+system expects an agent to have.
+
+If this regresses, three different things break for the user:
+
+- **Discovery drift** (``discover_cli_agents``): a real agent file stops
+  showing up as importable, or a malformed one crashes the whole sweep
+  instead of being reported and skipped. Either way "let the server discover
+  them" silently stops being true, and the failure is invisible until someone
+  notices an agent they expected to import just isn't in the list.
+- **Offering agents that cannot run alone**: most installed plugin agents are
+  workers a parent dispatches with a payload, and scheduling one produces a
+  refusal every night. They are filtered out — and reported in ``excluded``
+  with a reason, because an agent silently missing from the list is its own
+  bug. See :mod:`agent.cli_agent_eligibility`.
+- **Import drift** (``import_cli_agent``): importing produces an agent that
+  cannot run (empty ``system_prompt``, no workflow step, so the readiness rail
+  reads "steps: not ready"), or importing the same file twice quietly creates
+  a second agent instead of returning the first one.
 
 Model / provider mapping for ``inherit``
 -----------------------------------------
-A subagent's ``model: inherit`` means "use whatever model the parent Claude
+A definition's ``model: inherit`` means "use whatever model the parent Claude
 Code session is already running" — it is not a model id Code Bridge's LLM
 layer can send anywhere. Two honest options exist: resolve it to Code
 Bridge's *currently* selected model, or leave it unset. This module leaves it
@@ -74,13 +97,13 @@ and are deliberately dropped at import time rather than stuffed into
 ``policy_overrides_json`` — that column is reserved for approval-gating
 overrides, and decorative Claude Code UI metadata (a reasoning-effort hint,
 a display color) sitting in it risks a future reader mistaking it for a real
-rule. They are visible in the discovery listing (:meth:`SubagentCandidate.to_view`)
+rule. They are visible in the discovery listing (:meth:`CliAgentCandidate.to_view`)
 so a human can see them before deciding to import, but they do not survive
 into the created agent record.
 
-Re-import is a no-op, not a duplicate: :func:`import_subagent` records
-``source_path -> agent_id`` in ``agent_subagent_imports`` (unique index on
-``source_path``, see ``core.database._migrate_subagent_imports``) and a
+Re-import is a no-op, not a duplicate: :func:`import_cli_agent` records
+``source_path -> agent_id`` in ``agent_cli_agent_imports`` (unique index on
+``source_path``, see ``core.database._migrate_cli_agent_imports``) and a
 second import of the same file returns the first agent unchanged — even if
 that agent has since been archived. Hard-deleting the agent (not archiving
 it) removes the mapping too, via ``delete_import_record_for_agent``, so the
@@ -107,7 +130,7 @@ import yaml
 from core.database import get_db_connection
 from core.timestamps import to_utc_iso
 
-from .subagent_eligibility import classify_candidates
+from .cli_agent_eligibility import classify_candidates
 from .workflow_v2 import WorkflowNormalizationError, normalize_workflow
 
 logger = logging.getLogger(__name__)
@@ -125,13 +148,13 @@ SKIP_FRONTMATTER_NOT_A_MAPPING = "frontmatter_not_a_mapping"
 SKIP_MISSING_NAME = "missing_name"
 
 
-class SubagentImportError(ValueError):
+class CliAgentImportError(ValueError):
     """Raised when a requested source path cannot be imported as described."""
 
 
 @dataclass
-class SubagentCandidate:
-    """One subagent file a fresh sweep parsed successfully."""
+class CliAgentCandidate:
+    """One agent definition file a fresh sweep parsed successfully."""
 
     source_path: str
     candidate_id: str
@@ -160,7 +183,7 @@ class SubagentCandidate:
 
 
 @dataclass
-class SkippedSubagentFile:
+class SkippedCliAgentFile:
     """One file the sweep found but could not parse, and why."""
 
     source_path: str
@@ -178,15 +201,15 @@ class SkippedSubagentFile:
 
 
 @dataclass
-class ExcludedSubagent:
-    """One parsed subagent that is not standalone-runnable, and why.
+class ExcludedCliAgent:
+    """One parsed definition that is not standalone-runnable, and why.
 
-    Reported, never dropped: a user who knows a subagent is installed must be
+    Reported, never dropped: a user who knows an agent is installed must be
     able to find out why it is not on the import list. See
-    :mod:`agent.subagent_eligibility` for how the reason is decided.
+    :mod:`agent.cli_agent_eligibility` for how the reason is decided.
     """
 
-    candidate: SubagentCandidate
+    candidate: CliAgentCandidate
     reason: str
     detail: str
 
@@ -199,7 +222,7 @@ class ExcludedSubagent:
 
 
 @dataclass
-class SubagentDiscoverySweep:
+class CliAgentDiscoverySweep:
     """Result of one discovery pass.
 
     ``candidates`` is only what can actually be run unattended. Everything the
@@ -207,13 +230,13 @@ class SubagentDiscoverySweep:
     everything it could not parse is in ``skipped``.
     """
 
-    candidates: list[SubagentCandidate] = field(default_factory=list)
-    skipped: list[SkippedSubagentFile] = field(default_factory=list)
-    excluded: list[ExcludedSubagent] = field(default_factory=list)
+    candidates: list[CliAgentCandidate] = field(default_factory=list)
+    skipped: list[SkippedCliAgentFile] = field(default_factory=list)
+    excluded: list[ExcludedCliAgent] = field(default_factory=list)
 
 
 @dataclass
-class SubagentImportResult:
+class CliAgentImportResult:
     """Result of one import attempt."""
 
     agent: dict[str, Any]
@@ -230,6 +253,13 @@ def _user_agents_dir() -> Path:
 
 def _project_agent_dirs() -> list[tuple[str, Path]]:
     """The server's own working directory plus every registered project.
+
+    Both halves matter. The cwd is where a server started inside a checkout
+    finds that checkout's agents; ``ProjectDB`` is every *other* project the
+    user has registered with Code Bridge, and on a machine running several
+    projects that is where almost all per-project agents actually live.
+    Dropping the registry half would leave discovery quietly narrower than the
+    user's setup, with an empty list as the only symptom.
 
     Best-effort: a project-registry read failure (e.g. the DB is mid-
     migration in a test) drops project-scoped discovery for this sweep
@@ -250,7 +280,7 @@ def _project_agent_dirs() -> list[tuple[str, Path]]:
             seen.setdefault(resolved, f"project:{name}")
     except Exception:
         logger.debug(
-            "subagent discovery: could not read project registry", exc_info=True
+            "cli agent discovery: could not read project registry", exc_info=True
         )
     return [(label, path / ".claude" / "agents") for path, label in seen.items()]
 
@@ -320,11 +350,12 @@ def _clean_scalar(value: Any) -> str | None:
 def _split_top_level_commas(text: str) -> list[str]:
     """Split on commas that are not inside parentheses.
 
-    ``Agent(a, b)`` is one tool declaration naming two subagents, not three
-    tools. Splitting naively produced ``"Agent(claude-security:scan-inventory"``
-    and ``"claude-security:explore)"`` — fragments that are neither a tool the
-    CLI would accept when the definition is handed back to it, nor something
-    the dispatch-graph reader could resolve.
+    ``Agent(a, b)`` is one tool declaration naming two subordinate agents, not
+    three tools. Splitting naively produced
+    ``"Agent(claude-security:scan-inventory"`` and ``"claude-security:explore)"``
+    — fragments that are neither a tool the CLI would accept when the
+    definition is handed back to it, nor something the dispatch-graph reader
+    could resolve.
     """
     parts: list[str] = []
     depth = 0
@@ -345,7 +376,12 @@ def _split_top_level_commas(text: str) -> list[str]:
 
 def _parse_tools(raw: Any) -> list[str]:
     """Accept the two shapes real frontmatter uses: a YAML list, or a
-    comma-separated string (``"Bash, Agent(claude-security:explore)"``)."""
+    comma-separated string (``"Bash, Agent(claude-security:explore)"``).
+
+    Neither is rewritten into the other's shape. These names are handed
+    straight back to the CLI as the enforced tool list, so mangling one is how
+    a read-only agent gets write access.
+    """
     if raw is None:
         return []
     if isinstance(raw, list):
@@ -358,17 +394,17 @@ def _parse_tools(raw: Any) -> list[str]:
 
 def _candidate_id(path: Path) -> str:
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:24]
-    return f"subagent_{digest}"
+    return f"cli_agent_{digest}"
 
 
 def _parse_frontmatter_leniently(raw: str) -> dict[str, Any] | None:
     """Read `key: value` frontmatter that strict YAML refuses.
 
     Only used after :func:`yaml.safe_load` has already failed. These blocks
-    are flat — every field a subagent declares is a scalar — so splitting each
-    line on its *first* colon recovers the author's intent without guessing:
-    a colon later in the line belongs to the prose, which is precisely what
-    YAML got wrong.
+    are flat — every field such a definition declares is a scalar — so
+    splitting each line on its *first* colon recovers the author's intent
+    without guessing: a colon later in the line belongs to the prose, which is
+    precisely what YAML got wrong.
 
     Returns None when the block does not look like `key: value` lines at all,
     so a genuinely broken file is still reported as broken rather than
@@ -391,26 +427,26 @@ def _parse_frontmatter_leniently(raw: str) -> dict[str, Any] | None:
     return fields or None
 
 
-def _parse_subagent_file(
+def _parse_cli_agent_file(
     path: Path, *, location: str
-) -> SubagentCandidate | SkippedSubagentFile:
+) -> CliAgentCandidate | SkippedCliAgentFile:
     resolved = str(path.resolve())
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        return SkippedSubagentFile(resolved, location, SKIP_NOT_READABLE, str(exc))
+        return SkippedCliAgentFile(resolved, location, SKIP_NOT_READABLE, str(exc))
 
     split = _split_frontmatter(text)
     if split is None:
         lines = text.split("\n")
         if lines and lines[0].strip() == "---":
-            return SkippedSubagentFile(
+            return SkippedCliAgentFile(
                 resolved,
                 location,
                 SKIP_UNTERMINATED_FRONTMATTER,
                 "no closing '---' line found",
             )
-        return SkippedSubagentFile(
+        return SkippedCliAgentFile(
             resolved,
             location,
             SKIP_NO_FRONTMATTER,
@@ -430,10 +466,10 @@ def _parse_subagent_file(
         # author never had to think about.
         parsed = _parse_frontmatter_leniently(raw_frontmatter)
         if parsed is None:
-            return SkippedSubagentFile(resolved, location, SKIP_INVALID_YAML, str(exc))
+            return SkippedCliAgentFile(resolved, location, SKIP_INVALID_YAML, str(exc))
 
     if not isinstance(parsed, dict):
-        return SkippedSubagentFile(
+        return SkippedCliAgentFile(
             resolved,
             location,
             SKIP_FRONTMATTER_NOT_A_MAPPING,
@@ -442,14 +478,14 @@ def _parse_subagent_file(
 
     name = str(parsed.get("name") or "").strip()
     if not name:
-        return SkippedSubagentFile(
+        return SkippedCliAgentFile(
             resolved,
             location,
             SKIP_MISSING_NAME,
             "frontmatter has no non-empty 'name' field",
         )
 
-    return SubagentCandidate(
+    return CliAgentCandidate(
         source_path=resolved,
         candidate_id=_candidate_id(path),
         location=location,
@@ -463,7 +499,7 @@ def _parse_subagent_file(
     )
 
 
-def discover_subagent_candidates() -> SubagentDiscoverySweep:
+def discover_cli_agents() -> CliAgentDiscoverySweep:
     """Walk every known location once and parse every ``*.md`` file found.
 
     A file reachable from two locations at once (e.g. the server's cwd is
@@ -472,13 +508,13 @@ def discover_subagent_candidates() -> SubagentDiscoverySweep:
 
     Parsed files are then split: the ones that can be run on their own land in
     ``candidates``, the ones that exist to be dispatched by something else land
-    in ``excluded`` with the reason (see :mod:`agent.subagent_eligibility`).
-    Scheduling a dispatch-dependent subagent produces a refusal every night, so
+    in ``excluded`` with the reason (see :mod:`agent.cli_agent_eligibility`).
+    Scheduling a dispatch-dependent agent produces a refusal every night, so
     they are not offered — but they are still reported, because "the agent I
     installed is missing from the list" with no explanation is its own bug.
     """
-    parsed: list[SubagentCandidate] = []
-    skipped: list[SkippedSubagentFile] = []
+    parsed: list[CliAgentCandidate] = []
+    skipped: list[SkippedCliAgentFile] = []
     seen_paths: set[str] = set()
 
     for location, directory in _all_source_locations():
@@ -488,7 +524,7 @@ def discover_subagent_candidates() -> SubagentDiscoverySweep:
             files = sorted(directory.glob("*.md"))
         except OSError:
             logger.debug(
-                "subagent discovery: could not list %s", directory, exc_info=True
+                "cli agent discovery: could not list %s", directory, exc_info=True
             )
             continue
         for file_path in files:
@@ -496,29 +532,29 @@ def discover_subagent_candidates() -> SubagentDiscoverySweep:
             if resolved in seen_paths:
                 continue
             seen_paths.add(resolved)
-            result = _parse_subagent_file(file_path, location=location)
-            if isinstance(result, SubagentCandidate):
+            result = _parse_cli_agent_file(file_path, location=location)
+            if isinstance(result, CliAgentCandidate):
                 parsed.append(result)
             else:
                 skipped.append(result)
 
     exclusions = classify_candidates(parsed)
-    candidates: list[SubagentCandidate] = []
-    excluded: list[ExcludedSubagent] = []
+    candidates: list[CliAgentCandidate] = []
+    excluded: list[ExcludedCliAgent] = []
     for candidate in parsed:
         exclusion = exclusions.get(candidate.candidate_id)
         if exclusion is None:
             candidates.append(candidate)
         else:
             excluded.append(
-                ExcludedSubagent(
+                ExcludedCliAgent(
                     candidate=candidate,
                     reason=exclusion.reason,
                     detail=exclusion.detail,
                 )
             )
 
-    return SubagentDiscoverySweep(
+    return CliAgentDiscoverySweep(
         candidates=candidates, skipped=skipped, excluded=excluded
     )
 
@@ -533,10 +569,10 @@ def _resolve_model_and_provider(raw_model: str | None) -> tuple[str | None, str 
     return None, None
 
 
-def subagent_reference_prompt(name: str, source_path: str) -> str:
-    """The text stored where a copy of the subagent's prompt used to sit.
+def cli_agent_reference_prompt(name: str, source_path: str) -> str:
+    """The text stored where a copy of the definition's prompt used to sit.
 
-    An imported subagent runs *by reference*: the file is read fresh on every
+    An imported CLI agent runs *by reference*: the file is read fresh on every
     run and handed to the Claude session as an agent definition, so the prompt
     and the declared tools that execute are always the ones in the file right
     now. Storing a copy of the body here would be a copy nothing reads — shown
@@ -546,7 +582,7 @@ def subagent_reference_prompt(name: str, source_path: str) -> str:
     prompt box silently does nothing is worse than one that explains itself.
     """
     return (
-        f"This agent runs the Claude Code subagent '{name}', defined at "
+        f"This agent runs the Claude Code agent '{name}', defined at "
         f"{source_path}.\n\n"
         "That file is read at the start of every run and its prompt, declared "
         "tools, and model are what actually execute. Editing this text changes "
@@ -555,7 +591,7 @@ def subagent_reference_prompt(name: str, source_path: str) -> str:
     )
 
 
-def candidate_to_agent_create_kwargs(candidate: SubagentCandidate) -> dict[str, Any]:
+def candidate_to_agent_create_kwargs(candidate: CliAgentCandidate) -> dict[str, Any]:
     """Build the ``AgentStore.create_agent`` kwargs for one candidate.
 
     Mapping: ``name``->``name``, ``description``->``description``,
@@ -567,19 +603,19 @@ def candidate_to_agent_create_kwargs(candidate: SubagentCandidate) -> dict[str, 
 
     What does *not* get mapped is the body. The rest of the system expects an
     agent to have a system prompt and a workflow, so both exist — a single
-    ``llm`` step, the honest shape of a one-prompt subagent — but they carry
-    :func:`subagent_reference_prompt`, not a copy of the file. The file is read
-    on every run (``agent.subagent_runtime``). A copy here would drift from it
+    ``llm`` step, the honest shape of a one-prompt agent — but they carry
+    :func:`cli_agent_reference_prompt`, not a copy of the file. The file is read
+    on every run (``agent.cli_agent_runtime``). A copy here would drift from it
     silently, and the drift is invisible precisely because the copy is the part
     a human sees in the editor.
     """
     provider_id, model = _resolve_model_and_provider(candidate.model)
     name = candidate.name[:80]
-    reference = subagent_reference_prompt(candidate.name, candidate.source_path)
+    reference = cli_agent_reference_prompt(candidate.name, candidate.source_path)
     step: dict[str, Any] = {
-        "id": "subagent_instruction",
+        "id": "cli_agent_instruction",
         "type": "llm",
-        "name": name or "Imported subagent step",
+        "name": name or "Imported CLI agent step",
         "instruction": reference,
     }
     if candidate.description:
@@ -603,7 +639,7 @@ def candidate_to_agent_create_kwargs(candidate: SubagentCandidate) -> dict[str, 
 def _find_import_by_source_path(source_path: str) -> dict[str, Any] | None:
     with get_db_connection(use_row_factory=True) as conn:
         row = conn.execute(
-            "SELECT * FROM agent_subagent_imports WHERE source_path = ?",
+            "SELECT * FROM agent_cli_agent_imports WHERE source_path = ?",
             (source_path,),
         ).fetchone()
     if row is None:
@@ -617,18 +653,18 @@ def _find_import_by_source_path(source_path: str) -> dict[str, Any] | None:
 
 
 def find_import_source_path_for_agent(agent_id: str) -> str | None:
-    """The subagent file this Code Bridge agent runs, or None if it is not one.
+    """The definition file this Code Bridge agent runs, or None if it is not one.
 
     This mapping row *is* the source reference — there is no copy of the path
     on the agent record, so there is exactly one place that can be wrong. It
-    was already written at import time (commit 223ca57) purely to make a
-    re-import a no-op; reading it back at run time is what turns an imported
-    agent from a frozen copy into a pointer at a live file.
+    was already written at import time purely to make a re-import a no-op;
+    reading it back at run time is what turns an imported agent from a frozen
+    copy into a pointer at a live file.
     """
     with get_db_connection(use_row_factory=True) as conn:
         row = conn.execute(
             """
-            SELECT source_path FROM agent_subagent_imports
+            SELECT source_path FROM agent_cli_agent_imports
             WHERE agent_id = ?
             ORDER BY imported_at DESC
             LIMIT 1
@@ -645,10 +681,10 @@ def _record_import(source_path: str, agent_id: str) -> None:
     with get_db_connection() as conn:
         conn.execute(
             """
-            INSERT INTO agent_subagent_imports (id, source_path, agent_id)
+            INSERT INTO agent_cli_agent_imports (id, source_path, agent_id)
             VALUES (?, ?, ?)
             """,
-            (f"subimport_{uuid.uuid4().hex}", source_path, agent_id),
+            (f"cliagentimport_{uuid.uuid4().hex}", source_path, agent_id),
         )
         conn.commit()
 
@@ -656,7 +692,7 @@ def _record_import(source_path: str, agent_id: str) -> None:
 def _delete_import_record_by_source_path(source_path: str) -> None:
     with get_db_connection() as conn:
         conn.execute(
-            "DELETE FROM agent_subagent_imports WHERE source_path = ?",
+            "DELETE FROM agent_cli_agent_imports WHERE source_path = ?",
             (source_path,),
         )
         conn.commit()
@@ -673,7 +709,7 @@ def delete_import_record_for_agent(agent_id: str) -> None:
     """
     with get_db_connection() as conn:
         conn.execute(
-            "DELETE FROM agent_subagent_imports WHERE agent_id = ?",
+            "DELETE FROM agent_cli_agent_imports WHERE agent_id = ?",
             (agent_id,),
         )
         conn.commit()
@@ -682,14 +718,14 @@ def delete_import_record_for_agent(agent_id: str) -> None:
 # --- Import ---------------------------------------------------------------------
 
 
-def import_subagent(source_path: str) -> SubagentImportResult:
-    """Import one discovered subagent file as a Code Bridge agent.
+def import_cli_agent(source_path: str) -> CliAgentImportResult:
+    """Import one discovered agent definition as a Code Bridge agent.
 
     Re-runs discovery and only proceeds on an exact match against a path a
     fresh sweep both found and could parse — a path that is not currently
-    discoverable (wrong location, moved, deleted, or simply never a subagent
-    file) is refused rather than read a second time on the caller's say-so.
-    This is what keeps the endpoint from being an arbitrary-file-read
+    discoverable (wrong location, moved, deleted, or simply never an agent
+    definition) is refused rather than read a second time on the caller's
+    say-so. This is what keeps the endpoint from being an arbitrary-file-read
     primitive for whatever path a client sends.
 
     Re-importing the same file is a no-op: the previously created agent is
@@ -705,13 +741,15 @@ def import_subagent(source_path: str) -> SubagentImportResult:
         store = get_agent_store()
         agent = store.get_agent(existing["agent_id"])
         if agent is not None:
-            return SubagentImportResult(agent=agent, created=False, reason="already_imported")
+            return CliAgentImportResult(
+                agent=agent, created=False, reason="already_imported"
+            )
         # The mapped agent record is gone (a hard delete that did not go
         # through delete_import_record_for_agent) — the mapping is stale,
         # not authoritative. Drop it and import fresh.
         _delete_import_record_by_source_path(resolved)
 
-    sweep = discover_subagent_candidates()
+    sweep = discover_cli_agents()
     candidate = next((c for c in sweep.candidates if c.source_path == resolved), None)
     if candidate is None:
         excluded = next(
@@ -721,30 +759,32 @@ def import_subagent(source_path: str) -> SubagentImportResult:
             # Not "unknown path" — this file was found and parsed fine. Saying
             # so, with the reason, is the difference between "Code Bridge lost
             # my agent" and "this agent only runs when something dispatches it".
-            raise SubagentImportError(
+            raise CliAgentImportError(
                 f"'{source_path}' is not standalone-runnable and would refuse "
                 f"every scheduled run ({excluded.reason}: {excluded.detail})"
             )
         skip = next((s for s in sweep.skipped if s.source_path == resolved), None)
         if skip is not None:
-            raise SubagentImportError(
-                f"'{source_path}' was found but could not be parsed as a subagent "
-                f"({skip.reason}: {skip.detail})"
+            raise CliAgentImportError(
+                f"'{source_path}' was found but could not be parsed as an agent "
+                f"definition ({skip.reason}: {skip.detail})"
             )
-        raise SubagentImportError(
-            f"'{source_path}' is not a currently discoverable subagent file"
+        raise CliAgentImportError(
+            f"'{source_path}' is not a currently discoverable agent definition file"
         )
 
     kwargs = candidate_to_agent_create_kwargs(candidate)
     try:
         kwargs["flow_json"] = normalize_workflow(kwargs["flow_json"])
     except WorkflowNormalizationError as exc:  # pragma: no cover - defensive
-        raise SubagentImportError(f"generated workflow failed validation: {exc}") from exc
+        raise CliAgentImportError(
+            f"generated workflow failed validation: {exc}"
+        ) from exc
 
     store = get_agent_store()
     agent = store.create_agent(**kwargs)
     _record_import(resolved, agent["id"])
-    return SubagentImportResult(agent=agent, created=True, reason="imported")
+    return CliAgentImportResult(agent=agent, created=True, reason="imported")
 
 
 __all__ = [
@@ -754,16 +794,16 @@ __all__ = [
     "SKIP_NOT_READABLE",
     "SKIP_NO_FRONTMATTER",
     "SKIP_UNTERMINATED_FRONTMATTER",
-    "ExcludedSubagent",
-    "SubagentCandidate",
-    "SubagentDiscoverySweep",
-    "SubagentImportError",
-    "SubagentImportResult",
-    "SkippedSubagentFile",
+    "CliAgentCandidate",
+    "CliAgentDiscoverySweep",
+    "CliAgentImportError",
+    "CliAgentImportResult",
+    "ExcludedCliAgent",
+    "SkippedCliAgentFile",
     "candidate_to_agent_create_kwargs",
+    "cli_agent_reference_prompt",
     "delete_import_record_for_agent",
-    "discover_subagent_candidates",
+    "discover_cli_agents",
     "find_import_source_path_for_agent",
-    "import_subagent",
-    "subagent_reference_prompt",
+    "import_cli_agent",
 ]

@@ -353,10 +353,10 @@ class AgentStore(
             conn.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
             conn.commit()
         # A hard delete (not an archive) makes the agent record gone for
-        # good, so a subagent-import mapping pointing at it would be stale
+        # good, so a CLI-agent import mapping pointing at it would be stale
         # forever and permanently block re-importing that source file. See
-        # agent.subagent_sources.delete_import_record_for_agent.
-        from .subagent_sources import delete_import_record_for_agent
+        # agent.cli_agent_sources.delete_import_record_for_agent.
+        from .cli_agent_sources import delete_import_record_for_agent
 
         delete_import_record_for_agent(agent_id)
         return {"id": agent_id, "archived": False}

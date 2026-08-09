@@ -9,7 +9,8 @@ from .preview import router as preview_router
 from .chat_ws import router as chat_ws_router
 from .chat_sessions import router as chat_sessions_router
 from .agents import router as agents_router
-from .subagents import router as subagents_router
+from .cli_agents import legacy_router as legacy_cli_agents_router
+from .cli_agents import router as cli_agents_router
 from .agent_ws import router as agent_ws_router
 from .agent_browser_rtc import router as agent_browser_rtc_router
 from .app_builder import router as app_builder_router
@@ -49,7 +50,10 @@ _SHARED_ROUTERS = (
     chat_sessions_router,
     workspaces_router,
     agents_router,
-    subagents_router,
+    cli_agents_router,
+    # The pre-rename ``/api/agent/subagents`` prefix, same handlers. Already
+    # shipped clients call it; see routes/cli_agents.py.
+    legacy_cli_agents_router,
     agent_ws_router,
     agent_browser_rtc_router,
     app_builder_router,

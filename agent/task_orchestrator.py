@@ -30,8 +30,8 @@ from .browser_session_store import get_browser_session_store
 from .capability_adapters import describe_capability_adapter
 from .capability_registry import refresh_capability_registry
 from .prompt_composer import compose_system_prompt
-from .subagent_runtime import find_subagent_source_path, resolve_subagent_definition
-from .subagent_sources import subagent_reference_prompt
+from .cli_agent_runtime import find_cli_agent_source_path, resolve_cli_agent_definition
+from .cli_agent_sources import cli_agent_reference_prompt
 from .workflow_v2 import WorkflowNormalizationError, normalize_workflow
 
 logger = logging.getLogger(__name__)
@@ -1338,12 +1338,12 @@ async def _execute_llm_workflow_step(
     sink = AgentTaskRunSink(run_id=run_id)
     session_scope = f"task:{task_id}"
     try:
-        # Read the subagent file, if this agent is backed by one, before the
-        # session exists: a missing or broken source must fail the step naming
-        # the file, not start a turn that runs something else. Both this and
-        # the "provider cannot carry a subagent" refusal below raise, and the
-        # handler underneath records the message on the step.
-        subagent = resolve_subagent_definition(agent_id)
+        # Read the agent-definition file, if this agent is backed by one,
+        # before the session exists: a missing or broken source must fail the
+        # step naming the file, not start a turn that runs something else. Both
+        # this and the wrong-provider refusal below raise, and the handler
+        # underneath records the message on the step.
+        cli_agent = resolve_cli_agent_definition(agent_id)
         session = await create_chat_session(
             project_name=session_scope,
             project_path=project_path,
@@ -1352,7 +1352,7 @@ async def _execute_llm_workflow_step(
                 provider_name=_provider_name(provider_id),
                 model=model,
             ),
-            subagent=subagent,
+            cli_agent=cli_agent,
         )
         completed = await stream_claude_turn(
             sink,
@@ -1363,7 +1363,7 @@ async def _execute_llm_workflow_step(
                 launch_message,
                 previous_steps=previous_steps or [],
                 matched_memories=matched_memories,
-                subagent_source_path=subagent.source_path if subagent else None,
+                cli_agent_source_path=cli_agent.source_path if cli_agent else None,
             ),
         )
     except Exception as exc:
@@ -2661,7 +2661,7 @@ def _workflow_step_message(
     *,
     previous_steps: list[dict[str, Any]] | None = None,
     matched_memories: list[dict[str, Any]] | None = None,
-    subagent_source_path: str | None = None,
+    cli_agent_source_path: str | None = None,
 ) -> str:
     step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
     instruction = _workflow_text(
@@ -2682,15 +2682,15 @@ def _workflow_step_message(
         f"- title: {step.get('title')}",
         f"- type: {step_input.get('workflow_type') or 'llm'}",
     ]
-    if subagent_source_path:
+    if cli_agent_source_path:
         # The step's stored instruction is a reference stub, and on an agent
         # imported before this ran by reference it is a stale copy of the file.
         # Either way it is not what executes: the live file is already the
         # session's agent definition. Replaying it here would hand the model a
         # second, older set of instructions contradicting the first.
         lines.append(
-            "- instruction: defined by the Claude Code subagent file "
-            f"{subagent_source_path}, loaded for this run and already in force "
+            "- instruction: defined by the Claude Code agent file "
+            f"{cli_agent_source_path}, loaded for this run and already in force "
             "as this session's agent definition"
         )
     elif instruction:
@@ -3755,18 +3755,18 @@ def _compose_assigned_agent_prompt(task: dict[str, Any], *, task_goal: str) -> s
     if not agent or agent.get("is_pseudo"):
         return None
     memories = store.list_memories(agent_id, limit=100) or []
-    source_path = find_subagent_source_path(agent_id)
+    source_path = find_cli_agent_source_path(agent_id)
     if source_path:
-        # A subagent-backed agent's real prompt arrives as the session's agent
+        # A file-backed agent's real prompt arrives as the session's agent
         # definition, read from the file at execution time. Whatever sits in
         # the stored system_prompt is a pointer at best and, for an agent
-        # imported before this feature, a stale copy — either way it must not
-        # be pasted into the launch message as if it were the instructions.
-        # Only the mapping is read here, never the file: planning must not fail
-        # because a source moved, and a plan is not a run.
+        # imported before this ran by reference, a stale copy — either way it
+        # must not be pasted into the launch message as if it were the
+        # instructions. Only the mapping is read here, never the file: planning
+        # must not fail because a source moved, and a plan is not a run.
         agent = {
             **agent,
-            "system_prompt": subagent_reference_prompt(
+            "system_prompt": cli_agent_reference_prompt(
                 str(agent.get("name") or agent_id), source_path
             ),
         }

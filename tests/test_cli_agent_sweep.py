@@ -1,7 +1,7 @@
-"""The server has to notice subagent files by itself, and say what changed.
+"""The server has to notice agent definition files by itself, and say what changed.
 
 Discovery used to happen only when a client asked, and was never written down.
-So the server knew about a subagent exactly while someone was looking at one,
+So the server knew about a definition exactly while someone was looking at one,
 and could never answer the two questions that matter when nobody is looking:
 what appeared, and what went away.
 
@@ -22,7 +22,7 @@ What these tests defend:
 - Auto-import is off unless asked, imports only what can actually run alone,
   and does not create a second agent on the next sweep.
 - A sweep that could not look is recorded as failed with its reason. Never as
-  an empty success: an empty list reads as "you have no subagents", which is a
+  an empty success: an empty list reads as "you have no agents", which is a
   different and much worse statement than "I could not check".
 - A notification failure never changes what the sweep did or recorded.
 """
@@ -40,7 +40,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from agent import agent_store, notification_store, subagent_sources, subagent_sweep  # noqa: E402
+from agent import agent_store, notification_store, cli_agent_sources, cli_agent_sweep  # noqa: E402
 from core import database  # noqa: E402
 
 _ELIGIBLE = """\
@@ -54,7 +54,7 @@ Do the thing.
 """
 
 
-class SubagentSweepTestCase(unittest.TestCase):
+class CliAgentSweepTestCase(unittest.TestCase):
     """Isolated DB plus an isolated pretend `~/.claude/agents` directory."""
 
     def setUp(self) -> None:
@@ -74,7 +74,7 @@ class SubagentSweepTestCase(unittest.TestCase):
         # Discovery walks the real machine otherwise, which would make every
         # assertion below depend on whatever this developer has installed.
         patcher = mock.patch.object(
-            subagent_sources,
+            cli_agent_sources,
             "_all_source_locations",
             lambda: [("user", self.agents_dir)],
         )
@@ -102,54 +102,54 @@ class SubagentSweepTestCase(unittest.TestCase):
         return [row for row in rows if level is None or row["level"] == level]
 
 
-class SweepRecordsWhatItFoundTest(SubagentSweepTestCase):
+class SweepRecordsWhatItFoundTest(CliAgentSweepTestCase):
     def test_a_sweep_records_what_it_found(self):
         path = self._write_eligible("reviewer.md", name="reviewer")
 
-        record = subagent_sweep.run_subagent_sweep(trigger="test")
+        record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
-        self.assertEqual(record["status"], subagent_sweep.STATUS_OK)
+        self.assertEqual(record["status"], cli_agent_sweep.STATUS_OK)
         self.assertEqual(record["counts"]["candidates"], 1)
         self.assertEqual(record["counts"]["new"], 1)
 
-        seen = subagent_sweep.load_seen()
+        seen = cli_agent_sweep.load_seen()
         self.assertIn(str(path.resolve()), seen)
         entry = seen[str(path.resolve())]
         self.assertEqual(entry["name"], "reviewer")
-        self.assertEqual(entry["state"], subagent_sweep.STATE_CANDIDATE)
+        self.assertEqual(entry["state"], cli_agent_sweep.STATE_CANDIDATE)
         self.assertIsNone(entry["missing_since"])
 
     def test_the_stored_view_says_when_it_ran_without_walking_the_disk(self):
         self._write_eligible("reviewer.md", name="reviewer")
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         # If the view walked the filesystem, this would raise.
         with mock.patch.object(
-            subagent_sweep,
-            "discover_subagent_candidates",
+            cli_agent_sweep,
+            "discover_cli_agents",
             side_effect=AssertionError("the stored view must not sweep"),
         ):
-            view = subagent_sweep.get_stored_view()
+            view = cli_agent_sweep.get_stored_view()
 
         self.assertIsNotNone(view["last_sweep"]["started_at"])
-        self.assertEqual(view["last_sweep"]["status"], subagent_sweep.STATUS_OK)
+        self.assertEqual(view["last_sweep"]["status"], cli_agent_sweep.STATUS_OK)
         self.assertEqual([e["name"] for e in view["known"]["candidates"]], ["reviewer"])
         self.assertFalse(view["auto_import_enabled"])
 
     def test_a_sweep_is_not_due_again_immediately(self):
-        self.assertTrue(subagent_sweep.sweep_is_due())
-        subagent_sweep.run_subagent_sweep(trigger="test")
-        self.assertFalse(subagent_sweep.sweep_is_due())
-        self.assertIsNone(subagent_sweep.maybe_run_due_subagent_sweep())
+        self.assertTrue(cli_agent_sweep.sweep_is_due())
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+        self.assertFalse(cli_agent_sweep.sweep_is_due())
+        self.assertIsNone(cli_agent_sweep.maybe_run_due_cli_agent_sweep())
 
 
-class NewAndMissingTest(SubagentSweepTestCase):
+class NewAndMissingTest(CliAgentSweepTestCase):
     def test_a_second_sweep_reports_an_added_file_as_new(self):
         self._write_eligible("first.md", name="first")
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         added = self._write_eligible("second.md", name="second")
-        record = subagent_sweep.run_subagent_sweep(trigger="test")
+        record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         self.assertEqual([entry["source_path"] for entry in record["new"]], [str(added.resolve())])
         self.assertEqual(record["counts"]["candidates"], 2)
@@ -157,25 +157,25 @@ class NewAndMissingTest(SubagentSweepTestCase):
     def test_a_removed_file_is_reported_as_missing(self):
         self._write_eligible("stays.md", name="stays")
         goes = self._write_eligible("goes.md", name="goes")
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         goes.unlink()
-        record = subagent_sweep.run_subagent_sweep(trigger="test")
+        record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         self.assertEqual(
             [entry["source_path"] for entry in record["missing"]], [str(goes.resolve())]
         )
-        seen = subagent_sweep.load_seen()
+        seen = cli_agent_sweep.load_seen()
         self.assertIsNotNone(seen[str(goes.resolve())]["missing_since"])
         # The one that is still there must not be collateral damage.
         self.assertIsNone(seen[str((self.agents_dir / "stays.md").resolve())]["missing_since"])
 
     def test_a_file_that_stays_missing_is_only_reported_missing_once(self):
         goes = self._write_eligible("goes.md", name="goes")
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
         goes.unlink()
-        first = subagent_sweep.run_subagent_sweep(trigger="test")
-        second = subagent_sweep.run_subagent_sweep(trigger="test")
+        first = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+        second = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         self.assertEqual(len(first["missing"]), 1)
         # Still gone, still recorded as gone — but not news a second time, or
@@ -184,22 +184,22 @@ class NewAndMissingTest(SubagentSweepTestCase):
 
     def test_a_file_that_comes_back_is_new_again(self):
         path = self._write_eligible("blinker.md", name="blinker")
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
         path.unlink()
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
         self._write_eligible("blinker.md", name="blinker")
 
-        record = subagent_sweep.run_subagent_sweep(trigger="test")
+        record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         self.assertEqual([entry["name"] for entry in record["new"]], ["blinker"])
-        self.assertIsNone(subagent_sweep.load_seen()[str(path.resolve())]["missing_since"])
+        self.assertIsNone(cli_agent_sweep.load_seen()[str(path.resolve())]["missing_since"])
 
 
-class NotificationTest(SubagentSweepTestCase):
-    def test_a_new_importable_subagent_notifies(self):
+class NotificationTest(CliAgentSweepTestCase):
+    def test_a_new_importable_definition_notifies(self):
         self._write_eligible("reviewer.md", name="reviewer")
 
-        record = subagent_sweep.run_subagent_sweep(trigger="test")
+        record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         self.assertTrue(record["notified"]["new"])
         titles = [row["title"] for row in self._notifications()]
@@ -207,10 +207,10 @@ class NotificationTest(SubagentSweepTestCase):
 
     def test_a_sweep_where_nothing_changed_does_not_notify(self):
         self._write_eligible("reviewer.md", name="reviewer")
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
         before = len(self._notifications())
 
-        record = subagent_sweep.run_subagent_sweep(trigger="test")
+        record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         self.assertFalse(record["notified"]["new"])
         self.assertEqual(record["notified"]["missing_imported"], 0)
@@ -218,11 +218,11 @@ class NotificationTest(SubagentSweepTestCase):
 
     def test_a_missing_file_an_imported_agent_points_at_notifies(self):
         path = self._write_eligible("reviewer.md", name="reviewer")
-        result = subagent_sources.import_subagent(str(path))
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        result = cli_agent_sources.import_cli_agent(str(path))
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         path.unlink()
-        record = subagent_sweep.run_subagent_sweep(trigger="test")
+        record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         self.assertEqual(record["notified"]["missing_imported"], 1)
         errors = self._notifications(level="error")
@@ -232,10 +232,10 @@ class NotificationTest(SubagentSweepTestCase):
 
     def test_a_missing_file_nothing_points_at_does_not_notify(self):
         path = self._write_eligible("reviewer.md", name="reviewer")
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         path.unlink()
-        record = subagent_sweep.run_subagent_sweep(trigger="test")
+        record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         # Recorded, so the user can see it went away...
         self.assertEqual(len(record["missing"]), 1)
@@ -252,21 +252,21 @@ class NotificationTest(SubagentSweepTestCase):
             "get_notification_store",
             side_effect=RuntimeError("notification store is down"),
         ):
-            record = subagent_sweep.run_subagent_sweep(trigger="test")
+            record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
-        self.assertEqual(record["status"], subagent_sweep.STATUS_OK)
+        self.assertEqual(record["status"], cli_agent_sweep.STATUS_OK)
         self.assertFalse(record["notified"]["new"])
         # The sweep result is what matters and it is intact and stored.
         self.assertEqual(record["counts"]["candidates"], 1)
-        self.assertEqual(len(subagent_sweep.load_seen()), 1)
+        self.assertEqual(len(cli_agent_sweep.load_seen()), 1)
         self.assertEqual(
-            subagent_sweep.get_last_sweep_record()["status"], subagent_sweep.STATUS_OK
+            cli_agent_sweep.get_last_sweep_record()["status"], cli_agent_sweep.STATUS_OK
         )
 
 
-class AutoImportTest(SubagentSweepTestCase):
+class AutoImportTest(CliAgentSweepTestCase):
     def _write_a_mixed_directory(self) -> Path:
-        """One standalone subagent, one dispatch-only worker, one broken file."""
+        """One standalone definition, one dispatch-only worker, one broken file."""
         eligible = self._write_eligible("orchestrator.md", name="orchestrator")
         self._write(
             "worker.md",
@@ -293,13 +293,13 @@ class AutoImportTest(SubagentSweepTestCase):
             Orchestrator body.
             """,
         )
-        self._write("broken.md", "Not a subagent at all.\n")
+        self._write("broken.md", "Not an agent definition at all.\n")
         return eligible
 
     def test_auto_import_is_off_by_default_and_creates_nothing(self):
         self._write_a_mixed_directory()
 
-        record = subagent_sweep.run_subagent_sweep(trigger="test")
+        record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         self.assertFalse(record["auto_import"]["enabled"])
         self.assertEqual(record["auto_import"]["imported"], [])
@@ -307,9 +307,9 @@ class AutoImportTest(SubagentSweepTestCase):
 
     def test_auto_import_on_imports_only_eligible_candidates(self):
         self._write_a_mixed_directory()
-        subagent_sweep.set_auto_import_enabled(True)
+        cli_agent_sweep.set_auto_import_enabled(True)
 
-        record = subagent_sweep.run_subagent_sweep(trigger="test")
+        record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         self.assertTrue(record["auto_import"]["enabled"])
         imported_names = sorted(entry["name"] for entry in record["auto_import"]["imported"])
@@ -326,10 +326,10 @@ class AutoImportTest(SubagentSweepTestCase):
 
     def test_auto_import_is_idempotent_across_sweeps(self):
         self._write_a_mixed_directory()
-        subagent_sweep.set_auto_import_enabled(True)
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.set_auto_import_enabled(True)
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
-        second = subagent_sweep.run_subagent_sweep(trigger="test")
+        second = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         self.assertEqual(second["auto_import"]["imported"], [])
         self.assertEqual(len(agent_store.get_agent_store().list_agents()), 1)
@@ -338,69 +338,69 @@ class AutoImportTest(SubagentSweepTestCase):
         """The default being off is only meaningful if switching it on later
         does not then import the backlog in one go."""
         self._write_a_mixed_directory()
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
-        subagent_sweep.set_auto_import_enabled(True)
-        record = subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.set_auto_import_enabled(True)
+        record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         self.assertEqual(record["auto_import"]["imported"], [])
         self.assertEqual(agent_store.get_agent_store().list_agents(), [])
 
-        # ...but a subagent written after the switch is imported.
+        # ...but a definition written after the switch is imported.
         self._write_eligible("fresh.md", name="fresh")
-        after = subagent_sweep.run_subagent_sweep(trigger="test")
+        after = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
         self.assertEqual(
             [entry["name"] for entry in after["auto_import"]["imported"]], ["fresh"]
         )
 
 
-class FailedSweepTest(SubagentSweepTestCase):
+class FailedSweepTest(CliAgentSweepTestCase):
     def test_a_failed_sweep_is_recorded_as_failed_not_as_empty(self):
         self._write_eligible("reviewer.md", name="reviewer")
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         with mock.patch.object(
-            subagent_sweep,
-            "discover_subagent_candidates",
+            cli_agent_sweep,
+            "discover_cli_agents",
             side_effect=OSError("the disk went away"),
         ):
-            record = subagent_sweep.run_subagent_sweep(trigger="test")
+            record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
-        self.assertEqual(record["status"], subagent_sweep.STATUS_FAILED)
+        self.assertEqual(record["status"], cli_agent_sweep.STATUS_FAILED)
         self.assertEqual(record["error"]["type"], "OSError")
         self.assertIn("the disk went away", record["error"]["message"])
         # Not zeros. A count of zero would claim the sweep looked and found
         # nothing, which is the lie this guards against.
         self.assertIsNone(record["counts"])
-        self.assertEqual(subagent_sweep.get_last_sweep_record()["status"], "failed")
+        self.assertEqual(cli_agent_sweep.get_last_sweep_record()["status"], "failed")
 
     def test_a_failed_sweep_leaves_the_known_set_alone(self):
         path = self._write_eligible("reviewer.md", name="reviewer")
-        subagent_sweep.run_subagent_sweep(trigger="test")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         with mock.patch.object(
-            subagent_sweep,
-            "discover_subagent_candidates",
+            cli_agent_sweep,
+            "discover_cli_agents",
             side_effect=OSError("the disk went away"),
         ):
-            subagent_sweep.run_subagent_sweep(trigger="test")
+            cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
-        seen = subagent_sweep.load_seen()
+        seen = cli_agent_sweep.load_seen()
         self.assertIn(str(path.resolve()), seen)
         # Crucially not stamped missing: the file is fine, the walk was not.
         self.assertIsNone(seen[str(path.resolve())]["missing_since"])
 
-        view = subagent_sweep.get_stored_view()
+        view = cli_agent_sweep.get_stored_view()
         self.assertEqual(view["last_sweep"]["status"], "failed")
         self.assertEqual([e["name"] for e in view["known"]["candidates"]], ["reviewer"])
 
     def test_a_failed_sweep_does_not_notify(self):
         with mock.patch.object(
-            subagent_sweep,
-            "discover_subagent_candidates",
+            cli_agent_sweep,
+            "discover_cli_agents",
             side_effect=OSError("the disk went away"),
         ):
-            subagent_sweep.run_subagent_sweep(trigger="test")
+            cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
         self.assertEqual(self._notifications(), [])
 

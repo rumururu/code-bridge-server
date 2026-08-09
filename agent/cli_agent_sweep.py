@@ -1,21 +1,21 @@
-"""Look for Claude Code subagent files on a schedule, and remember what was there.
+"""Look for agent definition files on a schedule, and remember what was there.
 
-Discovery already worked, but only when asked: ``GET /api/agent/subagents``
+Discovery already worked, but only when asked: ``GET /api/agent/cli-agents``
 walks the disk on every request and returns what exists *now*
-(:mod:`agent.subagent_sources`). That is a good answer to "what is there" and
+(:mod:`agent.cli_agent_sources`). That is a good answer to "what is there" and
 no answer at all to "what changed", because nothing was ever written down. The
-server therefore knew about a subagent only while a client happened to be
+server therefore knew about a definition only while a client happened to be
 looking at it.
 
 This module is the memory. It runs the same sweep on a timer, diffs the result
 against the last one, and stores both the set and the diff. Two things become
 possible that were not before:
 
-- **New files are noticed without anyone looking.** A subagent the user wrote
+- **New files are noticed without anyone looking.** An agent the user wrote
   last night shows up in the stored view — and, if auto-import is on, becomes
   a Code Bridge agent — without the app being opened.
 - **A vanished file is noticed *before* it costs a run.** An imported agent is
-  a pointer, not a copy (:mod:`agent.subagent_runtime`): delete the ``.md``
+  a pointer, not a copy (:mod:`agent.cli_agent_runtime`): delete the ``.md``
   and the next scheduled run fails naming a file. Unattended, that means 3am,
   and the user finds out from a failure. A sweep that spots the file missing
   says so while there is still time to restore it.
@@ -23,15 +23,15 @@ possible that were not before:
 If this regresses, the failures are quiet by construction:
 
 - **The sweep stops running** (nobody calls
-  :func:`maybe_run_due_subagent_sweep`, or it starts raising): everything
+  :func:`maybe_run_due_cli_agent_sweep`, or it starts raising): everything
   still works when a client asks, so nothing looks broken — the server simply
   goes back to knowing nothing on its own, and the vanished-file warning stops
   arriving. The only visible symptom is a ``last_sweep`` timestamp that stops
   advancing, which is why the stored view returns it.
 - **The seen-set is lost or overwritten by a failed sweep**: every path reads
-  as new again, so the next sweep notifies about 25 subagents the user has had
+  as new again, so the next sweep notifies about 25 agents the user has had
   for months, and — with auto-import on — imports them a second time. This is
-  why a failed sweep records the failure and leaves ``agent_subagent_seen``
+  why a failed sweep records the failure and leaves ``agent_cli_agent_seen``
   untouched, and why an empty result is never written as a success.
 - **Notification spam**: a notification on a sweep where nothing changed
   teaches people to swipe these away, and then the one that matters (your
@@ -40,13 +40,13 @@ If this regresses, the failures are quiet by construction:
 
 Why six hours
 -------------
-:data:`DEFAULT_SWEEP_INTERVAL_SECONDS` is 6 hours. Subagent files are written
+:data:`DEFAULT_SWEEP_INTERVAL_SECONDS` is 6 hours. Definition files are written
 by hand — a user adds one every few days at most, and a plugin install that
 brings a batch of them is a deliberate act. Sweeping is cheap (~15ms of
 ``glob`` and small file reads on the machine this was built against) but it is
 not free, and it is also not urgent: the two things the sweep exists to catch
 tolerate a few hours of latency. Anyone who *does* care right now already has
-an instant answer — ``GET /api/agent/subagents`` still walks the disk live on
+an instant answer — ``GET /api/agent/cli-agents`` still walks the disk live on
 every request, so "I just wrote a file, hit Refresh" works exactly as it did.
 
 Six hours also matches the cadence at which scheduled agents actually run
@@ -59,8 +59,8 @@ instead of on every 30-second scheduler tick.
 
 Where things live
 -----------------
-- The seen-set and the last sweep record: ``agent_subagent_seen`` and
-  ``agent_subagent_sweeps`` (see ``core.database._migrate_subagent_sweeps``).
+- The seen-set and the last sweep record: ``agent_cli_agent_seen`` and
+  ``agent_cli_agent_sweeps`` (see ``core.database._migrate_cli_agent_sweeps``).
 - The auto-import switch: the ``app_settings`` key-value table where every
   other server setting already lives (``core.database.SettingsDB``, the same
   place ``allow_ip_login`` is kept), under
@@ -87,19 +87,25 @@ from typing import Any
 
 from core.database import get_db_connection, get_settings_db
 
-from .subagent_sources import (
-    SubagentDiscoverySweep,
-    SubagentImportError,
+from .cli_agent_sources import (
+    CliAgentDiscoverySweep,
+    CliAgentImportError,
     _find_import_by_source_path,
-    discover_subagent_candidates,
-    import_subagent,
+    discover_cli_agents,
+    import_cli_agent,
 )
 
 logger = logging.getLogger(__name__)
 
 #: ``app_settings`` key for the optional auto-import switch. Off unless the
 #: stored value is exactly ``"true"``.
-SETTING_AUTO_IMPORT_ENABLED = "subagent_auto_import_enabled"
+SETTING_AUTO_IMPORT_ENABLED = "cli_agent_auto_import_enabled"
+
+#: The key this setting used before the feature was renamed. Read as a
+#: fallback, never written: a user who deliberately turned auto-import *on*
+#: must not have it silently switched off by a rename they never asked for,
+#: and the first write under the new key retires the old one for good.
+LEGACY_SETTING_AUTO_IMPORT_ENABLED = "subagent_auto_import_enabled"
 
 #: See the module docstring for why six hours.
 DEFAULT_SWEEP_INTERVAL_SECONDS = 6 * 60 * 60
@@ -107,7 +113,12 @@ DEFAULT_SWEEP_INTERVAL_SECONDS = 6 * 60 * 60
 #: Override for tests and for anyone who genuinely wants a different cadence.
 #: Same shape as ``CODEBRIDGE_SCHEDULE_STALL_GRACE_SECONDS`` in
 #: :mod:`agent.scheduler`.
-SWEEP_INTERVAL_ENV = "CODEBRIDGE_SUBAGENT_SWEEP_INTERVAL_SECONDS"
+SWEEP_INTERVAL_ENV = "CODEBRIDGE_CLI_AGENT_SWEEP_INTERVAL_SECONDS"
+
+#: The name this override had before the feature was renamed. Still honoured so
+#: an existing deployment's environment does not silently revert to the 6-hour
+#: default, which would look like the sweep having stopped.
+LEGACY_SWEEP_INTERVAL_ENV = "CODEBRIDGE_SUBAGENT_SWEEP_INTERVAL_SECONDS"
 
 #: The sweeps table holds exactly one row, under this id.
 LATEST_SWEEP_ID = "latest"
@@ -147,16 +158,22 @@ def _parse_iso(value: Any) -> datetime | None:
 
 
 def get_auto_import_enabled() -> bool:
-    """Whether a newly discovered eligible subagent is imported automatically.
+    """Whether a newly discovered eligible definition is imported automatically.
 
     Default ``False``, and an unreadable or unrecognised stored value also
     reads as ``False`` — the safe direction for a switch whose "on" state
-    creates agents.
+    creates agents. The pre-rename key is consulted only when the current one
+    has never been written, so an existing choice survives the rename.
     """
     try:
-        raw = get_settings_db().get(SETTING_AUTO_IMPORT_ENABLED, "false")
+        settings = get_settings_db()
+        raw = settings.get(SETTING_AUTO_IMPORT_ENABLED, None)
+        if raw is None:
+            raw = settings.get(LEGACY_SETTING_AUTO_IMPORT_ENABLED, "false")
     except Exception:  # noqa: BLE001 - a settings read must not break a sweep
-        logger.debug("subagent sweep: could not read auto-import setting", exc_info=True)
+        logger.debug(
+            "cli agent sweep: could not read auto-import setting", exc_info=True
+        )
         return False
     return str(raw or "").strip().lower() == "true"
 
@@ -170,6 +187,8 @@ def set_auto_import_enabled(enabled: bool) -> bool:
 def sweep_interval_seconds() -> int:
     """The configured interval, floored at 60s so no override can busy-loop."""
     raw = os.environ.get(SWEEP_INTERVAL_ENV)
+    if raw is None:
+        raw = os.environ.get(LEGACY_SWEEP_INTERVAL_ENV)
     if raw is None:
         return DEFAULT_SWEEP_INTERVAL_SECONDS
     try:
@@ -206,7 +225,7 @@ class SeenEntry:
         }
 
 
-def _entries_from_sweep(sweep: SubagentDiscoverySweep) -> list[SeenEntry]:
+def _entries_from_sweep(sweep: CliAgentDiscoverySweep) -> list[SeenEntry]:
     """Flatten a discovery sweep into one entry per file, keeping the verdict.
 
     All three buckets are remembered, not just the importable ones. A file that
@@ -273,7 +292,7 @@ def _seen_row(row: Any) -> dict[str, Any]:
 def load_seen() -> dict[str, dict[str, Any]]:
     """Every source path ever recorded, keyed by path."""
     with get_db_connection(use_row_factory=True) as conn:
-        rows = conn.execute("SELECT * FROM agent_subagent_seen").fetchall()
+        rows = conn.execute("SELECT * FROM agent_cli_agent_seen").fetchall()
     return {str(row["source_path"]): _seen_row(row) for row in rows}
 
 
@@ -284,7 +303,7 @@ def _record_present(entries: list[SeenEntry], *, at: str) -> None:
     with get_db_connection() as conn:
         conn.executemany(
             """
-            INSERT INTO agent_subagent_seen (
+            INSERT INTO agent_cli_agent_seen (
                 source_path, candidate_id, location, name, description,
                 state, detail, first_seen_at, last_seen_at, missing_since
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
@@ -328,7 +347,7 @@ def _record_missing(source_paths: list[str], *, at: str) -> None:
     with get_db_connection() as conn:
         conn.executemany(
             """
-            UPDATE agent_subagent_seen SET missing_since = ?
+            UPDATE agent_cli_agent_seen SET missing_since = ?
             WHERE source_path = ? AND missing_since IS NULL
             """,
             [(at, path) for path in source_paths],
@@ -343,7 +362,7 @@ def _store_sweep_record(record: dict[str, Any]) -> None:
     with get_db_connection() as conn:
         conn.execute(
             """
-            INSERT INTO agent_subagent_sweeps (
+            INSERT INTO agent_cli_agent_sweeps (
                 id, status, trigger, started_at, finished_at, error, result_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
@@ -371,7 +390,7 @@ def get_last_sweep_record() -> dict[str, Any] | None:
     """The most recent sweep attempt, or ``None`` if the server never swept."""
     with get_db_connection(use_row_factory=True) as conn:
         row = conn.execute(
-            "SELECT * FROM agent_subagent_sweeps WHERE id = ?", (LATEST_SWEEP_ID,)
+            "SELECT * FROM agent_cli_agent_sweeps WHERE id = ?", (LATEST_SWEEP_ID,)
         ).fetchone()
     if row is None:
         return None
@@ -382,7 +401,7 @@ def get_last_sweep_record() -> dict[str, Any] | None:
             if isinstance(parsed, dict):
                 return parsed
         except (TypeError, ValueError):
-            logger.warning("subagent sweep: stored record is not readable JSON")
+            logger.warning("cli agent sweep: stored record is not readable JSON")
     # The blob is unreadable but the columns are not — report what is certain
     # rather than pretending there was never a sweep.
     return {
@@ -405,10 +424,10 @@ def get_stored_view() -> dict[str, Any]:
     as missing. ``last_sweep`` is when the server last looked and what changed
     then. The two are separate on purpose: a failed sweep replaces
     ``last_sweep`` with a failure and leaves ``known`` exactly as it was, so
-    "the walk broke" never renders as "you have no subagents".
+    "the walk broke" never renders as "you have no agents".
 
-    This is a summary, not a substitute for ``GET /api/agent/subagents``: it
-    carries what identifies a subagent (name, description, path, location,
+    This is a summary, not a substitute for ``GET /api/agent/cli-agents``: it
+    carries what identifies an agent (name, description, path, location,
     verdict) and not the fuller per-candidate metadata a live sweep returns.
     """
     known: dict[str, list[dict[str, Any]]] = {
@@ -463,12 +482,12 @@ def _notify_best_effort(
             )
         except Exception:
             logger.exception(
-                "subagent sweep: push failed; the notification is still stored"
+                "cli agent sweep: push failed; the notification is still stored"
             )
         return True
     except Exception:
         logger.exception(
-            "subagent sweep: could not record a notification; the sweep result stands"
+            "cli agent sweep: could not record a notification; the sweep result stands"
         )
         return False
 
@@ -487,7 +506,7 @@ def _name_lines(entries: list[dict[str, Any]]) -> list[str]:
 def _notify_new_candidates(
     new_candidates: list[dict[str, Any]], imported: list[dict[str, Any]]
 ) -> bool:
-    """Tell the user about subagents that can be imported and were not there before.
+    """Tell the user about agents that can be imported and were not there before.
 
     Only *importable* new files ring. A newly appeared file that is excluded
     (it exists to be dispatched by a parent) or unparseable is recorded in the
@@ -500,9 +519,9 @@ def _notify_new_candidates(
         return False
     count = len(new_candidates)
     if count == 1:
-        title = f"New Claude subagent found: {new_candidates[0].get('name') or 'unnamed'}"
+        title = f"New CLI agent found: {new_candidates[0].get('name') or 'unnamed'}"
     else:
-        title = f"{count} new Claude subagents found"
+        title = f"{count} new CLI agents found"
     lines = _name_lines(new_candidates)
     if imported:
         lines.append("")
@@ -536,7 +555,7 @@ def _notify_missing_import_sources(missing: list[dict[str, Any]]) -> int:
         if not agent_id:
             continue
         agent_name = entry.get("imported_agent_name") or "An imported agent"
-        title = f"{agent_name} lost its subagent file"
+        title = f"{agent_name} lost its definition file"
         body = "\n".join(
             [
                 f"{entry.get('source_path')} was found by an earlier sweep and is "
@@ -558,7 +577,7 @@ def _notify_missing_import_sources(missing: list[dict[str, Any]]) -> int:
 def _auto_import(new_candidates: list[dict[str, Any]]) -> tuple[list, list]:
     """Import each newly discovered eligible candidate, one failure at a time.
 
-    Reuses :func:`agent.subagent_sources.import_subagent` unchanged, which
+    Reuses :func:`agent.cli_agent_sources.import_cli_agent` unchanged, which
     means each import re-runs discovery to validate the path it was handed —
     the same guard that stops the HTTP import route being an arbitrary-file
     read. That costs one extra walk per import, which is the right trade for
@@ -566,7 +585,7 @@ def _auto_import(new_candidates: list[dict[str, Any]]) -> tuple[list, list]:
 
     Idempotent across sweeps twice over: a path recorded in the seen-set is no
     longer "new", so it is not offered here again; and if it were,
-    ``import_subagent`` returns the existing agent rather than creating a
+    ``import_cli_agent`` returns the existing agent rather than creating a
     second one.
     """
     imported: list[dict[str, Any]] = []
@@ -576,14 +595,14 @@ def _auto_import(new_candidates: list[dict[str, Any]]) -> tuple[list, list]:
         if not source_path:
             continue
         try:
-            result = import_subagent(source_path)
-        except SubagentImportError as exc:
+            result = import_cli_agent(source_path)
+        except CliAgentImportError as exc:
             failed.append(
                 {"source_path": source_path, "name": entry.get("name"), "error": str(exc)}
             )
             continue
         except Exception as exc:  # noqa: BLE001 - one bad file must not end the sweep
-            logger.exception("subagent sweep: auto-import failed for %s", source_path)
+            logger.exception("cli agent sweep: auto-import failed for %s", source_path)
             failed.append(
                 {
                     "source_path": source_path,
@@ -612,7 +631,7 @@ def _importing_agent(source_path: str) -> tuple[str | None, str | None]:
         record = _find_import_by_source_path(source_path)
     except Exception:  # noqa: BLE001 - provenance lookup must not end the sweep
         logger.debug(
-            "subagent sweep: could not read import provenance for %s",
+            "cli agent sweep: could not read import provenance for %s",
             source_path,
             exc_info=True,
         )
@@ -627,19 +646,19 @@ def _importing_agent(source_path: str) -> tuple[str | None, str | None]:
 
         agent = get_agent_store().get_agent(agent_id)
     except Exception:  # noqa: BLE001
-        logger.debug("subagent sweep: could not read agent %s", agent_id, exc_info=True)
+        logger.debug("cli agent sweep: could not read agent %s", agent_id, exc_info=True)
         return agent_id, None
     name = agent.get("name") if isinstance(agent, dict) else None
     return agent_id, (str(name) if name else None)
 
 
-def run_subagent_sweep(*, trigger: str = "scheduled") -> dict[str, Any]:
+def run_cli_agent_sweep(*, trigger: str = "scheduled") -> dict[str, Any]:
     """Walk the disk once, diff against memory, record, notify, maybe import.
 
     Always writes a record. On failure that record says ``status: "failed"``
     with the reason and leaves the seen-set untouched — a sweep that could not
     look must never be stored as a sweep that looked and found nothing, because
-    an empty list reads as "you have no subagents", which is a different and
+    an empty list reads as "you have no agents", which is a different and
     much worse statement than "I could not check".
     """
     started = _now()
@@ -647,9 +666,9 @@ def run_subagent_sweep(*, trigger: str = "scheduled") -> dict[str, Any]:
     auto_import_enabled = get_auto_import_enabled()
 
     try:
-        sweep = discover_subagent_candidates()
+        sweep = discover_cli_agents()
     except Exception as exc:  # noqa: BLE001 - the failure is the result here
-        logger.exception("subagent sweep: discovery failed")
+        logger.exception("cli agent sweep: discovery failed")
         finished = _now()
         record = {
             "status": STATUS_FAILED,
@@ -769,7 +788,7 @@ def sweep_is_due(*, now: datetime | None = None) -> bool:
     return (moment - started).total_seconds() >= sweep_interval_seconds()
 
 
-def maybe_run_due_subagent_sweep(*, trigger: str = "scheduled") -> dict[str, Any] | None:
+def maybe_run_due_cli_agent_sweep(*, trigger: str = "scheduled") -> dict[str, Any] | None:
     """Run a sweep if one is due, else do nothing. Returns the record or ``None``.
 
     Called from the scheduler tick (:mod:`agent.scheduler`), which is the one
@@ -780,12 +799,13 @@ def maybe_run_due_subagent_sweep(*, trigger: str = "scheduled") -> dict[str, Any
     """
     if not sweep_is_due():
         return None
-    return run_subagent_sweep(trigger=trigger)
+    return run_cli_agent_sweep(trigger=trigger)
 
 
 __all__ = [
     "DEFAULT_SWEEP_INTERVAL_SECONDS",
     "LATEST_SWEEP_ID",
+    "LEGACY_SETTING_AUTO_IMPORT_ENABLED",
     "SETTING_AUTO_IMPORT_ENABLED",
     "STATE_CANDIDATE",
     "STATE_EXCLUDED",
@@ -798,8 +818,8 @@ __all__ = [
     "get_last_sweep_record",
     "get_stored_view",
     "load_seen",
-    "maybe_run_due_subagent_sweep",
-    "run_subagent_sweep",
+    "maybe_run_due_cli_agent_sweep",
+    "run_cli_agent_sweep",
     "set_auto_import_enabled",
     "sweep_interval_seconds",
     "sweep_is_due",

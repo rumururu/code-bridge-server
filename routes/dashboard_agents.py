@@ -33,7 +33,6 @@ from agent.script_models import (
     ScriptRegister,
     ScriptUpdate,
 )
-from agent.subagent_models import SubagentAutoImportUpdate, SubagentImportRequest
 from policy.policy_models import PolicyRuleCreate
 
 from . import agents as agents_routes
@@ -41,7 +40,7 @@ from . import approvals as approvals_routes
 from . import policies as policies_routes
 from . import script_proposals as script_proposals_routes
 from . import scripts as scripts_routes
-from . import subagents as subagents_routes
+from . import cli_agents as cli_agents_routes
 from .deps import require_local_access
 
 router = APIRouter(
@@ -343,41 +342,29 @@ async def delete_script(script_id: str) -> dict[str, Any]:
     return await scripts_routes.delete_script(script_id)
 
 
-# Discovering and importing Claude Code subagents. Same shared-router
-# reasoning as routes/subagents.py's module docstring (importing is the same
+# Discovering and importing CLI agent definitions. Same shared-router
+# reasoning as routes/cli_agents.py's module docstring (importing is the same
 # class of authoring POST /agents already allows an api-key holder to do
 # directly) — these are mirrors for the no-key dashboard, not a stricter
 # gate. Kept here for the same reason every other shared agent-builder read
 # in this file is mirrored: IP-login/local-network trust is a separate
 # mechanism from pairing, and the dashboard should not depend on it being on.
+#
+# Mirrored under *both* sub-prefixes, generated from the shared route table so
+# the two cannot drift: `/cli-agents/...` is canonical, `/subagents/...` is the
+# pre-rename path a dashboard page served by an older build still requests. A
+# missing mirror does not surface as an error here — it renders as an empty
+# result, which is how the sweep mirror went unnoticed the first time, so
+# test_dashboard_cli_agent_mirrors asserts the pairing directly.
 
-
-@router.get("/subagents", response_model=None)
-async def list_subagent_candidates() -> dict[str, Any]:
-    return await subagents_routes.list_subagent_candidates()
-
-
-@router.post("/subagents/import", response_model=None)
-async def import_subagent_route(body: SubagentImportRequest) -> dict[str, Any]:
-    return await subagents_routes.import_subagent_route(body)
-
-
-# The periodic sweep's stored result. The dashboard needs this as much as the
-# phone does — it is where "when did the server last look, and did an imported
-# agent's source file disappear" is answered — and without the mirror the
-# dashboard's own prefix 404s on it, which is how it was missed the first time.
-
-
-@router.get("/subagents/sweep", response_model=None)
-async def get_subagent_sweep_state() -> dict[str, Any]:
-    return await subagents_routes.get_subagent_sweep_state()
-
-
-@router.put("/subagents/sweep/settings", response_model=None)
-async def update_subagent_sweep_settings(
-    body: SubagentAutoImportUpdate,
-) -> dict[str, Any]:
-    return await subagents_routes.update_subagent_sweep_settings(body)
+for _sub_prefix in ("/cli-agents", "/subagents"):
+    for _method, _path, _handler in cli_agents_routes._ROUTES:
+        router.add_api_route(
+            f"{_sub_prefix}{_path}",
+            _handler,
+            methods=[_method],
+            response_model=None,
+        )
 
 
 @router.get("/approvals/pending", response_model=None)

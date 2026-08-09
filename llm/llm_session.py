@@ -106,14 +106,14 @@ class DetectedProvider:
 
 
 @dataclass(frozen=True)
-class SubagentDefinition:
-    """One Claude Code subagent, read from its file, ready to hand to a session.
+class CliAgentDefinition:
+    """One CLI agent definition, read from its file, ready to hand to a session.
 
     Frozen and hashable on purpose: :class:`~llm.claude_session.SessionManager`
     caches sessions per scope and compares this value to decide whether a cached
     session still matches. Two workflow steps of the same task — one backed by a
-    subagent, one not — must not share a session, or the second silently inherits
-    the first one's tool restrictions or escapes them.
+    definition, one not — must not share a session, or the second silently
+    inherits the first one's tool restrictions or escapes them.
 
     ``tools`` is what the file declared, verbatim, including forms like
     ``Agent(plugin:child)``. It is passed through rather than translated: it is
@@ -130,17 +130,19 @@ class SubagentDefinition:
     effort: str | None = None
 
 
-class SubagentUnsupportedError(RuntimeError):
-    """A subagent-backed agent was pointed at a provider that cannot run it.
+class CliAgentUnsupportedError(RuntimeError):
+    """A file-backed agent was pointed at a provider that cannot run it.
 
     Only Claude accepts an agent definition (``ClaudeAgentOptions.agents``).
-    Codex has no ``--agent`` and no subagent concept; Antigravity lists no
-    agents at all today. Running such an agent on one of them would mean
-    quietly dropping the definition and executing a plain prompt with none of
-    the declared tool restrictions — a read-only agent turned loose. So it is
-    refused loudly instead, and the run fails with this message rather than
-    succeeding as something else. If a provider grows the capability, teach the
-    factory about it here; until then this is the honest answer.
+    Codex has no ``--agent`` and no agent-definition concept; Antigravity has
+    definition files and an ``--agent`` flag, but the flag was verified not to
+    apply the named persona and not even to validate the name. Running such an
+    agent on either would mean quietly dropping the definition and executing a
+    plain prompt with none of the declared tool restrictions — a read-only
+    agent turned loose. So it is refused loudly instead, and the run fails with
+    this message rather than succeeding as something else. If a provider grows
+    the capability, teach the factory about it here; until then this is the
+    honest answer.
     """
 
 
@@ -152,7 +154,7 @@ class LlmSessionFactory:
         provider_id: str,
         project_path: str,
         model: str | None = None,
-        subagent: SubagentDefinition | None = None,
+        cli_agent: CliAgentDefinition | None = None,
     ) -> LlmSession:
         """Create an LLM session for the specified provider.
 
@@ -160,14 +162,14 @@ class LlmSessionFactory:
             provider_id: Provider identifier (e.g., 'anthropic', 'openai')
             project_path: Path to the project directory
             model: Optional model name/alias to use
-            subagent: A Claude Code subagent definition the session must run as
+            cli_agent: A CLI agent definition the session must run as
 
         Returns:
             An LlmSession instance for the provider
 
         Raises:
             ValueError: If the provider is not supported
-            SubagentUnsupportedError: If ``subagent`` is set and the provider
+            CliAgentUnsupportedError: If ``cli_agent`` is set and the provider
                 cannot carry an agent definition
         """
         normalized_id = provider_id.strip().lower()
@@ -175,14 +177,14 @@ class LlmSessionFactory:
         if normalized_id == "anthropic":
             from llm.claude_session import ClaudeSession
             return ClaudeSession(
-                project_path=project_path, model=model, subagent=subagent
+                project_path=project_path, model=model, cli_agent=cli_agent
             )
 
-        if subagent is not None:
-            raise SubagentUnsupportedError(
-                f"agent '{subagent.name}' runs the Claude Code subagent defined at "
-                f"{subagent.source_path}, and the selected provider "
-                f"'{normalized_id}' cannot carry a subagent definition — only "
+        if cli_agent is not None:
+            raise CliAgentUnsupportedError(
+                f"agent '{cli_agent.name}' runs the Claude Code agent defined at "
+                f"{cli_agent.source_path}, and the selected provider "
+                f"'{normalized_id}' cannot carry an agent definition — only "
                 "Claude sessions can. Nothing was run: without the definition the "
                 "turn would be a plain prompt with none of the declared tool "
                 "restrictions. Select Claude in Settings > LLM Configuration, or "

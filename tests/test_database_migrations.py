@@ -334,5 +334,177 @@ class DatabaseMigrationTest(unittest.TestCase):
                 database.DB_PATH = original_db_path
 
 
+class CliAgentRenameMigrationTest(unittest.TestCase):
+    """The `agent_subagent_*` tables carry over without losing a row.
+
+    `agent_subagent_imports` is the *only* record of which file an imported
+    agent runs. Recreating it instead of renaming would turn every agent the
+    user already imported into one that fails its next run naming a file it no
+    longer remembers — a data loss with no error at the moment it happens.
+    """
+
+    def setUp(self):
+        self._original_db_path = database.DB_PATH
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(setattr, database, "DB_PATH", self._original_db_path)
+        database.DB_PATH = Path(self._tmp.name) / "rename.db"
+
+    def _pre_rename_database(self) -> None:
+        """A database as an already-shipped build left it."""
+        with sqlite3.connect(database.DB_PATH) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE agent_subagent_imports (
+                    id TEXT PRIMARY KEY,
+                    source_path TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE UNIQUE INDEX idx_agent_subagent_imports_source_path
+                ON agent_subagent_imports(source_path);
+
+                CREATE TABLE agent_subagent_seen (
+                    source_path TEXT PRIMARY KEY,
+                    candidate_id TEXT,
+                    location TEXT,
+                    name TEXT,
+                    description TEXT,
+                    state TEXT NOT NULL,
+                    detail TEXT,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    missing_since TEXT
+                );
+
+                CREATE TABLE agent_subagent_sweeps (
+                    id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    trigger TEXT,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    error TEXT,
+                    result_json TEXT
+                );
+
+                INSERT INTO agent_subagent_imports (id, source_path, agent_id)
+                VALUES ('imp_1', '/home/u/.claude/agents/watch.md', 'agent_1');
+
+                INSERT INTO agent_subagent_seen (
+                    source_path, candidate_id, location, name, description,
+                    state, detail, first_seen_at, last_seen_at, missing_since
+                ) VALUES (
+                    '/home/u/.claude/agents/watch.md', 'c1', 'user', 'watch',
+                    'Watches.', 'candidate', NULL, '2026-08-01T00:00:00+00:00',
+                    '2026-08-01T00:00:00+00:00', NULL
+                );
+                """
+            )
+            conn.commit()
+
+    def test_existing_import_rows_survive_the_rename(self):
+        self._pre_rename_database()
+
+        database.init_db()
+
+        with sqlite3.connect(database.DB_PATH) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            row = conn.execute(
+                "SELECT source_path, agent_id FROM agent_cli_agent_imports"
+            ).fetchone()
+            seen = conn.execute(
+                "SELECT name, state FROM agent_cli_agent_seen"
+            ).fetchone()
+
+        self.assertIn("agent_cli_agent_imports", tables)
+        self.assertIn("agent_cli_agent_seen", tables)
+        self.assertIn("agent_cli_agent_sweeps", tables)
+        self.assertNotIn("agent_subagent_imports", tables)
+
+        # The pointer is intact.
+        self.assertEqual(row, ("/home/u/.claude/agents/watch.md", "agent_1"))
+        self.assertEqual(seen, ("watch", "candidate"))
+
+    def test_a_database_that_already_recorded_the_old_migrations_still_renames(self):
+        """The actual production shape, and the one the ordering exists for.
+
+        A running server has versions 2026080900/01 recorded, so the two
+        create-if-not-exists migrations never run again. If the rename relied
+        on them it would leave the tables — and every import pointer in them —
+        under the old name where nothing reads them, with no error anywhere.
+        """
+        self._pre_rename_database()
+        with sqlite3.connect(database.DB_PATH) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.executemany(
+                "INSERT OR IGNORE INTO schema_migrations (version, name) VALUES (?, ?)",
+                [
+                    (database.CLI_AGENT_IMPORTS_SCHEMA_VERSION, "subagent_imports"),
+                    (database.CLI_AGENT_SWEEPS_SCHEMA_VERSION, "subagent_sweeps"),
+                ],
+            )
+            conn.commit()
+
+        database.init_db()
+
+        with sqlite3.connect(database.DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT source_path, agent_id FROM agent_cli_agent_imports"
+            ).fetchone()
+            indexes = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                )
+            }
+
+        self.assertEqual(row, ("/home/u/.claude/agents/watch.md", "agent_1"))
+        # The unique index is the thing that makes a re-import a no-op rather
+        # than a duplicate agent; it has to come across too.
+        self.assertIn("idx_agent_cli_agent_imports_source_path", indexes)
+        # And not twice: SQLite keeps a renamed table's indexes under their old
+        # names, so the pre-rename one has to be dropped or the same constraint
+        # ends up enforced by two indexes with divergent names.
+        self.assertNotIn("idx_agent_subagent_imports_source_path", indexes)
+
+    def test_the_rename_is_idempotent_and_a_fresh_database_is_identical(self):
+        self._pre_rename_database()
+        database.init_db()
+        database.init_db()
+
+        with sqlite3.connect(database.DB_PATH) as conn:
+            migrated_columns = [
+                row[1] for row in conn.execute("PRAGMA table_info(agent_cli_agent_imports)")
+            ]
+            count = conn.execute(
+                "SELECT COUNT(*) FROM agent_cli_agent_imports"
+            ).fetchone()[0]
+
+        self.assertEqual(count, 1)
+
+        fresh_path = Path(self._tmp.name) / "fresh.db"
+        database.DB_PATH = fresh_path
+        database.init_db()
+        with sqlite3.connect(fresh_path) as conn:
+            fresh_columns = [
+                row[1] for row in conn.execute("PRAGMA table_info(agent_cli_agent_imports)")
+            ]
+
+        self.assertEqual(sorted(migrated_columns), sorted(fresh_columns))
+
+
 if __name__ == "__main__":
     unittest.main()

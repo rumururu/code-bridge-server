@@ -24,8 +24,9 @@ EVENT_PAIRING_COLUMNS_SCHEMA_VERSION = 2026060601
 BROWSER_SESSIONS_SCHEMA_VERSION = 2026061000
 AGENT_SCRIPTS_SCHEMA_VERSION = 2026072600
 AGENT_NOTIFICATIONS_SCHEMA_VERSION = 2026080200
-SUBAGENT_IMPORTS_SCHEMA_VERSION = 2026080900
-SUBAGENT_SWEEPS_SCHEMA_VERSION = 2026080901
+CLI_AGENT_IMPORTS_SCHEMA_VERSION = 2026080900
+CLI_AGENT_SWEEPS_SCHEMA_VERSION = 2026080901
+CLI_AGENT_RENAME_SCHEMA_VERSION = 2026080902
 
 _PSEUDO_AGENTS = [
     {
@@ -790,13 +791,13 @@ def _migrate_agent_notifications(conn: sqlite3.Connection) -> None:
     """)
 
 
-def _migrate_subagent_imports(conn: sqlite3.Connection) -> None:
-    """Which on-disk Claude subagent file became which Code Bridge agent.
+def _migrate_cli_agent_imports(conn: sqlite3.Connection) -> None:
+    """Which on-disk agent definition file became which Code Bridge agent.
 
-    A Claude Code subagent (``~/.claude/agents/*.md``, a project's
+    A CLI agent definition (``~/.claude/agents/*.md``, a project's
     ``.claude/agents/*.md``, or a plugin's ``agents/*.md``) has no identity in
     this database until someone imports it — see
-    :mod:`agent.subagent_sources`. Once imported, this table is the only
+    :mod:`agent.cli_agent_sources`. Once imported, this table is the only
     record of where that agent came from, and it is what makes importing the
     same file twice a no-op instead of a duplicate: the unique index on
     ``source_path`` is the enforcement, not just documentation of intent.
@@ -810,43 +811,43 @@ def _migrate_subagent_imports(conn: sqlite3.Connection) -> None:
     ``AGENT_SCRIPTS_SCHEMA_VERSION`` above) — same problem, same answer.
     """
     conn.executescript("""
-        CREATE TABLE IF NOT EXISTS agent_subagent_imports (
+        CREATE TABLE IF NOT EXISTS agent_cli_agent_imports (
             id TEXT PRIMARY KEY,
             source_path TEXT NOT NULL,
             agent_id TEXT NOT NULL,
             imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_subagent_imports_source_path
-        ON agent_subagent_imports(source_path);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_cli_agent_imports_source_path
+        ON agent_cli_agent_imports(source_path);
     """)
 
 
-def _migrate_subagent_sweeps(conn: sqlite3.Connection) -> None:
-    """What the server saw last time it looked for subagent files, and when.
+def _migrate_cli_agent_sweeps(conn: sqlite3.Connection) -> None:
+    """What the server saw last time it looked for agent definition files.
 
-    Discovery itself is stateless — :func:`agent.subagent_sources.discover_subagent_candidates`
+    Discovery itself is stateless — :func:`agent.cli_agent_sources.discover_cli_agents`
     walks the disk and returns what is there right now. That answers "what
     exists" and nothing else. These two tables are the memory that turns a
     repeated walk into news:
 
-    ``agent_subagent_seen`` is one row per source path ever discovered, with
+    ``agent_cli_agent_seen`` is one row per source path ever discovered, with
     ``missing_since`` set when a path that used to be there stops being there.
     Without it every sweep would look identical to the first one, so nothing
     could ever be reported as *new*, and — the case that actually costs the
-    user a run — a subagent file deleted out from under an imported agent
+    user a run — a definition file deleted out from under an imported agent
     would go unnoticed until that agent's next scheduled run failed at 3am
     naming a file nobody had touched in weeks.
 
-    ``agent_subagent_sweeps`` holds a single row (``id = 'latest'``) describing
+    ``agent_cli_agent_sweeps`` holds a single row (``id = 'latest'``) describing
     the most recent sweep attempt: when it started, whether it succeeded, and
     what changed. One row because the question a client asks is "when did you
     last look and what did you find", not "show me a year of sweeps"; keeping
     history would grow a JSON blob per sweep forever for a question nobody
     asks. A *failed* attempt overwrites it with ``status = 'failed'`` and the
-    reason, and deliberately does not touch ``agent_subagent_seen`` — the
+    reason, and deliberately does not touch ``agent_cli_agent_seen`` — the
     durable listing survives a failed look, because "the walk broke" and "you
-    have no subagents" must never render as the same thing.
+    have no agents" must never render as the same thing.
 
     Timestamps here are written by Python as offset-aware UTC ISO strings
     rather than left to ``CURRENT_TIMESTAMP``. These columns are read back and
@@ -855,7 +856,7 @@ def _migrate_subagent_sweeps(conn: sqlite3.Connection) -> None:
     is exactly the confusion :mod:`core.timestamps` exists to stop.
     """
     conn.executescript("""
-        CREATE TABLE IF NOT EXISTS agent_subagent_seen (
+        CREATE TABLE IF NOT EXISTS agent_cli_agent_seen (
             source_path TEXT PRIMARY KEY,
             candidate_id TEXT,
             location TEXT,
@@ -868,10 +869,10 @@ def _migrate_subagent_sweeps(conn: sqlite3.Connection) -> None:
             missing_since TEXT
         );
 
-        CREATE INDEX IF NOT EXISTS idx_agent_subagent_seen_missing
-        ON agent_subagent_seen(missing_since);
+        CREATE INDEX IF NOT EXISTS idx_agent_cli_agent_seen_missing
+        ON agent_cli_agent_seen(missing_since);
 
-        CREATE TABLE IF NOT EXISTS agent_subagent_sweeps (
+        CREATE TABLE IF NOT EXISTS agent_cli_agent_sweeps (
             id TEXT PRIMARY KEY,
             status TEXT NOT NULL,
             trigger TEXT,
@@ -881,6 +882,78 @@ def _migrate_subagent_sweeps(conn: sqlite3.Connection) -> None:
             result_json TEXT
         );
     """)
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def _migrate_cli_agent_rename(conn: sqlite3.Connection) -> None:
+    """Carry the three ``agent_subagent_*`` tables over to ``agent_cli_agent_*``.
+
+    The feature these tables serve was built for Claude Code and named after
+    Claude's word for it. It now discovers agent definitions authored with any
+    supported CLI, so every layer above was renamed; leaving the storage on the
+    old name would leave exactly one place where the next reader has to know
+    the history to find the data.
+
+    Renaming rather than recreating is the whole point: these rows are not
+    cache. ``agent_subagent_imports`` is the *only* record of which file an
+    imported agent runs, so dropping and recreating it would turn every
+    already-imported agent into one that fails its next run naming a file it
+    no longer remembers. ``ALTER TABLE … RENAME TO`` moves the rows and their
+    indexes in one statement, inside the same transaction as the rest of the
+    migration.
+
+    Guarded both ways so it is safe on any database: a fresh one has the new
+    tables already (the two migrations above create them under the new names)
+    and nothing to rename; an existing one has the old names and gets them
+    moved; a half-migrated one — new table present *and* old table present,
+    which only happens if this ran and then an older build recreated the old
+    name — keeps the new table and leaves the stray behind rather than
+    clobbering live rows with stale ones.
+
+    The tables' columns are untouched: this migration moves data, it does not
+    reshape it.
+    """
+    renames = (
+        ("agent_subagent_imports", "agent_cli_agent_imports"),
+        ("agent_subagent_seen", "agent_cli_agent_seen"),
+        ("agent_subagent_sweeps", "agent_cli_agent_sweeps"),
+    )
+    for old_name, new_name in renames:
+        if not _table_exists(conn, old_name):
+            continue
+        if _table_exists(conn, new_name):
+            logger.warning(
+                "cli agent rename: both %s and %s exist; keeping %s and leaving "
+                "the old table in place rather than overwriting live rows",
+                old_name,
+                new_name,
+                new_name,
+            )
+            continue
+        conn.execute(f"ALTER TABLE {old_name} RENAME TO {new_name}")
+
+    # SQLite carries indexes across a table rename but keeps their old *names*,
+    # so without this the re-created ones below would sit alongside identical
+    # indexes under the pre-rename name — same constraint enforced twice, and
+    # a name that no longer matches anything in this file.
+    for stale_index in (
+        "idx_agent_subagent_imports_source_path",
+        "idx_agent_subagent_seen_missing",
+    ):
+        conn.execute(f"DROP INDEX IF EXISTS {stale_index}")
+
+    # The two create-if-not-exists scripts above only ran on databases that had
+    # not seen them; re-running them here is what gives a renamed database the
+    # indexes under their new names, and is a no-op everywhere else.
+    _migrate_cli_agent_imports(conn)
+    _migrate_cli_agent_sweeps(conn)
+
 
 
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
@@ -935,15 +1008,29 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
         "agent_notifications",
         _migrate_agent_notifications,
     ),
+    # The rename runs *before* the two create-if-not-exists migrations, and
+    # calls them itself once the tables are moved. Order matters in both
+    # directions: on an already-migrated database only the rename is
+    # outstanding (the other two versions are recorded), so it has to be able
+    # to finish the job alone; on a database that predates the version records
+    # entirely, letting the creates go first would make new empty tables
+    # alongside the populated old ones and the rename would then decline to
+    # clobber them — leaving the user's import pointers stranded under the old
+    # name where nothing reads them.
     (
-        SUBAGENT_IMPORTS_SCHEMA_VERSION,
-        "subagent_imports",
-        _migrate_subagent_imports,
+        CLI_AGENT_RENAME_SCHEMA_VERSION,
+        "cli_agent_rename",
+        _migrate_cli_agent_rename,
     ),
     (
-        SUBAGENT_SWEEPS_SCHEMA_VERSION,
-        "subagent_sweeps",
-        _migrate_subagent_sweeps,
+        CLI_AGENT_IMPORTS_SCHEMA_VERSION,
+        "cli_agent_imports",
+        _migrate_cli_agent_imports,
+    ),
+    (
+        CLI_AGENT_SWEEPS_SCHEMA_VERSION,
+        "cli_agent_sweeps",
+        _migrate_cli_agent_sweeps,
     ),
 )
 

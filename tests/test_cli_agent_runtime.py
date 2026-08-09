@@ -1,21 +1,21 @@
-"""An imported subagent must run the file, not a copy of it — or fail saying so.
+"""An imported CLI agent runs the file, not a copy of it — or fails saying so.
 
-Importing a Claude Code subagent used to copy its prompt into a Code Bridge
+Importing an agent definition used to copy its prompt into a Code Bridge
 agent. Three things went wrong with the copy, and these tests hold each one
 shut:
 
-The copy went stale. Edit the source `.md` and the scheduled run kept
+The copy went stale. Edit the source file and the scheduled run kept
 executing last month's text, with nothing anywhere reporting the divergence.
 
 The declared tools were decoration. `tools: Read, Glob` was stored and never
-passed to anything, so a subagent its author wrote as read-only ran with
+passed to anything, so a Claude agent its author wrote as read-only ran with
 whatever the CLI allows — writing files at 3am on a schedule nobody watches.
 
-And most installed subagents are not standalone at all. They are workers a
-parent dispatches with a payload and refuse anything else, so scheduling one
-buys a refusal every night. Offering them is a trap; hiding them without
-saying why is a different trap, so an excluded subagent must still be
-reportable with its reason.
+And most installed Claude plugin agents are not standalone at all. They are
+workers a parent dispatches with a payload and refuse anything else, so
+scheduling one buys a refusal every night. Offering them is a trap; hiding
+them without saying why is a different trap, so an excluded definition must
+still be reportable with its reason.
 
 Two failure modes must stay loud. A source that is gone or unparseable fails
 the run naming the file — never falls back to the stored stub. And a provider
@@ -38,15 +38,15 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from agent import agent_store, browser_session_store, subagent_sources  # noqa: E402
-from agent.subagent_eligibility import (  # noqa: E402
+from agent import agent_store, browser_session_store, cli_agent_sources  # noqa: E402
+from agent.cli_agent_eligibility import (  # noqa: E402
     EXCLUDED_DIRECT_INVOCATION_DISCLAIMED,
     EXCLUDED_DISPATCH_TARGET,
     classify_candidates,
 )
-from agent.subagent_runtime import (  # noqa: E402
-    SubagentSourceUnavailableError,
-    resolve_subagent_definition,
+from agent.cli_agent_runtime import (  # noqa: E402
+    CliAgentSourceUnavailableError,
+    resolve_cli_agent_definition,
 )
 from agent.task_orchestrator import (  # noqa: E402
     execute_task_orchestration,
@@ -56,11 +56,11 @@ from core import database  # noqa: E402
 from llm.claude_session import ClaudeSession, SessionManager  # noqa: E402
 from llm.llm_session import (  # noqa: E402
     LlmSessionFactory,
-    SubagentDefinition,
-    SubagentUnsupportedError,
+    CliAgentDefinition,
+    CliAgentUnsupportedError,
 )
 
-SUBAGENT_FILE = textwrap.dedent(
+CLI_AGENT_FILE = textwrap.dedent(
     """\
     ---
     name: disk-watch
@@ -88,11 +88,11 @@ def _candidate(**over):
         body="Body.",
     )
     base.update(over)
-    return subagent_sources.SubagentCandidate(**base)
+    return cli_agent_sources.CliAgentCandidate(**base)
 
 
 class StandaloneEligibilityTest(unittest.TestCase):
-    """Only subagents that can run alone are offered — and the rest say why."""
+    """Only definitions that can run alone are offered — and the rest say why."""
 
     def test_an_author_who_disclaims_direct_invocation_is_taken_at_their_word(self):
         """`description` is the field Claude Code reads to decide invocation.
@@ -173,12 +173,12 @@ class StandaloneEligibilityTest(unittest.TestCase):
         enforced tool list.
         """
         self.assertEqual(
-            subagent_sources._parse_tools("Read, Bash, Agent(x:one, x:two)"),
+            cli_agent_sources._parse_tools("Read, Bash, Agent(x:one, x:two)"),
             ["Read", "Bash", "Agent(x:one, x:two)"],
         )
 
 
-class SubagentImportFilteringTest(unittest.TestCase):
+class CliAgentImportFilteringTest(unittest.TestCase):
     """Discovery offers the standalone ones and reports the rest."""
 
     def setUp(self):
@@ -189,9 +189,9 @@ class SubagentImportFilteringTest(unittest.TestCase):
             "not for direct invocation.\n---\n\nWorker body.\n",
             encoding="utf-8",
         )
-        (self.root / "watch.md").write_text(SUBAGENT_FILE, encoding="utf-8")
+        (self.root / "watch.md").write_text(CLI_AGENT_FILE, encoding="utf-8")
         self._locations = mock.patch.object(
-            subagent_sources,
+            cli_agent_sources,
             "_all_source_locations",
             return_value=[("user", self.root)],
         )
@@ -201,8 +201,8 @@ class SubagentImportFilteringTest(unittest.TestCase):
         self._locations.stop()
         self._tmp.cleanup()
 
-    def test_a_dispatch_dependent_subagent_is_excluded_but_still_reported(self):
-        sweep = subagent_sources.discover_subagent_candidates()
+    def test_a_dispatch_dependent_definition_is_excluded_but_still_reported(self):
+        sweep = cli_agent_sources.discover_cli_agents()
 
         self.assertEqual([c.name for c in sweep.candidates], ["disk-watch"])
         self.assertEqual([e.candidate.name for e in sweep.excluded], ["worker"])
@@ -213,20 +213,20 @@ class SubagentImportFilteringTest(unittest.TestCase):
         self.assertTrue(view["excluded_detail"])
         self.assertEqual(view["name"], "worker")
 
-    def test_importing_an_excluded_subagent_is_refused_with_the_reason(self):
+    def test_importing_an_excluded_definition_is_refused_with_the_reason(self):
         """"Not discoverable" would be a lie — the file parsed fine."""
         with mock.patch.object(
-            subagent_sources, "_find_import_by_source_path", return_value=None
+            cli_agent_sources, "_find_import_by_source_path", return_value=None
         ):
-            with self.assertRaises(subagent_sources.SubagentImportError) as caught:
-                subagent_sources.import_subagent(str(self.root / "worker.md"))
+            with self.assertRaises(cli_agent_sources.CliAgentImportError) as caught:
+                cli_agent_sources.import_cli_agent(str(self.root / "worker.md"))
 
         message = str(caught.exception)
         self.assertIn("not standalone-runnable", message)
         self.assertIn(EXCLUDED_DIRECT_INVOCATION_DISCLAIMED, message)
 
 
-class ClaudeSessionSubagentOptionsTest(unittest.TestCase):
+class ClaudeSessionCliAgentOptionsTest(unittest.TestCase):
     """The definition has to actually reach the SDK, or tools stay decoration."""
 
     @staticmethod
@@ -241,15 +241,15 @@ class ClaudeSessionSubagentOptionsTest(unittest.TestCase):
             effort="medium",
         )
         base.update(over)
-        return SubagentDefinition(**base)
+        return CliAgentDefinition(**base)
 
     def test_the_definition_and_the_selection_both_reach_the_options(self):
         """Both halves are load-bearing.
 
         The definition is what makes `tools` enforced; `--agent` is what
-        selects it, and is also the only way a plugin subagent runs at all.
+        selects it, and is also the only way a plugin agent runs at all.
         """
-        session = ClaudeSession(project_path="/tmp", subagent=self._definition())
+        session = ClaudeSession(project_path="/tmp", cli_agent=self._definition())
 
         options = session._build_options()
 
@@ -263,7 +263,7 @@ class ClaudeSessionSubagentOptionsTest(unittest.TestCase):
 
     def test_an_unknown_effort_is_dropped_rather_than_failing_the_run(self):
         session = ClaudeSession(
-            project_path="/tmp", subagent=self._definition(effort="ludicrous")
+            project_path="/tmp", cli_agent=self._definition(effort="ludicrous")
         )
 
         options = session._build_options()
@@ -282,14 +282,14 @@ class ClaudeSessionSubagentOptionsTest(unittest.TestCase):
         Reuse would apply one agent's tool restrictions to the other step — or
         let a restricted step escape them.
         """
-        created: list[SubagentDefinition | None] = []
+        created: list[CliAgentDefinition | None] = []
 
         class FakeSession:
             provider_id = "anthropic"
 
-            def __init__(self, subagent):
+            def __init__(self, cli_agent):
                 self.project_path = "/tmp"
-                self.subagent = subagent
+                self.cli_agent = cli_agent
                 self.closed = False
 
             async def close(self):
@@ -298,9 +298,9 @@ class ClaudeSessionSubagentOptionsTest(unittest.TestCase):
             async def set_model(self, model):
                 return None
 
-        def fake_create(*, provider_id, project_path, model, subagent):
-            created.append(subagent)
-            return FakeSession(subagent)
+        def fake_create(*, provider_id, project_path, model, cli_agent):
+            created.append(cli_agent)
+            return FakeSession(cli_agent)
 
         manager = SessionManager()
         first = self._definition()
@@ -308,13 +308,13 @@ class ClaudeSessionSubagentOptionsTest(unittest.TestCase):
 
         with mock.patch.object(LlmSessionFactory, "create_session", fake_create):
             session_a = asyncio.run(
-                manager.get_or_create_session("task:1", "/tmp", subagent=first)
+                manager.get_or_create_session("task:1", "/tmp", cli_agent=first)
             )
             session_b = asyncio.run(
-                manager.get_or_create_session("task:1", "/tmp", subagent=first)
+                manager.get_or_create_session("task:1", "/tmp", cli_agent=first)
             )
             session_c = asyncio.run(
-                manager.get_or_create_session("task:1", "/tmp", subagent=second)
+                manager.get_or_create_session("task:1", "/tmp", cli_agent=second)
             )
 
         self.assertIs(session_a, session_b)
@@ -324,11 +324,11 @@ class ClaudeSessionSubagentOptionsTest(unittest.TestCase):
 
     def test_a_provider_that_cannot_carry_a_definition_refuses(self):
         """Silently running the prompt as plain text unrestricts the agent."""
-        with self.assertRaises(SubagentUnsupportedError) as caught:
+        with self.assertRaises(CliAgentUnsupportedError) as caught:
             LlmSessionFactory.create_session(
                 provider_id="openai",
                 project_path="/tmp",
-                subagent=self._definition(),
+                cli_agent=self._definition(),
             )
 
         message = str(caught.exception)
@@ -336,31 +336,48 @@ class ClaudeSessionSubagentOptionsTest(unittest.TestCase):
         self.assertIn("/tmp/watch.md", message)
         self.assertIn("Nothing was run", message)
 
+    def test_antigravity_is_refused_too_despite_having_definition_files(self):
+        """It has agent files and an --agent flag; neither makes it able to run one.
 
-class SubagentBackedRunTest(unittest.TestCase):
+        Verified: `agy --agent <name>` does not apply the persona, and an
+        unknown name is accepted silently. Accepting it here would mean pasting
+        the prompt into a plain session and calling that "running your agent".
+        """
+        with self.assertRaises(CliAgentUnsupportedError) as caught:
+            LlmSessionFactory.create_session(
+                provider_id="antigravity",
+                project_path="/tmp",
+                cli_agent=self._definition(),
+            )
+
+        self.assertIn("antigravity", str(caught.exception))
+        self.assertIn("Nothing was run", str(caught.exception))
+
+
+class CliAgentBackedRunTest(unittest.TestCase):
     """End to end: what a run hands the session is the file, read just now."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.source = (self.root / "watch.md").resolve()
-        self.source.write_text(SUBAGENT_FILE, encoding="utf-8")
+        self.source.write_text(CLI_AGENT_FILE, encoding="utf-8")
 
         self._db = tempfile.TemporaryDirectory()
         self._original_db_path = database.DB_PATH
-        database.DB_PATH = Path(self._db.name) / "subagent_runtime.db"
+        database.DB_PATH = Path(self._db.name) / "cli_agent_runtime.db"
         agent_store._agent_store = None
         browser_session_store._browser_session_store = None
         database.init_db()
         self.store = agent_store.get_agent_store()
 
         self._locations = mock.patch.object(
-            subagent_sources,
+            cli_agent_sources,
             "_all_source_locations",
             return_value=[("user", self.root)],
         )
         self._locations.start()
-        self.agent = subagent_sources.import_subagent(str(self.source)).agent
+        self.agent = cli_agent_sources.import_cli_agent(str(self.source)).agent
 
     def tearDown(self):
         self._locations.stop()
@@ -371,7 +388,7 @@ class SubagentBackedRunTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _run(self, provider_id: str = "anthropic"):
-        """Execute one run, returning (subagent handed to the session, messages)."""
+        """Execute one run, returning (definition handed to the session, messages)."""
         task = self.store.create_task(
             title="Check the disk",
             assigned_agent_id=self.agent["id"],
@@ -386,7 +403,7 @@ class SubagentBackedRunTest(unittest.TestCase):
         messages: list[str] = []
 
         async def fake_create_chat_session(**kwargs):
-            handed.append(kwargs.get("subagent"))
+            handed.append(kwargs.get("cli_agent"))
             return object()
 
         async def fake_stream(_sink, _session, **kwargs):
@@ -437,7 +454,7 @@ class SubagentBackedRunTest(unittest.TestCase):
         first_handed, _messages, _steps = self._run()
 
         self.source.write_text(
-            SUBAGENT_FILE.replace("ORIGINAL", "EDITED").replace(
+            CLI_AGENT_FILE.replace("ORIGINAL", "EDITED").replace(
                 "tools: Read, Glob", "tools: Read"
             ),
             encoding="utf-8",
@@ -472,7 +489,7 @@ class SubagentBackedRunTest(unittest.TestCase):
         self.assertNotEqual(steps[0]["status"], "completed")
         message = self._only_failure()
         self.assertIn(str(self.source), message)
-        self.assertIn(subagent_sources.SKIP_NO_FRONTMATTER, message)
+        self.assertIn(cli_agent_sources.SKIP_NO_FRONTMATTER, message)
 
     def test_a_non_claude_provider_is_reported_not_silently_downgraded(self):
         """The real session factory runs here — it is the thing being tested.
@@ -506,21 +523,21 @@ class SubagentBackedRunTest(unittest.TestCase):
         ]
         self.assertEqual(len(failures), 1, failures)
         self.assertIn("openai", failures[0])
-        self.assertIn("cannot carry a subagent definition", failures[0])
+        self.assertIn("cannot carry an agent definition", failures[0])
         self.assertIn(str(self.source), failures[0])
 
     def test_an_ordinary_agent_is_unaffected(self):
-        """resolve_subagent_definition returning None is the common case."""
+        """resolve_cli_agent_definition returning None is the common case."""
         plain = self.store.create_agent(name="plain", flow_json=[])
 
-        self.assertIsNone(resolve_subagent_definition(plain["id"]))
-        self.assertIsNone(resolve_subagent_definition(None))
+        self.assertIsNone(resolve_cli_agent_definition(plain["id"]))
+        self.assertIsNone(resolve_cli_agent_definition(None))
 
     def test_the_resolver_raises_rather_than_returning_the_stored_stub(self):
         self.source.unlink()
 
-        with self.assertRaises(SubagentSourceUnavailableError) as caught:
-            resolve_subagent_definition(self.agent["id"])
+        with self.assertRaises(CliAgentSourceUnavailableError) as caught:
+            resolve_cli_agent_definition(self.agent["id"])
 
         self.assertIn(str(self.source), str(caught.exception))
 

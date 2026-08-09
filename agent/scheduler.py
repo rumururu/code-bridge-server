@@ -13,8 +13,8 @@ advance ``next_run_at`` based on the schedule expression.
 
 This is also the only periodic timer the server owns, so other work that has
 to happen "every so often" rides this tick rather than starting a rival loop —
-see :meth:`TaskScheduler._sweep_subagents_if_due`, which asks
-:mod:`agent.subagent_sweep` whether its (much coarser) interval has elapsed.
+see :meth:`TaskScheduler._sweep_cli_agents_if_due`, which asks
+:mod:`agent.cli_agent_sweep` whether its (much coarser) interval has elapsed.
 """
 
 from __future__ import annotations
@@ -310,16 +310,16 @@ class TaskScheduler:
         due = await asyncio.to_thread(store.list_due)
         for schedule in due:
             await _fire_schedule(schedule)
-        await self._sweep_subagents_if_due()
+        await self._sweep_cli_agents_if_due()
         return len(due)
 
-    async def _sweep_subagents_if_due(self) -> None:
-        """Let the subagent sweep piggyback on this loop, if it is due.
+    async def _sweep_cli_agents_if_due(self) -> None:
+        """Let the CLI agent sweep piggyback on this loop, if it is due.
 
         Deliberately not a second background task: this process already owns
         exactly one periodic timer, and a second one would mean two things to
         start, two to stop, and two ways for the lifespan to leak a task. The
-        sweep's own cadence (hours, see :mod:`agent.subagent_sweep`) is far
+        sweep's own cadence (hours, see :mod:`agent.cli_agent_sweep`) is far
         coarser than this tick, so it decides for itself whether it is due
         from a persisted timestamp and almost always answers no.
 
@@ -328,11 +328,11 @@ class TaskScheduler:
         run.
         """
         try:
-            from agent.subagent_sweep import maybe_run_due_subagent_sweep
+            from agent.cli_agent_sweep import maybe_run_due_cli_agent_sweep
 
-            await asyncio.to_thread(maybe_run_due_subagent_sweep)
+            await asyncio.to_thread(maybe_run_due_cli_agent_sweep)
         except Exception:
-            logger.exception("scheduler: subagent sweep failed")
+            logger.exception("scheduler: cli agent sweep failed")
 
 
 _scheduler: TaskScheduler | None = None

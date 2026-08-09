@@ -28,7 +28,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import AgentDefinition
 
 from .claude_sdk_events import message_to_event, session_id_of
-from .llm_session import LlmSession, SubagentDefinition
+from .llm_session import LlmSession, CliAgentDefinition
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ ASK_USER_SYSTEM_PROMPT = (
 )
 
 
-#: The reasoning-effort values a Claude agent definition accepts. A subagent
+#: The reasoning-effort values a Claude agent definition accepts. A definition
 #: file is free to write something else; an unrecognized value is dropped
 #: rather than sent, because the SDK would reject the whole definition and the
 #: run would fail over a decorative hint.
@@ -62,9 +62,12 @@ class ClaudeSession(LlmSession):
     project_path: str
     default_permission_mode: str = "default"
     model: str | None = None
-    #: When set, this session runs *as* a named Claude Code subagent instead of
-    #: as a plain Claude Code session. See :meth:`_build_options`.
-    subagent: SubagentDefinition | None = None
+    #: When set, this session runs *as* the named Claude Code agent this
+    #: definition describes, instead of as a plain Claude Code session. This is
+    #: the only place a definition can be run: it is the mechanism that makes
+    #: the declared tools real, and no other provider has one — the factory
+    #: refuses them rather than dropping it. See :meth:`_build_options`.
+    cli_agent: CliAgentDefinition | None = None
     _claude_path: str = field(default="", init=False)
     _session_id: str | None = field(default=None, init=False)
     _client: ClaudeSDKClient | None = field(default=None, init=False)
@@ -174,12 +177,12 @@ class ClaudeSession(LlmSession):
         class ran; Claude Code now rejects that flag for non-Anthropic hosts,
         which killed every Claude turn. The SDK owns the transport instead.
 
-        When :attr:`subagent` is set, the turn runs as that named agent: the
+        When :attr:`cli_agent` is set, the turn runs as that named agent: the
         definition goes in ``options.agents`` (the SDK sends it in the
         initialize request) and ``--agent <name>`` selects it. Both halves are
         needed and neither is decorative — the definition is what makes the
         declared ``tools`` real (a session given ``tools: Read, Glob`` answers
-        that it has no Bash), and it is also the only way a *plugin* subagent
+        that it has no Bash), and it is also the only way a *plugin* agent
         runs at all, since ``--agent`` on its own resolves user and project
         agents only. Passing the prompt as ordinary text instead, which is what
         this used to do, silently gives a read-only agent write access.
@@ -205,29 +208,29 @@ class ClaudeSession(LlmSession):
             options.model = self.model.strip()
         if self._session_id:
             options.resume = self._session_id
-        self._apply_subagent(options)
+        self._apply_cli_agent(options)
         return options
 
-    def _apply_subagent(self, options: ClaudeAgentOptions) -> None:
-        """Attach the subagent definition and select it, if there is one."""
-        subagent = self.subagent
-        if subagent is None:
+    def _apply_cli_agent(self, options: ClaudeAgentOptions) -> None:
+        """Attach the agent definition and select it, if there is one."""
+        cli_agent = self.cli_agent
+        if cli_agent is None:
             return
         definition = AgentDefinition(
-            description=subagent.description or subagent.name,
-            prompt=subagent.prompt,
+            description=cli_agent.description or cli_agent.name,
+            prompt=cli_agent.prompt,
         )
-        if subagent.tools:
-            definition.tools = list(subagent.tools)
+        if cli_agent.tools:
+            definition.tools = list(cli_agent.tools)
         # `model: inherit` is meaningful here in a way it is not in the agent
         # record: at this layer there really is a parent session to inherit
         # from, so it is passed through rather than resolved to an id.
-        if subagent.model:
-            definition.model = subagent.model
-        if subagent.effort in _AGENT_EFFORT_LEVELS:
-            definition.effort = subagent.effort
-        options.agents = {subagent.name: definition}
-        options.extra_args = {**(options.extra_args or {}), "agent": subagent.name}
+        if cli_agent.model:
+            definition.model = cli_agent.model
+        if cli_agent.effort in _AGENT_EFFORT_LEVELS:
+            definition.effort = cli_agent.effort
+        options.agents = {cli_agent.name: definition}
+        options.extra_args = {**(options.extra_args or {}), "agent": cli_agent.name}
 
     async def _ensure_client(self, permission_mode: str | None = None) -> None:
         """Connect the SDK client if it is not already live."""
@@ -622,7 +625,7 @@ class SessionManager:
         project_path: str,
         provider_id: str = "anthropic",
         model: str | None = None,
-        subagent: SubagentDefinition | None = None,
+        cli_agent: CliAgentDefinition | None = None,
     ) -> LlmSession:
         """Get existing session or create one for the specified provider.
 
@@ -638,9 +641,9 @@ class SessionManager:
         # ~/.code-bridge/global_chat, so every bash call runs in the wrong
         # cwd and `git log` reports "not a git repository".
         #
-        # The subagent check is the same class of bug with sharper teeth: the
+        # The cli_agent check is the same class of bug with sharper teeth: the
         # scope key is the task, so two steps of one task share a session. If a
-        # subagent-backed step reused the session a plain step opened, the
+        # definition-backed step reused the session a plain step opened, the
         # declared tools would never be applied; the other way round, a plain
         # step would silently inherit another agent's restrictions. A changed
         # source file also lands here, because the definition is compared by
@@ -648,7 +651,7 @@ class SessionManager:
         if existing is not None and (
             existing.provider_id != provider_id
             or getattr(existing, "project_path", None) != project_path
-            or getattr(existing, "subagent", None) != subagent
+            or getattr(existing, "cli_agent", None) != cli_agent
         ):
             await existing.close()
             existing = None
@@ -657,15 +660,15 @@ class SessionManager:
         if existing is None:
             import logging as _lg
             _lg.getLogger("llm.session_manager").warning(
-                "[session_manager] creating session provider=%s project=%s path=%r model=%s subagent=%s",
+                "[session_manager] creating session provider=%s project=%s path=%r model=%s cli_agent=%s",
                 provider_id, project_name, project_path, model,
-                subagent.name if subagent is not None else None,
+                cli_agent.name if cli_agent is not None else None,
             )
             session = LlmSessionFactory.create_session(
                 provider_id=provider_id,
                 project_path=project_path,
                 model=model,
-                subagent=subagent,
+                cli_agent=cli_agent,
             )
             self._sessions[project_name] = session
         else:
