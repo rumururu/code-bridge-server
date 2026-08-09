@@ -62,4 +62,5 @@ class ChatSessionServiceTest(unittest.IsolatedAsyncioTestCase):
             "/tmp/demo",
             provider_id="openai",
             model="gpt-4.1",
+            subagent=None,
         )

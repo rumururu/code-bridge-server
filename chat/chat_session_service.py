@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from llm.claude_session import get_session_manager
-from llm.llm_session import LlmSessionFactory
+from llm.llm_session import LlmSessionFactory, SubagentDefinition
 from llm.llm_settings import get_llm_options_snapshot
 
 
@@ -60,13 +60,22 @@ async def create_chat_session(
     project_name: str,
     project_path: str,
     selection: ChatProviderSelection,
+    subagent: SubagentDefinition | None = None,
 ):
-    """Create or fetch the per-project chat session for selected provider."""
+    """Create or fetch the per-project chat session for selected provider.
+
+    ``subagent`` is set when the agent being run is backed by a Claude Code
+    subagent file: the session must run *as* that agent so the prompt and the
+    tools the file declares are the ones in force. Only Claude can carry one —
+    the factory raises ``SubagentUnsupportedError`` for any other provider
+    rather than dropping it and running a plain prompt.
+    """
     session_manager = get_session_manager()
     session = await session_manager.get_or_create_session(
         project_name,
         project_path,
         provider_id=selection.provider_id,
         model=selection.model,
+        subagent=subagent,
     )
     return session

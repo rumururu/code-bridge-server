@@ -33,6 +33,7 @@ from agent.script_models import (
     ScriptRegister,
     ScriptUpdate,
 )
+from agent.subagent_models import SubagentImportRequest
 from policy.policy_models import PolicyRuleCreate
 
 from . import agents as agents_routes
@@ -40,6 +41,7 @@ from . import approvals as approvals_routes
 from . import policies as policies_routes
 from . import script_proposals as script_proposals_routes
 from . import scripts as scripts_routes
+from . import subagents as subagents_routes
 from .deps import require_local_access
 
 router = APIRouter(
@@ -338,6 +340,25 @@ async def update_script(script_id: str, body: ScriptUpdate) -> dict[str, Any]:
 @router.delete("/scripts/{script_id}", response_model=None)
 async def delete_script(script_id: str) -> dict[str, Any]:
     return await scripts_routes.delete_script(script_id)
+
+
+# Discovering and importing Claude Code subagents. Same shared-router
+# reasoning as routes/subagents.py's module docstring (importing is the same
+# class of authoring POST /agents already allows an api-key holder to do
+# directly) — these are mirrors for the no-key dashboard, not a stricter
+# gate. Kept here for the same reason every other shared agent-builder read
+# in this file is mirrored: IP-login/local-network trust is a separate
+# mechanism from pairing, and the dashboard should not depend on it being on.
+
+
+@router.get("/subagents", response_model=None)
+async def list_subagent_candidates() -> dict[str, Any]:
+    return await subagents_routes.list_subagent_candidates()
+
+
+@router.post("/subagents/import", response_model=None)
+async def import_subagent_route(body: SubagentImportRequest) -> dict[str, Any]:
+    return await subagents_routes.import_subagent_route(body)
 
 
 @router.get("/approvals/pending", response_model=None)

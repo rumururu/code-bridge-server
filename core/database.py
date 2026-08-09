@@ -24,6 +24,7 @@ EVENT_PAIRING_COLUMNS_SCHEMA_VERSION = 2026060601
 BROWSER_SESSIONS_SCHEMA_VERSION = 2026061000
 AGENT_SCRIPTS_SCHEMA_VERSION = 2026072600
 AGENT_NOTIFICATIONS_SCHEMA_VERSION = 2026080200
+SUBAGENT_IMPORTS_SCHEMA_VERSION = 2026080900
 
 _PSEUDO_AGENTS = [
     {
@@ -788,6 +789,38 @@ def _migrate_agent_notifications(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migrate_subagent_imports(conn: sqlite3.Connection) -> None:
+    """Which on-disk Claude subagent file became which Code Bridge agent.
+
+    A Claude Code subagent (``~/.claude/agents/*.md``, a project's
+    ``.claude/agents/*.md``, or a plugin's ``agents/*.md``) has no identity in
+    this database until someone imports it — see
+    :mod:`agent.subagent_sources`. Once imported, this table is the only
+    record of where that agent came from, and it is what makes importing the
+    same file twice a no-op instead of a duplicate: the unique index on
+    ``source_path`` is the enforcement, not just documentation of intent.
+
+    Deliberately its own table rather than a key inside ``agents.policy_
+    overrides_json``: that column drives (or will drive) approval-gating
+    reads, and stuffing import provenance in there risks a future reader
+    treating decorative metadata as a rule. A dedicated table with a real
+    unique constraint is also the same shape this codebase already uses for
+    an external resource with a path (see ``agent_scripts`` /
+    ``AGENT_SCRIPTS_SCHEMA_VERSION`` above) — same problem, same answer.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS agent_subagent_imports (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_subagent_imports_source_path
+        ON agent_subagent_imports(source_path);
+    """)
+
+
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (
         LEGACY_FOUNDATION_SCHEMA_VERSION,
@@ -839,6 +872,11 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
         AGENT_NOTIFICATIONS_SCHEMA_VERSION,
         "agent_notifications",
         _migrate_agent_notifications,
+    ),
+    (
+        SUBAGENT_IMPORTS_SCHEMA_VERSION,
+        "subagent_imports",
+        _migrate_subagent_imports,
     ),
 )
 
