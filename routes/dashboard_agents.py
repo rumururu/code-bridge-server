@@ -33,7 +33,7 @@ from agent.script_models import (
     ScriptRegister,
     ScriptUpdate,
 )
-from agent.subagent_models import SubagentImportRequest
+from agent.subagent_models import SubagentAutoImportUpdate, SubagentImportRequest
 from policy.policy_models import PolicyRuleCreate
 
 from . import agents as agents_routes
@@ -360,6 +360,24 @@ async def list_subagent_candidates() -> dict[str, Any]:
 @router.post("/subagents/import", response_model=None)
 async def import_subagent_route(body: SubagentImportRequest) -> dict[str, Any]:
     return await subagents_routes.import_subagent_route(body)
+
+
+# The periodic sweep's stored result. The dashboard needs this as much as the
+# phone does — it is where "when did the server last look, and did an imported
+# agent's source file disappear" is answered — and without the mirror the
+# dashboard's own prefix 404s on it, which is how it was missed the first time.
+
+
+@router.get("/subagents/sweep", response_model=None)
+async def get_subagent_sweep_state() -> dict[str, Any]:
+    return await subagents_routes.get_subagent_sweep_state()
+
+
+@router.put("/subagents/sweep/settings", response_model=None)
+async def update_subagent_sweep_settings(
+    body: SubagentAutoImportUpdate,
+) -> dict[str, Any]:
+    return await subagents_routes.update_subagent_sweep_settings(body)
 
 
 @router.get("/approvals/pending", response_model=None)
