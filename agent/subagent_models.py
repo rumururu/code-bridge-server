@@ -26,4 +26,17 @@ class SubagentImportRequest(BaseModel):
     source_path: str = Field(min_length=1)
 
 
-__all__ = ["SubagentImportRequest"]
+class SubagentAutoImportUpdate(BaseModel):
+    """Turn the periodic sweep's auto-import on or off.
+
+    Off by default and deliberately so — see
+    :mod:`agent.subagent_sweep`. Turning it on affects subagents discovered
+    *from then on*; it does not reach back and import everything already on
+    record, which is exactly the "25 agents appeared behind my back" outcome
+    the default guards against.
+    """
+
+    enabled: bool
+
+
+__all__ = ["SubagentAutoImportUpdate", "SubagentImportRequest"]

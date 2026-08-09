@@ -75,6 +75,29 @@ def list_step_operations() -> dict[str, Any]:
     return {"operations_by_step_type": step_type_operation_catalog()}
 
 
+# The catalogs below are readable by the phone, not just the dashboard.
+#
+# They were dashboard-only on the reasoning that they are "UI metadata for
+# building the permissions form". That stopped being true once the phone could
+# write standing rules through `POST /rules` below: a client that can grant
+# `provider.tool` has to be able to find out that it means every tool the model
+# asks for beyond the named three. Granting a permission whose meaning you
+# cannot look up is the worse position, and these are descriptions of the
+# runtime's own gating — reading them grants nothing.
+
+
+@router.get("/operations", dependencies=[Depends(verify_api_key)], response_model=None)
+async def list_policy_operations_shared() -> dict[str, Any]:
+    """What each operation a standing rule can name actually governs."""
+    return list_policy_operations()
+
+
+@router.get("/step-operations", dependencies=[Depends(verify_api_key)], response_model=None)
+async def list_step_operations_shared() -> dict[str, Any]:
+    """Which operations each workflow step type will ask for at run time."""
+    return list_step_operations()
+
+
 @router.get("/rules", dependencies=[Depends(verify_api_key)], response_model=None)
 async def list_policy_rules(
     scope: str | None = None,

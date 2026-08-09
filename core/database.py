@@ -25,6 +25,7 @@ BROWSER_SESSIONS_SCHEMA_VERSION = 2026061000
 AGENT_SCRIPTS_SCHEMA_VERSION = 2026072600
 AGENT_NOTIFICATIONS_SCHEMA_VERSION = 2026080200
 SUBAGENT_IMPORTS_SCHEMA_VERSION = 2026080900
+SUBAGENT_SWEEPS_SCHEMA_VERSION = 2026080901
 
 _PSEUDO_AGENTS = [
     {
@@ -821,6 +822,67 @@ def _migrate_subagent_imports(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migrate_subagent_sweeps(conn: sqlite3.Connection) -> None:
+    """What the server saw last time it looked for subagent files, and when.
+
+    Discovery itself is stateless — :func:`agent.subagent_sources.discover_subagent_candidates`
+    walks the disk and returns what is there right now. That answers "what
+    exists" and nothing else. These two tables are the memory that turns a
+    repeated walk into news:
+
+    ``agent_subagent_seen`` is one row per source path ever discovered, with
+    ``missing_since`` set when a path that used to be there stops being there.
+    Without it every sweep would look identical to the first one, so nothing
+    could ever be reported as *new*, and — the case that actually costs the
+    user a run — a subagent file deleted out from under an imported agent
+    would go unnoticed until that agent's next scheduled run failed at 3am
+    naming a file nobody had touched in weeks.
+
+    ``agent_subagent_sweeps`` holds a single row (``id = 'latest'``) describing
+    the most recent sweep attempt: when it started, whether it succeeded, and
+    what changed. One row because the question a client asks is "when did you
+    last look and what did you find", not "show me a year of sweeps"; keeping
+    history would grow a JSON blob per sweep forever for a question nobody
+    asks. A *failed* attempt overwrites it with ``status = 'failed'`` and the
+    reason, and deliberately does not touch ``agent_subagent_seen`` — the
+    durable listing survives a failed look, because "the walk broke" and "you
+    have no subagents" must never render as the same thing.
+
+    Timestamps here are written by Python as offset-aware UTC ISO strings
+    rather than left to ``CURRENT_TIMESTAMP``. These columns are read back and
+    compared against ``now`` to decide whether a sweep is due, and mixing
+    naive-UTC defaults with offset-aware writes in a column that gets *parsed*
+    is exactly the confusion :mod:`core.timestamps` exists to stop.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS agent_subagent_seen (
+            source_path TEXT PRIMARY KEY,
+            candidate_id TEXT,
+            location TEXT,
+            name TEXT,
+            description TEXT,
+            state TEXT NOT NULL,
+            detail TEXT,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            missing_since TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_subagent_seen_missing
+        ON agent_subagent_seen(missing_since);
+
+        CREATE TABLE IF NOT EXISTS agent_subagent_sweeps (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            trigger TEXT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            error TEXT,
+            result_json TEXT
+        );
+    """)
+
+
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (
         LEGACY_FOUNDATION_SCHEMA_VERSION,
@@ -877,6 +939,11 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
         SUBAGENT_IMPORTS_SCHEMA_VERSION,
         "subagent_imports",
         _migrate_subagent_imports,
+    ),
+    (
+        SUBAGENT_SWEEPS_SCHEMA_VERSION,
+        "subagent_sweeps",
+        _migrate_subagent_sweeps,
     ),
 )
 

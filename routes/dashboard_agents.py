@@ -243,9 +243,10 @@ async def trigger_schedule_now(schedule_id: str) -> dict[str, Any]:
 async def list_policy_operations() -> dict[str, Any]:
     """Operations the permissions form may offer, derived from runtime reality.
 
-    Dashboard-only: this is UI metadata for building the standing-rule form,
-    not a capability the phone needs, so it stays off the tunnel-exposed API
-    the same way the rest of this file does.
+    Also reachable at ``GET /api/policies/operations`` for the phone, which
+    can write standing rules and therefore needs to be able to look up what
+    one means. This mirror stays so the dashboard keeps its single
+    ``/api/dashboard/agent`` prefix.
     """
     return policies_routes.list_policy_operations()
 

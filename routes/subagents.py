@@ -25,6 +25,17 @@ scripts-style risk: it is read-only, and (per ``SubagentCandidate.to_view``)
 never returns a candidate's body/system-prompt text, only the same class of
 metadata ``GET /api/agent/scripts`` already exposes on the same shared
 router (names, descriptions, paths).
+
+The two sweep routes sit on the same surface for the same reasons. ``GET
+/sweep`` is strictly read-only and, if anything, returns *less* than the live
+listing — it reads what :mod:`agent.subagent_sweep` already recorded and never
+touches the disk. ``PUT /sweep/settings`` flips auto-import, which does grant
+something: newly discovered eligible subagents get turned into agents without
+a further request. That is not a new capability class either — it is agent
+creation, which this same api-key holder can already do directly via ``POST
+/api/agent/agents`` — but it is the one switch here that acts while nobody is
+watching, which is why it is off by default and why turning it on is not
+retroactive.
 """
 
 from __future__ import annotations
@@ -33,11 +44,16 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from agent.subagent_models import SubagentImportRequest
+from agent.subagent_models import SubagentAutoImportUpdate, SubagentImportRequest
 from agent.subagent_sources import (
     SubagentImportError,
     discover_subagent_candidates,
     import_subagent,
+)
+from agent.subagent_sweep import (
+    get_auto_import_enabled,
+    get_stored_view,
+    set_auto_import_enabled,
 )
 
 from .deps import verify_api_key
@@ -67,6 +83,39 @@ async def list_subagent_candidates() -> dict[str, Any]:
         "excluded": [excluded.to_view() for excluded in sweep.excluded],
         "skipped": [skipped.to_view() for skipped in sweep.skipped],
     }
+
+
+@router.get("/sweep", dependencies=[Depends(verify_api_key)], response_model=None)
+async def get_subagent_sweep_state() -> dict[str, Any]:
+    """What the server found the last time it looked, without looking again.
+
+    The listing above walks the filesystem on every request; this one reads
+    what the periodic sweep (:mod:`agent.subagent_sweep`) already wrote. Both
+    exist because they answer different questions. ``GET ""`` answers "what is
+    on disk right now" — a user who just saved a file and tapped Refresh needs
+    that, and would not accept a cached answer. This one answers "what does the
+    server know on its own, and when did it last check", which is the only
+    question that can be answered while nobody is looking, and the only one
+    that can say what *changed*.
+
+    ``known`` is the durable set; ``last_sweep`` carries the timestamp, the
+    diff (``new`` / ``missing``), and — when the last attempt failed —
+    ``status: "failed"`` with the reason. A failed attempt never empties
+    ``known``: "I could not check" and "you have no subagents" are different
+    statements, and only one of them is ever true here by accident.
+    """
+    return get_stored_view()
+
+
+@router.put("/sweep/settings", dependencies=[Depends(verify_api_key)], response_model=None)
+async def update_subagent_sweep_settings(body: SubagentAutoImportUpdate) -> dict[str, Any]:
+    """Turn auto-import of newly discovered eligible subagents on or off.
+
+    The sweep runs and records either way — this only decides whether a newly
+    discovered *eligible* subagent becomes a Code Bridge agent by itself.
+    """
+    set_auto_import_enabled(body.enabled)
+    return {"auto_import_enabled": get_auto_import_enabled()}
 
 
 @router.post("/import", dependencies=[Depends(verify_api_key)], response_model=None)
