@@ -57,10 +57,57 @@ The interval is measured from the last *attempt* (success or failure), not
 from the last success, so a sweep that keeps failing retries four times a day
 instead of on every 30-second scheduler tick.
 
+What the seen-set forgets, and what it never forgets
+----------------------------------------------------
+The seen-set is append-only by nature: every path ever discovered gets a row,
+and a path that goes away keeps its row with ``missing_since`` stamped. Left
+alone that grows without bound, and it grew in exactly the way that shows why.
+
+On 2026-08-09 the Claude plugin marketplace was reinstalled on the machine
+this was built against. The old checkout was renamed to
+``…/marketplaces/claude-plugins-official.bak/`` and a fresh
+``claude-plugins-official/`` took its place. Same 31 agents, 31 brand new
+paths, and — once the installer deleted ``.bak`` — 31 rows describing files
+that will never exist again. Nothing was imported from any of them. Each
+reinstall would add another 31, and each one would have shown up on the
+dashboard as a red "this agent lost its source file" warning for an agent
+that was never created.
+
+So the rule is about *consequence*, not tidiness:
+
+- A missing path that some Code Bridge agent was **imported from** is never
+  forgotten, however long it has been gone. That agent runs the file by
+  reference, so the warning is the only notice the user gets before a
+  scheduled run fails naming it, and it has to survive until someone restores
+  the file or deletes the agent — not until a timer runs out.
+- A missing path **nothing was imported from** is dropped once it has been
+  missing for :data:`DEFAULT_MISSING_RETENTION_SECONDS` (fourteen days). It
+  was only ever an offer, the user never took it, and nothing breaks because
+  it is gone.
+
+Fourteen days rather than a count of consecutive sweeps: a laptop that was
+closed for a week has not swept at all, so a sweep count would measure how
+often the machine was awake instead of how long the file has been gone, and
+the interval is configurable, which would make "N sweeps" mean a different
+amount of time on different machines. Fourteen days is measured off the
+``missing_since`` column that already exists, needs no new state, and is long
+enough to cover an unmounted external drive, a fortnight away, or a branch
+checked out over a weekend — all cases where the file comes back and should
+be recognised rather than re-announced.
+
+Forgetting is only ever a loss of history. If the path comes back, the next
+sweep records it again; discovery never notifies about a new file, so nothing
+is pushed at anyone as a consequence of having forgotten it.
+
 Where things live
 -----------------
 - The seen-set and the last sweep record: ``agent_cli_agent_seen`` and
   ``agent_cli_agent_sweeps`` (see ``core.database._migrate_cli_agent_sweeps``).
+- Which agent (if any) was imported from a path: ``agent_cli_agent_imports``
+  (see :func:`agent.cli_agent_sources._find_import_by_source_path`). That
+  table is what makes an entry actionable, so :func:`get_stored_view` joins it
+  onto every entry it returns rather than leaving the dashboard to guess from
+  ``state``.
 - The auto-import switch: the ``app_settings`` key-value table where every
   other server setting already lives (``core.database.SettingsDB``, the same
   place ``allow_ip_login`` is kept), under
@@ -82,7 +129,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from core.database import get_db_connection, get_settings_db
@@ -119,6 +166,14 @@ SWEEP_INTERVAL_ENV = "CODEBRIDGE_CLI_AGENT_SWEEP_INTERVAL_SECONDS"
 #: an existing deployment's environment does not silently revert to the 6-hour
 #: default, which would look like the sweep having stopped.
 LEGACY_SWEEP_INTERVAL_ENV = "CODEBRIDGE_SUBAGENT_SWEEP_INTERVAL_SECONDS"
+
+#: How long a source path that has gone missing stays on record when nothing
+#: was ever imported from it. See the module docstring for why fourteen days —
+#: and for why a path *with* an import behind it is exempt from this entirely.
+DEFAULT_MISSING_RETENTION_SECONDS = 14 * 24 * 60 * 60
+
+#: Override for tests and for anyone who wants a different memory.
+MISSING_RETENTION_ENV = "CODEBRIDGE_CLI_AGENT_MISSING_RETENTION_SECONDS"
 
 #: The sweeps table holds exactly one row, under this id.
 LATEST_SWEEP_ID = "latest"
@@ -196,6 +251,24 @@ def sweep_interval_seconds() -> int:
     except ValueError:
         return DEFAULT_SWEEP_INTERVAL_SECONDS
     return max(60, value)
+
+
+def missing_retention_seconds() -> int:
+    """How long a missing, never-imported path is kept. Floored at zero.
+
+    Zero is allowed and means "forget it on the sweep that notices" — useful
+    in tests, and a legitimate choice for someone who never wants the history.
+    It cannot make an *imported* path forgettable: that exemption is not a
+    duration.
+    """
+    raw = os.environ.get(MISSING_RETENTION_ENV)
+    if raw is None:
+        return DEFAULT_MISSING_RETENTION_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MISSING_RETENTION_SECONDS
+    return max(0, value)
 
 
 # --- The seen-set ---------------------------------------------------------------
@@ -297,7 +370,16 @@ def load_seen() -> dict[str, dict[str, Any]]:
 
 
 def _record_present(entries: list[SeenEntry], *, at: str) -> None:
-    """Upsert everything this sweep found, clearing any earlier ``missing_since``."""
+    """Upsert everything this sweep found, clearing any earlier ``missing_since``.
+
+    The ``missing_since = NULL`` in both halves of the upsert is the only thing
+    that un-marks a path, and it has to fire on *every* sweep that finds the
+    file, not only on the sweep that first notices its return. A row left
+    marked missing while its file sits on disk is a permanent red warning on
+    the dashboard for an agent that is working fine, and — because the
+    forgetting rule reads the same column — a row queued for deletion it has
+    no business deleting.
+    """
     if not entries:
         return
     with get_db_connection() as conn:
@@ -353,6 +435,102 @@ def _record_missing(source_paths: list[str], *, at: str) -> None:
             [(at, path) for path in source_paths],
         )
         conn.commit()
+
+
+# --- Import provenance: which entries are actionable -------------------------------
+#
+# ``agent_cli_agent_imports`` is the only record of which definition file a
+# Code Bridge agent runs. It is what separates "a file you were offered has
+# gone away" (history) from "an agent you have will fail its next run"
+# (a problem), and every consumer below needs that split: the forgetting rule
+# to know what it must never drop, and the dashboard to know what to warn
+# about. Reading it here rather than re-deriving it from ``state`` is the
+# whole point — ``state`` describes the *file*, not whether anything depends
+# on it.
+
+
+def _import_map() -> dict[str, str]:
+    """``source_path -> agent_id`` for every imported definition. May raise."""
+    with get_db_connection(use_row_factory=True) as conn:
+        rows = conn.execute(
+            "SELECT source_path, agent_id FROM agent_cli_agent_imports"
+        ).fetchall()
+    return {
+        str(row["source_path"]): str(row["agent_id"])
+        for row in rows
+        if row["source_path"] and row["agent_id"]
+    }
+
+
+def _agent_name(agent_id: str) -> str | None:
+    """The display name of an agent, or ``None`` if it cannot be read."""
+    try:
+        from .agent_store import get_agent_store
+
+        agent = get_agent_store().get_agent(agent_id)
+    except Exception:  # noqa: BLE001 - a name lookup must not break a caller
+        logger.debug("cli agent sweep: could not read agent %s", agent_id, exc_info=True)
+        return None
+    name = agent.get("name") if isinstance(agent, dict) else None
+    return str(name) if name else None
+
+
+def _forget_stale_missing(*, now: datetime) -> list[str]:
+    """Drop long-missing entries that nothing was ever imported from.
+
+    The two guards are the whole function, and both are load-bearing:
+
+    - a path in the import map is skipped no matter how old the row is, so the
+      "your agent lost its file" warning cannot expire out from under the user;
+    - a ``missing_since`` that cannot be parsed is skipped rather than treated
+      as ancient, because forgetting on an unreadable date is guessing.
+
+    If the import table cannot be read at all, nothing is forgotten. That is
+    the fail-closed direction: over-keeping costs a stale row, under-keeping
+    costs the only warning that an imported agent is about to fail.
+    """
+    try:
+        imported = set(_import_map())
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "cli agent sweep: could not read import provenance; forgetting nothing"
+        )
+        return []
+
+    cutoff = now - timedelta(seconds=missing_retention_seconds())
+    forgotten: list[str] = []
+    with get_db_connection(use_row_factory=True) as conn:
+        rows = conn.execute(
+            """
+            SELECT source_path, missing_since FROM agent_cli_agent_seen
+            WHERE missing_since IS NOT NULL
+            """
+        ).fetchall()
+        for row in rows:
+            path = str(row["source_path"])
+            if path in imported:
+                continue
+            since = _parse_iso(row["missing_since"])
+            if since is None:
+                logger.debug(
+                    "cli agent sweep: keeping %s — unreadable missing_since %r",
+                    path,
+                    row["missing_since"],
+                )
+                continue
+            if since > cutoff:
+                continue
+            forgotten.append(path)
+        if forgotten:
+            conn.executemany(
+                """
+                DELETE FROM agent_cli_agent_seen
+                WHERE source_path = ? AND missing_since IS NOT NULL
+                """,
+                [(path,) for path in forgotten],
+            )
+            conn.commit()
+    return sorted(forgotten)
 
 
 # --- The last-sweep record --------------------------------------------------------
@@ -426,17 +604,43 @@ def get_stored_view() -> dict[str, Any]:
     ``last_sweep`` with a failure and leaves ``known`` exactly as it was, so
     "the walk broke" never renders as "you have no agents".
 
+    Every entry also carries ``imported_agent_id`` / ``imported_agent_name``:
+    the Code Bridge agent that was imported from that path, or ``None``. This
+    is the field that makes the missing list usable. Without it a client can
+    only guess which missing entry matters — the dashboard guessed from
+    ``state == 'candidate'``, i.e. "this file *could* have produced an agent",
+    and a plugin marketplace reinstall duly painted 31 red "lost its source
+    file" warnings for 31 files nobody had ever imported. ``state`` describes
+    the file; this describes whether anything depends on it, and only the
+    second one is a problem.
+
     This is a summary, not a substitute for ``GET /api/agent/cli-agents``: it
     carries what identifies an agent (name, description, path, location,
     verdict) and not the fuller per-candidate metadata a live sweep returns.
     """
+    try:
+        imports = _import_map()
+    except Exception:  # noqa: BLE001 - a listing must still list
+        logger.exception(
+            "cli agent sweep: could not read import provenance for the stored view"
+        )
+        imports = {}
+    names: dict[str, str | None] = {}
+
     known: dict[str, list[dict[str, Any]]] = {
         "candidates": [],
         "excluded": [],
         "skipped": [],
         "missing": [],
     }
-    for entry in sorted(load_seen().values(), key=lambda row: str(row["source_path"])):
+    for row in sorted(load_seen().values(), key=lambda row: str(row["source_path"])):
+        entry = dict(row)
+        agent_id = imports.get(str(entry["source_path"]))
+        entry["imported_agent_id"] = agent_id
+        if agent_id is not None and agent_id not in names:
+            names[agent_id] = _agent_name(agent_id)
+        entry["imported_agent_name"] = names.get(agent_id) if agent_id else None
+
         if entry.get("missing_since"):
             known["missing"].append(entry)
         elif entry.get("state") == STATE_CANDIDATE:
@@ -501,38 +705,6 @@ def _name_lines(entries: list[dict[str, Any]]) -> list[str]:
     if remaining > 0:
         lines.append(f"…and {remaining} more")
     return lines
-
-
-def _notify_new_candidates(
-    new_candidates: list[dict[str, Any]], imported: list[dict[str, Any]]
-) -> bool:
-    """Tell the user about agents that can be imported and were not there before.
-
-    Only *importable* new files ring. A newly appeared file that is excluded
-    (it exists to be dispatched by a parent) or unparseable is recorded in the
-    stored view but does not notify: neither is something the user can act on,
-    and a half-written markdown file mid-edit would otherwise page them every
-    six hours. That is the noise that trains people to ignore the one
-    notification here that really matters.
-    """
-    if not new_candidates:
-        return False
-    count = len(new_candidates)
-    if count == 1:
-        title = f"New CLI agent found: {new_candidates[0].get('name') or 'unnamed'}"
-    else:
-        title = f"{count} new CLI agents found"
-    lines = _name_lines(new_candidates)
-    if imported:
-        lines.append("")
-        lines.append(
-            f"Auto-import is on — {len(imported)} of these "
-            f"{'was' if len(imported) == 1 else 'were'} imported as Code Bridge agents."
-        )
-    else:
-        lines.append("")
-        lines.append("Import one from the agents screen to give it a schedule.")
-    return _notify_best_effort(title=title, body="\n".join(lines), level="info")
 
 
 def _notify_missing_import_sources(missing: list[dict[str, Any]]) -> int:
@@ -641,15 +813,7 @@ def _importing_agent(source_path: str) -> tuple[str | None, str | None]:
     agent_id = str(record.get("agent_id") or "") or None
     if agent_id is None:
         return None, None
-    try:
-        from .agent_store import get_agent_store
-
-        agent = get_agent_store().get_agent(agent_id)
-    except Exception:  # noqa: BLE001
-        logger.debug("cli agent sweep: could not read agent %s", agent_id, exc_info=True)
-        return agent_id, None
-    name = agent.get("name") if isinstance(agent, dict) else None
-    return agent_id, (str(name) if name else None)
+    return agent_id, _agent_name(agent_id)
 
 
 def run_cli_agent_sweep(*, trigger: str = "scheduled") -> dict[str, Any]:
@@ -682,6 +846,10 @@ def run_cli_agent_sweep(*, trigger: str = "scheduled") -> dict[str, Any]:
             "counts": None,
             "new": [],
             "missing": [],
+            # A sweep that could not look does not get to decide what to
+            # forget either: the seen-set is untouched, including its
+            # missing rows.
+            "forgotten": [],
             "auto_import": {
                 "enabled": auto_import_enabled,
                 "imported": [],
@@ -739,8 +907,23 @@ def run_cli_agent_sweep(*, trigger: str = "scheduled") -> dict[str, Any]:
     if auto_import_enabled and new_candidates:
         imported, import_failures = _auto_import(new_candidates)
 
-    notified_new = _notify_new_candidates(new_candidates, imported)
+    # Finding a new file does not notify. It was built that way and should not
+    # have been: a push arrives on someone's phone, and "there is a file you
+    # could register" is not something to interrupt anyone for — it is only
+    # useful when they are already on the registration screen, which lists it
+    # anyway. The sweep still records it, so the screen and the stored view
+    # show it; nothing is lost but the interruption.
+    #
+    # A missing source file still notifies, and that difference is the whole
+    # point: an agent that was registered from a file that is now gone will
+    # fail its next scheduled run. That is broken now, not an opportunity.
+    notified_new = 0
     notified_missing = _notify_missing_import_sources(missing_views)
+
+    # Last, so a file that vanished on *this* sweep is still reported and
+    # still notifies before any question of forgetting it arises — even with
+    # the retention set to zero. See the module docstring for the rule.
+    forgotten = _forget_stale_missing(now=_now())
 
     finished = _now()
     record = {
@@ -757,9 +940,11 @@ def run_cli_agent_sweep(*, trigger: str = "scheduled") -> dict[str, Any]:
             "new": len(new_views),
             "new_candidates": len(new_candidates),
             "missing": len(missing_views),
+            "forgotten": len(forgotten),
         },
         "new": new_views,
         "missing": missing_views,
+        "forgotten": forgotten,
         "auto_import": {
             "enabled": auto_import_enabled,
             "imported": imported,
@@ -803,9 +988,11 @@ def maybe_run_due_cli_agent_sweep(*, trigger: str = "scheduled") -> dict[str, An
 
 
 __all__ = [
+    "DEFAULT_MISSING_RETENTION_SECONDS",
     "DEFAULT_SWEEP_INTERVAL_SECONDS",
     "LATEST_SWEEP_ID",
     "LEGACY_SETTING_AUTO_IMPORT_ENABLED",
+    "MISSING_RETENTION_ENV",
     "SETTING_AUTO_IMPORT_ENABLED",
     "STATE_CANDIDATE",
     "STATE_EXCLUDED",
@@ -819,6 +1006,7 @@ __all__ = [
     "get_stored_view",
     "load_seen",
     "maybe_run_due_cli_agent_sweep",
+    "missing_retention_seconds",
     "run_cli_agent_sweep",
     "set_auto_import_enabled",
     "sweep_interval_seconds",

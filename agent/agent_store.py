@@ -691,7 +691,7 @@ class AgentStore(
                 f"""
                 SELECT * FROM agent_runs
                 {where_sql}
-                ORDER BY updated_at DESC, created_at DESC
+                ORDER BY updated_at DESC, created_at DESC, rowid DESC
                 LIMIT ?
                 """,
                 values,

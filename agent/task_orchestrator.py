@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -2444,6 +2444,272 @@ def _wait_reason_label(reason: str) -> str:
     return humanized or "needs your attention"
 
 
+# --- Notification throttling ------------------------------------------------
+#
+# Two scheduled agents on the machine this was built for failed the same way
+# every six hours for days — a UI automation script that stopped finding a
+# button, nothing this server could fix — and the phone got the same push
+# four times a day, every day. That is worse than useless: it trains the
+# reflex of swiping a notification away without reading it, and the swipe
+# that eats today's fourth "X failed again" is the same reflex that eats the
+# one push that actually mattered, like a run parked waiting for a human or
+# an agent's source file gone missing.
+#
+# `_failure_notification_gate` and `_wait_notification_gate` below share one
+# rule: a *first* occurrence always notifies (nobody should wait a day to
+# learn their agent just broke), and a repeat of the *same* agent's ongoing
+# trouble is throttled to once per `_NOTIFICATION_THROTTLE_WINDOW`. Both are
+# best-effort in the same sense the notifications themselves are: a gate that
+# cannot be evaluated fails **open** (notifies) rather than closed
+# (suppresses), because a duplicate push during a rare DB hiccup costs far
+# less than a genuine first failure going out silently — see each function's
+# docstring for the specific reasoning.
+
+#: How long a repeat of the same agent's ongoing trouble stays quiet after
+#: the last notification about it. 24h matches the user's ask ("at most once
+#: per day"); it is not meant to be tuned per-deployment, so unlike
+#: `agent.cli_agent_sweep`'s interval this has no environment override.
+_NOTIFICATION_THROTTLE_WINDOW = timedelta(hours=24)
+
+
+def _parse_notification_instant(value: Any) -> datetime | None:
+    """Parse a notification's ``created_at`` back into an aware UTC instant.
+
+    ``NotificationStore`` always sends timestamps through
+    ``core.timestamps.to_utc_iso`` before handing them out, so this only ever
+    needs to parse an ISO-8601 string that may or may not already carry an
+    offset. Anything else — ``None``, a blank string, a value that fails to
+    parse — comes back as ``None`` rather than raising, so a corrupt or
+    unexpected stamp reads as "can't tell", which callers here treat as a
+    reason to notify rather than a reason to crash.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+
+
+def _most_recent_other_run(
+    runs: list[dict[str, Any]], *, exclude_run_id: str
+) -> dict[str, Any] | None:
+    """The most recently touched run in ``runs`` other than ``exclude_run_id``.
+
+    Used to look one run back in an agent's history to ask "did the run
+    before this one succeed, or was it also in trouble". ``runs`` is expected
+    to already be ``AgentStore.list_runs``'s own order (most recent first),
+    so this just takes the first entry that isn't the run in hand — it does
+    *not* re-derive recency from ``created_at``/``updated_at`` strings
+    itself. SQLite's ``CURRENT_TIMESTAMP`` has only one-second resolution, so
+    two runs of the same agent created or finished inside the same second
+    (exactly what happens when a test — or a fast-failing script — fires a
+    schedule back-to-back) tie on both timestamp columns; ``list_runs``
+    breaks that tie with ``rowid DESC``, true insertion order, which a
+    second read of the timestamp strings here cannot reconstruct.
+    """
+    for run in runs:
+        if run.get("id") != exclude_run_id:
+            return run
+    return None
+
+
+def _failure_notification_gate(
+    *, store: Any, agent_id: str | None, run_id: str
+) -> tuple[bool, str]:
+    """Should *this* failed run push, or is it a quiet repeat of a known streak.
+
+    The rule the user asked for: while an agent is failing consecutively,
+    notify at most once per day. A *first* failure always notifies. A later
+    failure of the *same* agent stays quiet if the agent's last failure
+    notification is less than 24h old — but only while the streak is
+    unbroken. A run that *succeeds* ends the streak: if an agent broke, got
+    fixed, and broke again, that is two separate events to whoever is holding
+    the phone, and suppressing the second because the first was recent would
+    hide a regression behind its own quiet window. Concretely: this looks at
+    the run immediately before the one that just failed, and treats a streak
+    as unbroken only when that run also failed.
+
+    Keyed on the agent alone, not on the agent plus some hash of the error
+    text. Two reasons. First, "consecutive" was the user's own word, and it
+    describes the run's *outcome* (did it fail again), not why — a script
+    that fails for a new reason today is still the same broken agent
+    training the same swipe-it-away reflex the user is trying to stop.
+    Second, a signature built from a free-text error message would have to
+    strip every incidental detail (a timestamp, a duration, a path) to mean
+    anything at all, and a signature that changes on every run of the same
+    broken script throttles nothing — which is precisely the failure mode
+    the user warned against.
+
+    A throttle-state read failure (run history or notification history)
+    fails **open**: this returns "notify" rather than "suppress". The
+    alternative — going quiet because a read broke — can swallow a genuine
+    first failure without a trace, which is the exact harm this function
+    exists to prevent; an extra push during a rare DB hiccup is a much
+    cheaper mistake.
+    """
+    if not agent_id:
+        return True, "no agent to key the throttle on; notifying"
+
+    try:
+        recent_runs = store.list_runs(agent_id=str(agent_id), limit=10)
+    except Exception:
+        logger.exception(
+            "failure-notification throttle: could not read run history for "
+            "agent_id=%s; notifying rather than risking a swallowed failure",
+            agent_id,
+        )
+        return True, "run-history read failed; notifying (fail open)"
+
+    previous_run = _most_recent_other_run(recent_runs, exclude_run_id=run_id)
+    if previous_run is None or previous_run.get("status") != "failed":
+        return True, "new failure streak: the previous run for this agent did not fail"
+
+    try:
+        from agent.notification_store import get_notification_store
+
+        recent = get_notification_store().list_notifications(
+            agent_id=str(agent_id), level="error", limit=1
+        )
+    except Exception:
+        logger.exception(
+            "failure-notification throttle: could not read notification "
+            "history for agent_id=%s; notifying (fail open)",
+            agent_id,
+        )
+        return True, "notification-history read failed; notifying (fail open)"
+
+    if not recent:
+        return True, "no prior failure notification on record for this agent; notifying"
+
+    last_at = _parse_notification_instant(recent[0].get("created_at"))
+    if last_at is None:
+        return True, "prior failure notification timestamp unreadable; notifying (fail open)"
+
+    elapsed = datetime.now(UTC) - last_at
+    if elapsed >= _NOTIFICATION_THROTTLE_WINDOW:
+        return True, "24h throttle window elapsed since the last failure notification"
+
+    return False, (
+        f"same agent still failing consecutively; last notified "
+        f"{recent[0].get('created_at')}, next eligible at "
+        f"{(last_at + _NOTIFICATION_THROTTLE_WINDOW).isoformat()}"
+    )
+
+
+def _wait_notification_gate(
+    *, store: Any, agent_id: str | None, run_id: str
+) -> tuple[bool, str]:
+    """Should this parked run push, or is it a quiet repeat of a known streak.
+
+    ``_wait_for_user_step``'s own dedup (see its call site) already covers a
+    resume that immediately re-parks on the *same run*: it compares this
+    park's reason against the checkpoint recorded the last time that exact
+    run parked. What it cannot see is a *new* run landing on the same wait —
+    which happens, because task metadata's ``active_checkpoint`` is only
+    cleared when a run finishes through ``_finish_workflow_execution``, and a
+    scheduled run that stalls waiting on a human instead gets abandoned by
+    ``agent.scheduler._abandon_stalled_run``, which marks the run failed
+    directly and never goes through that finish path. A schedule that keeps
+    landing on the same stuck login prompt, getting abandoned an hour later,
+    and firing again would notify on every single firing — the identical
+    four-a-day flood the failure throttle above exists to stop, just
+    triggered by a stuck human handoff instead of a stuck script.
+
+    Keyed on the agent alone, the same as the failure gate and for the same
+    reason: the specific wait reason (login vs. captcha vs. approval) is not
+    the thing the user asked to be throttled, and treating every reason
+    change as a fresh event would mean an agent that oscillates between two
+    wait reasons never goes quiet at all.
+
+    A run that *completes* — the previous run for this agent actually
+    finished successfully — ends the streak the same way a success ends the
+    failure streak: this returns "notify" immediately even if a wait
+    notification went out minutes ago, because a fresh park right after a
+    real success is new information, not a repeat.
+
+    Same fail-open rule as the failure gate: a notification-history read
+    failure notifies rather than risking a swallowed first park.
+    """
+    if not agent_id:
+        return True, "no agent to key the throttle on; notifying"
+
+    try:
+        recent_runs = store.list_runs(agent_id=str(agent_id), limit=10)
+    except Exception:
+        logger.exception(
+            "wait-notification throttle: could not read run history for "
+            "agent_id=%s; notifying rather than risking a swallowed park",
+            agent_id,
+        )
+        return True, "run-history read failed; notifying (fail open)"
+
+    previous_run = _most_recent_other_run(recent_runs, exclude_run_id=run_id)
+    if previous_run is not None and previous_run.get("status") == "completed":
+        return True, "the previous run for this agent finished successfully; fresh stuck streak"
+
+    try:
+        from agent.notification_store import get_notification_store
+
+        recent = get_notification_store().list_notifications(
+            agent_id=str(agent_id), level="warning", limit=1
+        )
+    except Exception:
+        logger.exception(
+            "wait-notification throttle: could not read notification history "
+            "for agent_id=%s; notifying (fail open)",
+            agent_id,
+        )
+        return True, "notification-history read failed; notifying (fail open)"
+
+    if not recent:
+        return True, "no prior wait notification on record for this agent; notifying"
+
+    last_at = _parse_notification_instant(recent[0].get("created_at"))
+    if last_at is None:
+        return True, "prior wait notification timestamp unreadable; notifying (fail open)"
+
+    elapsed = datetime.now(UTC) - last_at
+    if elapsed >= _NOTIFICATION_THROTTLE_WINDOW:
+        return True, "24h throttle window elapsed since the last wait notification"
+
+    return False, (
+        f"same agent still stuck waiting on a human; last notified "
+        f"{recent[0].get('created_at')}, next eligible at "
+        f"{(last_at + _NOTIFICATION_THROTTLE_WINDOW).isoformat()}"
+    )
+
+
+def _record_suppressed_notification(
+    *, store: Any, run_id: str, kind: str, agent_id: str | None, why: str
+) -> None:
+    """Make a suppressed notification discoverable without touching run state.
+
+    The run's own status/result is already written by the time either notify
+    function runs — that record must never depend on whether a push went
+    out. This only appends an ``agent_events`` row (visible on the run's
+    existing timeline, the same place every other step/lifecycle event
+    lives) plus a log line, so an operator looking at *why the phone stayed
+    quiet* has an answer instead of an unexplained gap. Failure here is
+    swallowed by the caller's own best-effort ``try`` — a broken audit trail
+    is a much smaller problem than a broken run.
+    """
+    logger.info(
+        "notification throttled: kind=%s run_id=%s agent_id=%s reason=%s",
+        kind,
+        run_id,
+        agent_id,
+        why,
+    )
+    store.append_event(
+        run_id=run_id,
+        event_type="notification.suppressed",
+        app_event={"kind": kind, "agent_id": agent_id, "reason": why},
+    )
+
+
 def _notify_waiting_for_user_best_effort(
     *,
     store: Any,
@@ -2463,11 +2729,33 @@ def _notify_waiting_for_user_best_effort(
     Losing this path entirely, silently, is the actual regression to guard
     against: without it a 3am run stuck on a login prompt sits invisible
     until someone opens the app and happens to notice a badge.
+
+    Only called (see the call site in ``_wait_for_user_step``) when this is
+    not an immediate resume-and-re-park loop on the very same run. Even so,
+    a schedule that keeps landing on the same wait reason across separate
+    runs would otherwise notify every time it fires — see
+    ``_wait_notification_gate`` for why that happens and why it is throttled
+    the same way the failure notifier is, to once per agent per day while
+    the streak holds.
     """
     try:
+        agent_id = task.get("assigned_agent_id") if isinstance(task, dict) else None
+
+        should_notify, why = _wait_notification_gate(
+            store=store, agent_id=agent_id, run_id=run_id
+        )
+        if not should_notify:
+            _record_suppressed_notification(
+                store=store,
+                run_id=run_id,
+                kind="waiting_for_user",
+                agent_id=agent_id,
+                why=why,
+            )
+            return
+
         from agent.notification_store import get_notification_store
 
-        agent_id = task.get("assigned_agent_id") if isinstance(task, dict) else None
         agent_name = None
         if agent_id:
             agent = store.get_agent(str(agent_id))
@@ -2559,11 +2847,34 @@ def _notify_run_failed_best_effort(
     store failure or a dead FCM key must never change what the run says it
     did — the worst acceptable outcome is the user reading it in the app
     instead of on a lock screen.
+
+    Throttled: while the same agent keeps failing consecutively this notifies
+    at most once a day, so a script that has been failing the same way every
+    six hours for a week doesn't turn every one of those runs into a push —
+    see ``_failure_notification_gate`` for the exact rule (first failure
+    always notifies, a success resets the streak) and why it's worth having
+    at all (a flood of identical pushes trains people to swipe them away
+    unread, which is exactly how a push that matters — a run genuinely stuck,
+    a file gone missing — gets swiped away too).
     """
     try:
+        agent_id = task.get("assigned_agent_id") if isinstance(task, dict) else None
+
+        should_notify, why = _failure_notification_gate(
+            store=store, agent_id=agent_id, run_id=run_id
+        )
+        if not should_notify:
+            _record_suppressed_notification(
+                store=store,
+                run_id=run_id,
+                kind="failed",
+                agent_id=agent_id,
+                why=why,
+            )
+            return
+
         from agent.notification_store import get_notification_store
 
-        agent_id = task.get("assigned_agent_id") if isinstance(task, dict) else None
         agent_name = None
         if agent_id:
             agent = store.get_agent(str(agent_id))

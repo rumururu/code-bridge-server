@@ -87,6 +87,7 @@ class NotificationStore:
         *,
         unread_only: bool = False,
         agent_id: str | None = None,
+        level: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -96,6 +97,14 @@ class NotificationStore:
         if agent_id:
             clauses.append("agent_id = ?")
             values.append(agent_id)
+        if level:
+            # Lets a caller ask "when did this agent last hear about a
+            # failure" (level="error") separately from "...about needing a
+            # human" (level="warning") without pulling every notification
+            # and filtering in Python — see the notification throttles in
+            # agent.task_orchestrator.
+            clauses.append("level = ?")
+            values.append(normalize_level(level))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         values.append(max(1, min(int(limit), 200)))
         with get_db_connection(use_row_factory=True) as conn:

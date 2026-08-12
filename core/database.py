@@ -27,6 +27,7 @@ AGENT_NOTIFICATIONS_SCHEMA_VERSION = 2026080200
 CLI_AGENT_IMPORTS_SCHEMA_VERSION = 2026080900
 CLI_AGENT_SWEEPS_SCHEMA_VERSION = 2026080901
 CLI_AGENT_RENAME_SCHEMA_VERSION = 2026080902
+CLI_AGENT_SEEN_RESIDUE_SCHEMA_VERSION = 2026081200
 
 _PSEUDO_AGENTS = [
     {
@@ -884,6 +885,109 @@ def _migrate_cli_agent_sweeps(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _migrate_cli_agent_seen_residue(conn: sqlite3.Connection) -> None:
+    """Clear out what a plugin marketplace reinstall left in the seen-set.
+
+    On 2026-08-09 the Claude plugin marketplace was reinstalled on a live
+    machine. The old checkout became ``…/marketplaces/claude-plugins-official.
+    bak/`` and a fresh ``claude-plugins-official/`` took its place, so the
+    sweep saw 31 new paths for 31 agents it already knew, and then — once the
+    installer deleted ``.bak`` — 31 rows for files that will never exist
+    again. Nothing had been imported from any of them. On the dashboard that
+    read as 31 red "this agent lost its source file" warnings for agents that
+    were never created, and it would repeat on the next reinstall.
+
+    Two corrections, both re-derived from the filesystem at run time rather
+    than assumed:
+
+    - a row marked ``missing_since`` whose file **is** on disk gets the mark
+      cleared. :func:`agent.cli_agent_sweep._record_present` already does this
+      on every sweep, so this only reaches rows a sweep has not revisited yet;
+      it is here because a stale mark is a false warning *and* an entry the
+      forgetting rule would otherwise queue for deletion.
+    - a row marked ``missing_since`` whose file is **not** on disk and which
+      has no ``agent_cli_agent_imports`` row is deleted. No agent points at
+      it, so nothing can break; it was an offer the user never took.
+
+    Deliberately without the fourteen-day grace period the recurring rule in
+    :func:`agent.cli_agent_sweep._forget_stale_missing` applies. That period
+    exists to stop an automatic six-hourly process from thrashing on files
+    that come and go; this runs once, at one upgrade, to correct a known past
+    event — and it re-checks the disk first, so anything actually still there
+    is kept (and un-marked) rather than dropped.
+
+    What must survive, and does: any path with an import mapping, however long
+    it has been gone. That warning is the only notice the user gets before an
+    imported agent fails a scheduled run naming its file, and it has to keep
+    warning until someone restores the file or deletes the agent.
+
+    Idempotent: a second run finds nothing marked-and-absent-and-unimported,
+    and nothing marked-but-present, so it changes nothing.
+    """
+    if not _table_exists(conn, "agent_cli_agent_seen"):
+        return
+
+    rows = conn.execute(
+        """
+        SELECT source_path FROM agent_cli_agent_seen
+        WHERE missing_since IS NOT NULL
+        """
+    ).fetchall()
+    if not rows:
+        return
+
+    # No imports table means no way to tell an actionable row from a stray
+    # one, so nothing is forgotten — the fail-closed direction, same as the
+    # recurring rule takes.
+    imported: set[str] | None = None
+    if _table_exists(conn, "agent_cli_agent_imports"):
+        imported = {
+            str(row[0])
+            for row in conn.execute("SELECT source_path FROM agent_cli_agent_imports")
+            if row[0]
+        }
+
+    present: list[str] = []
+    forgettable: list[str] = []
+    for row in rows:
+        source_path = str(row[0])
+        try:
+            exists = Path(source_path).exists()
+        except OSError:
+            # An unreadable path is not evidence of absence. Leave the row
+            # alone: keeping a stale entry costs a line on a screen, deleting
+            # a live one costs the warning it exists to carry.
+            logger.debug(
+                "cli agent seen residue: could not stat %s; leaving it", source_path
+            )
+            continue
+        if exists:
+            present.append(source_path)
+        elif imported is not None and source_path not in imported:
+            forgettable.append(source_path)
+
+    if present:
+        conn.executemany(
+            """
+            UPDATE agent_cli_agent_seen SET missing_since = NULL
+            WHERE source_path = ?
+            """,
+            [(path,) for path in present],
+        )
+    if forgettable:
+        conn.executemany(
+            "DELETE FROM agent_cli_agent_seen WHERE source_path = ?",
+            [(path,) for path in forgettable],
+        )
+    if present or forgettable:
+        logger.info(
+            "cli agent seen residue: cleared %d stale missing mark(s), forgot "
+            "%d missing entry(ies) nothing was imported from",
+            len(present),
+            len(forgettable),
+        )
+
+
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
@@ -1031,6 +1135,12 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
         CLI_AGENT_SWEEPS_SCHEMA_VERSION,
         "cli_agent_sweeps",
         _migrate_cli_agent_sweeps,
+    ),
+    # Last: it reads the tables the three migrations above guarantee exist.
+    (
+        CLI_AGENT_SEEN_RESIDUE_SCHEMA_VERSION,
+        "cli_agent_seen_residue",
+        _migrate_cli_agent_seen_residue,
     ),
 )
 

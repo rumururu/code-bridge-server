@@ -304,6 +304,11 @@
             display: flex; align-items: center; gap: 12px; font-size: 14px;
         }
         .banner .spacer { flex: 1; }
+        /* An agent whose source file went missing is worse than a pending
+           approval (that one is waiting on a human; this one is heading for
+           a failed run), so it borrows the fault palette instead of the
+           warning one the plain .banner uses. */
+        .banner.danger { border-color: var(--danger-color); background: var(--fault-bg); }
 
         /* One step below the product nav and above the content, so what it
            offers is unmistakably about Agents. */
@@ -423,6 +428,24 @@
         .badge.info { border-color: var(--accent-color); color: var(--accent-color); }
         .badge.warn { border-color: var(--warning-color); color: var(--warning-color); }
         .badge.bad { border-color: var(--danger-color); color: var(--danger-color); }
+
+        /* Auto-register switch (cardCliAgentSweep). Same shape as the
+           dashboard page's .toggle-switch, redefined here rather than
+           shared because this file owns its own stylesheet and the two
+           pages already keep separate token-consuming component CSS. */
+        .toggle-switch { position: relative; display: inline-block; width: 42px; height: 24px; cursor: pointer; }
+        .toggle-switch input { opacity: 0; width: 0; height: 0; }
+        .toggle-slider {
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            background: var(--border-color); border-radius: 24px; transition: .2s;
+        }
+        .toggle-slider::before {
+            content: ""; position: absolute; height: 18px; width: 18px; left: 3px; bottom: 3px;
+            background: #fff; border-radius: 50%; transition: .2s; box-shadow: 0 1px 3px rgba(0,0,0,.25);
+        }
+        .toggle-switch input:checked + .toggle-slider { background: var(--success-color); }
+        .toggle-switch input:checked + .toggle-slider::before { transform: translateX(18px); }
+        .toggle-switch input:disabled + .toggle-slider { opacity: .5; cursor: not-allowed; }
 
         .step {
             border: 1px solid var(--border-color);
@@ -631,6 +654,17 @@
         <span id="approvalBannerText"></span>
         <span class="spacer"></span>
         <button class="btn btn-secondary btn-xs" onclick="goSetup('approvals')" data-i18n="review">Review</button>
+    </div>
+
+    <!-- Same shape as approvalBanner above, page-wide for the same reason:
+         an agent whose source file went missing is not something to
+         discover by happening to open Scripts & permissions — its next
+         scheduled run is about to fail naming it, from wherever the user
+         currently is. Filled by renderCliAgentSweepStatus(). -->
+    <div class="banner danger" id="cliSweepMissingBanner" style="display:none;">
+        <span id="cliSweepMissingBannerText"></span>
+        <span class="spacer"></span>
+        <button class="btn btn-secondary btn-xs" onclick="goSetup('cli-sweep')" data-i18n="review">Review</button>
     </div>
 
     <!-- ================= MANAGE ================= -->
@@ -845,6 +879,41 @@
 
     <!-- ================= SETUP ================= -->
     <div class="view view-single" id="viewSetup">
+        <!-- The sweep that finds these definitions runs on its own, on a
+             six-hour timer nobody here triggers — it is background-process
+             state, the same category as the standing permission rules and
+             waiting approvals below it, not something produced by the
+             "create an agent" flow in viewCreate (which is where the
+             one-off, user-initiated import of a single candidate already
+             lives, in cliAgentImportDetails). It sits first on this page,
+             above Scripts, because a source file gone missing under an
+             already-imported agent is the one thing here that is actively
+             breaking something, not merely unconfigured, and that has to be
+             the first thing visible on arrival, not something scrolled past
+             three cards down. Filled by renderCliAgentSweepStatus(), fed by
+             GET /cli-agents/sweep in reloadAll(); see setCliAgentAutoImport()
+             for the switch below. -->
+        <div class="card" id="cardCliAgentSweep">
+            <div class="card-header">
+                <h2 data-i18n="cli_sweep_title">CLI agent sweep</h2>
+                <span class="status" id="cliSweepStatusBadge"></span>
+            </div>
+            <div class="card-body">
+                <div id="cliSweepMissing"></div>
+                <div id="cliSweepSummary"></div>
+                <div class="row" style="align-items:center; margin-top:14px;">
+                    <div class="field" style="flex:1; margin-bottom:0;">
+                        <label for="cliSweepAutoToggle" data-i18n="cli_sweep_auto_label">Auto-register new CLI agents</label>
+                        <p class="hint" id="cliSweepAutoHint" style="margin:2px 0 0;"></p>
+                    </div>
+                    <label class="toggle-switch" style="flex:0 0 auto;">
+                        <input type="checkbox" id="cliSweepAutoToggle" disabled onchange="setCliAgentAutoImport(this.checked)">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+            </div>
+        </div>
+
         <div class="card">
             <div class="card-header">
                 <h2 data-i18n="scripts">Scripts</h2>
@@ -1216,6 +1285,30 @@
                 cli_agent_excluded_dispatch: 'Dispatched by another installed agent — would refuse every scheduled run',
                 cli_agent_excluded_disclaimed: 'Its own description says it is not for direct invocation',
                 cli_agent_skipped_note: '{n} file(s) on this machine could not be parsed as an agent definition.',
+
+                cli_sweep_title: 'CLI agent sweep',
+                cli_sweep_loading: 'Loading…',
+                cli_sweep_fetch_failed: 'Could not load sweep status',
+                cli_sweep_never: 'Never run',
+                cli_sweep_never_detail: 'The server has not swept for CLI agent definitions yet.',
+                cli_sweep_ok_badge: 'OK',
+                cli_sweep_failed_badge: 'Failed',
+                cli_sweep_last_ok: 'Last swept {time} · {ms} ms',
+                cli_sweep_last_attempt: 'Last attempt {time}',
+                cli_sweep_failed_generic: 'The sweep failed for an unrecorded reason.',
+                cli_sweep_stat_candidates: '{n} candidates',
+                cli_sweep_stat_excluded: '{n} excluded',
+                cli_sweep_stat_skipped: '{n} skipped',
+                cli_sweep_unnamed: 'Unnamed agent',
+                cli_sweep_missing_banner_one: '{name} lost its source file',
+                cli_sweep_missing_banner_many: '{n} agents lost their source file',
+                cli_sweep_missing_detail: 'Its source file is gone — the next run fails naming it. Restore the file, or delete the agent.',
+                cli_sweep_missing_quiet: '{n} file(s) that were offered here have gone away. Nothing was registered from them, so nothing is broken; they drop off this list after two weeks.',
+                cli_sweep_auto_label: 'Auto-register new CLI agents',
+                cli_sweep_auto_hint: 'On: a newly discovered eligible file becomes an agent by itself, still needing a schedule and permissions before it can run unattended. This will not import the {n} already found.',
+                cli_sweep_auto_on_toast: 'Auto-register turned on',
+                cli_sweep_auto_off_toast: 'Auto-register turned off',
+                cli_sweep_auto_save_failed: 'Could not update auto-register',
             },
             ko: {
                 nav_dashboard: '대시보드', nav_agents: '에이전트', nav_settings: '설정',
@@ -1426,6 +1519,30 @@
                 cli_agent_excluded_dispatch: '다른 설치된 에이전트가 실행시키는 대상 — 예약 실행마다 거부됩니다',
                 cli_agent_excluded_disclaimed: '설명에 직접 호출용이 아니라고 명시되어 있습니다',
                 cli_agent_skipped_note: '이 기기의 파일 {n}개는 에이전트 정의로 파싱하지 못했습니다.',
+
+                cli_sweep_title: 'CLI 에이전트 스캔',
+                cli_sweep_loading: '불러오는 중…',
+                cli_sweep_fetch_failed: '스캔 상태를 불러오지 못했습니다',
+                cli_sweep_never: '실행된 적 없음',
+                cli_sweep_never_detail: '서버가 아직 CLI 에이전트 정의를 스캔한 적이 없습니다.',
+                cli_sweep_ok_badge: '정상',
+                cli_sweep_failed_badge: '실패',
+                cli_sweep_last_ok: '마지막 스캔 {time} · {ms}ms',
+                cli_sweep_last_attempt: '마지막 시도 {time}',
+                cli_sweep_failed_generic: '기록되지 않은 이유로 스캔이 실패했습니다.',
+                cli_sweep_stat_candidates: '{n}개 후보',
+                cli_sweep_stat_excluded: '{n}개 제외됨',
+                cli_sweep_stat_skipped: '{n}개 건너뜀',
+                cli_sweep_unnamed: '이름 없는 에이전트',
+                cli_sweep_missing_banner_one: '{name}의 소스 파일이 사라졌습니다',
+                cli_sweep_missing_banner_many: '{n}개 에이전트의 소스 파일이 사라졌습니다',
+                cli_sweep_missing_detail: '소스 파일이 사라졌습니다 — 다음 실행은 이 파일을 지목하며 실패합니다. 파일을 복구하거나 에이전트를 삭제하세요.',
+                cli_sweep_missing_quiet: '여기 목록에 있던 파일 {n}개가 사라졌습니다. 등록된 것이 없으므로 고장난 곳은 없으며, 2주 뒤 이 목록에서 사라집니다.',
+                cli_sweep_auto_label: 'CLI 에이전트 자동 등록',
+                cli_sweep_auto_hint: '켜짐: 새로 발견된 적격 파일이 스스로 에이전트가 되며, 무인 실행 전에 여전히 스케줄과 권한이 필요합니다. 이미 찾은 {n}개는 가져오지 않습니다.',
+                cli_sweep_auto_on_toast: '자동 등록을 켰습니다',
+                cli_sweep_auto_off_toast: '자동 등록을 껐습니다',
+                cli_sweep_auto_save_failed: '자동 등록 설정을 저장하지 못했습니다',
             },
         };
 
@@ -1481,6 +1598,7 @@
             if (saveBtn) saveBtn.textContent = t(selectedAgentId ? 'save_changes' : 'create_agent');
             if (currentView === 'create') refreshBuildPanels();
             if (cliAgentSweep) renderCliAgentImport();
+            renderCliAgentSweepStatus();
         }
 
         // The workspace is sized against the real header rather than a guessed
@@ -1926,6 +2044,9 @@
             setView('setup', 'Scripts & permissions');
             if (section === 'approvals') {
                 const card = document.getElementById('cardApprovals');
+                if (card) card.scrollIntoView({ block: 'start' });
+            } else if (section === 'cli-sweep') {
+                const card = document.getElementById('cardCliAgentSweep');
                 if (card) card.scrollIntoView({ block: 'start' });
             }
         }
@@ -4135,10 +4256,165 @@
             goManage();
         }
 
+        // --- CLI agent sweep status ------------------------------------------
+        //
+        // The sweep above (loadCliAgentSweep / GET /cli-agents) walks the disk
+        // on demand, only while the import <details> is open. This is the
+        // other half: what the server found on its own six-hourly timer,
+        // read from GET /cli-agents/sweep — a stored-state read, not a
+        // filesystem walk, so it is cheap enough to fetch unconditionally on
+        // every reloadAll() rather than lazily like the import list above.
+
+        // Full { last_sweep, known, interval_seconds, auto_import_enabled }
+        // response, or null before the first successful fetch.
+        let cliAgentSweepStatus = null;
+        // Set when the fetch itself failed (network/HTTP), as opposed to
+        // last_sweep.status === 'failed', which means the fetch worked and
+        // the *sweep* did not. Kept separate so a transient reload error
+        // never overwrites a last-known-good status with silence, and never
+        // gets confused with the server's own "I could not check" state.
+        let cliAgentSweepFetchError = null;
+
+        // Reused by the card body and the page-wide banner. Only a path some
+        // agent was actually imported from is a problem: that agent runs the
+        // file by reference, so its next scheduled run fails naming it. A
+        // path that was merely *offered* and then vanished is history — the
+        // user never took it, and nothing breaks.
+        //
+        // This used to filter on state === 'candidate', a proxy for "this
+        // file could have produced an agent", because the durable "known" set
+        // carried no link to the agent imported from it. It does now
+        // (imported_agent_id, see agent/cli_agent_sweep.get_stored_view), and
+        // the proxy had already been wrong once in the field: reinstalling
+        // the Claude plugin marketplace moved 31 definition files, and the
+        // card lit up with 31 red "lost its source file" warnings for agents
+        // that were never created.
+        function cliAgentMissingAgents(sweep) {
+            const missing = (sweep.known && sweep.known.missing) || [];
+            return missing.filter((entry) => !!entry.imported_agent_id);
+        }
+
+        // The rest of the missing list: recorded so the user can see a file
+        // went away, counted rather than listed so it cannot drown the one
+        // line above that means something. These age out of the seen-set on
+        // their own after a fortnight.
+        function cliAgentMissingQuietCount(sweep) {
+            const missing = (sweep.known && sweep.known.missing) || [];
+            return missing.filter((entry) => !entry.imported_agent_id).length;
+        }
+
+        function renderCliAgentSweepStatus() {
+            const badge = document.getElementById('cliSweepStatusBadge');
+            const summaryHost = document.getElementById('cliSweepSummary');
+            const missingHost = document.getElementById('cliSweepMissing');
+            const toggle = document.getElementById('cliSweepAutoToggle');
+            const autoHint = document.getElementById('cliSweepAutoHint');
+            const globalBanner = document.getElementById('cliSweepMissingBanner');
+            if (!badge || !summaryHost || !missingHost) return;
+
+            if (!cliAgentSweepStatus) {
+                badge.innerHTML = '';
+                missingHost.innerHTML = '';
+                if (globalBanner) globalBanner.style.display = 'none';
+                summaryHost.innerHTML = cliAgentSweepFetchError
+                    ? `<div class="note blocking">${escapeHtml(cliAgentSweepFetchError)}</div>`
+                    : `<div class="empty">${escapeHtml(t('cli_sweep_loading'))}</div>`;
+                if (autoHint) autoHint.textContent = '';
+                return;
+            }
+
+            const sweep = cliAgentSweepStatus;
+            const last = sweep.last_sweep;
+
+            // --- the missing-file warning: the one thing on this card that is
+            // actively bad, so it renders above the routine status line, and
+            // (via the page-wide banner) is visible from every view, not only
+            // to someone who happens to open Scripts & permissions. ---
+            const missingAgents = cliAgentMissingAgents(sweep);
+            const missingName = (entry) => entry.imported_agent_name || entry.name || t('cli_sweep_unnamed');
+            const quietCount = cliAgentMissingQuietCount(sweep);
+            const quietLine = quietCount
+                ? `<p class="hint" style="margin:0 0 8px;">${escapeHtml(t('cli_sweep_missing_quiet').replace('{n}', quietCount))}</p>`
+                : '';
+            if (missingAgents.length) {
+                missingHost.innerHTML = missingAgents.map((entry) => `
+                    <div class="note blocking">
+                        <strong>${escapeHtml(missingName(entry))}</strong>
+                        &mdash; ${escapeHtml(t('cli_sweep_missing_detail'))}
+                        <div class="hint" style="margin:4px 0 0; font-family: var(--mono); font-size:12px;">${escapeHtml(entry.source_path || '')}</div>
+                    </div>`).join('') + quietLine;
+                if (globalBanner) {
+                    globalBanner.style.display = '';
+                    const text = missingAgents.length === 1
+                        ? t('cli_sweep_missing_banner_one').replace('{name}', missingName(missingAgents[0]))
+                        : t('cli_sweep_missing_banner_many').replace('{n}', missingAgents.length);
+                    document.getElementById('cliSweepMissingBannerText').textContent = text;
+                }
+            } else {
+                missingHost.innerHTML = quietLine;
+                if (globalBanner) globalBanner.style.display = 'none';
+            }
+
+            // --- when the server last looked, and whether it worked ---
+            if (!last) {
+                badge.innerHTML = `<span class="badge off">${escapeHtml(t('cli_sweep_never'))}</span>`;
+                summaryHost.innerHTML = `<p class="hint" style="margin:0;">${escapeHtml(t('cli_sweep_never_detail'))}</p>`;
+            } else if (last.status === 'failed') {
+                // counts is null here by design (server/agent/cli_agent_sweep.py)
+                // — a sweep that could not look must never render as zeros,
+                // which would read as "looked and found nothing". Show the
+                // error instead of any count.
+                badge.innerHTML = `<span class="badge bad">${escapeHtml(t('cli_sweep_failed_badge'))}</span>`;
+                const when = formatAbsoluteLocal(last.started_at) || last.started_at || '';
+                const errText = last.error
+                    ? [last.error.type, last.error.message].filter(Boolean).join(': ')
+                    : '';
+                summaryHost.innerHTML = `
+                    <p class="hint" style="margin:0 0 6px;">${escapeHtml(t('cli_sweep_last_attempt').replace('{time}', when))}</p>
+                    <div class="note blocking">${escapeHtml(errText || t('cli_sweep_failed_generic'))}</div>`;
+            } else {
+                badge.innerHTML = `<span class="badge on">${escapeHtml(t('cli_sweep_ok_badge'))}</span>`;
+                const when = formatAbsoluteLocal(last.finished_at || last.started_at) || last.finished_at || '';
+                const counts = last.counts || {};
+                const stat = (key, value) => `<span class="badge info">${escapeHtml(t(key).replace('{n}', value == null ? '—' : value))}</span>`;
+                summaryHost.innerHTML = `
+                    <p class="hint" style="margin:0 0 8px;">${escapeHtml(t('cli_sweep_last_ok').replace('{time}', when).replace('{ms}', last.duration_ms == null ? '—' : String(last.duration_ms)))}</p>
+                    <div>${stat('cli_sweep_stat_candidates', counts.candidates)}${stat('cli_sweep_stat_excluded', counts.excluded)}${stat('cli_sweep_stat_skipped', counts.skipped)}</div>`;
+            }
+
+            // --- the auto-registration choice, with its consequence spelled
+            // out rather than a bare switch, and explicitly not retroactive:
+            // the {n} below is the candidates already on record, which
+            // flipping this on does not touch. ---
+            const candidateCount = ((sweep.known && sweep.known.candidates) || []).length;
+            if (autoHint) autoHint.textContent = t('cli_sweep_auto_hint').replace('{n}', candidateCount);
+            if (toggle) {
+                toggle.checked = !!sweep.auto_import_enabled;
+                toggle.disabled = false;
+            }
+        }
+
+        async function setCliAgentAutoImport(enabled) {
+            const toggle = document.getElementById('cliSweepAutoToggle');
+            if (toggle) toggle.disabled = true;
+            const result = await api('/cli-agents/sweep/settings', {
+                method: 'PUT',
+                body: JSON.stringify({ enabled }),
+            });
+            if (!result || result.error) {
+                toast((result && result.error) || t('cli_sweep_auto_save_failed'));
+                if (toggle) { toggle.checked = !enabled; toggle.disabled = false; }
+                return;
+            }
+            if (cliAgentSweepStatus) cliAgentSweepStatus.auto_import_enabled = !!result.auto_import_enabled;
+            if (toggle) toggle.disabled = false;
+            toast(enabled ? t('cli_sweep_auto_on_toast') : t('cli_sweep_auto_off_toast'));
+        }
+
         // --- Bootstrap ------------------------------------------------------
 
         async function reloadAll() {
-            const [agentResult, scheduleResult, taskResult, ruleResult, operationResult, stepOperationResult, approvalResult, scriptResult, runResult, stepSchemaResult] = await Promise.all([
+            const [agentResult, scheduleResult, taskResult, ruleResult, operationResult, stepOperationResult, approvalResult, scriptResult, runResult, stepSchemaResult, cliSweepResult] = await Promise.all([
                 api('/agents?limit=200'),
                 api('/schedules'),
                 api('/tasks?limit=200'),
@@ -4149,6 +4425,7 @@
                 api('/scripts'),
                 api('/runs?limit=60'),
                 api('/workflow/step-schema'),
+                api('/cli-agents/sweep'),
             ]);
             agents = (agentResult && agentResult.agents) || [];
             schedules = (scheduleResult && scheduleResult.schedules) || [];
@@ -4178,6 +4455,17 @@
             if (stepSchemaResult && Array.isArray(stepSchemaResult.types)) {
                 stepSchema = stepSchemaResult;
             }
+            // Same guard as above, and for the same reason the sweep record
+            // itself distinguishes a failed sweep from an empty one: a
+            // transient reload error here must not blank out the last
+            // known-good status (or a missing-file warning that was
+            // correctly showing a moment ago) behind a plain "could not load".
+            if (cliSweepResult && !cliSweepResult.error) {
+                cliAgentSweepStatus = cliSweepResult;
+                cliAgentSweepFetchError = null;
+            } else if (!cliAgentSweepStatus) {
+                cliAgentSweepFetchError = (cliSweepResult && cliSweepResult.error) || t('cli_sweep_fetch_failed');
+            }
             renderPolicyOperationOptions();
             renderAgentList();
             renderAgentPicker();
@@ -4187,6 +4475,7 @@
             renderPolicyRules();
             renderApprovals();
             renderApprovalBanner();
+            renderCliAgentSweepStatus();
             renderSteps();
         }
 

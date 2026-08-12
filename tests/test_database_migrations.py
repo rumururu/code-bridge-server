@@ -506,5 +506,138 @@ class CliAgentRenameMigrationTest(unittest.TestCase):
         self.assertEqual(sorted(migrated_columns), sorted(fresh_columns))
 
 
+class CliAgentSeenResidueMigrationTest(unittest.TestCase):
+    """A marketplace reinstall must not leave permanent false alarms behind.
+
+    Reinstalling the Claude plugin marketplace renames the old checkout to
+    `…/claude-plugins-official.bak/` and installs a fresh one, so 31 agent
+    definition files move to 31 new paths and the old 31 are deleted with the
+    `.bak` directory. The sweep records all of it faithfully — and the seen
+    set is then left holding 31 rows for files that will never exist again,
+    every one of them rendered by the dashboard as a red "this agent lost its
+    source file" warning for an agent that was never created. The next
+    reinstall adds another 31.
+
+    What this migration must get right, and what breaks for the user if it
+    does not:
+
+    - it deletes only rows nothing was imported from. Delete one with an
+      import behind it and the user loses the single warning that their
+      scheduled agent is about to fail at 3am naming a file they can still
+      restore;
+    - it deletes only rows whose file is genuinely absent, checked against the
+      disk now rather than trusted from the column. A path that is back must
+      keep its row and lose its missing mark instead;
+    - it runs once and can run again harmlessly, because migrations do.
+    """
+
+    def setUp(self):
+        self._original_db_path = database.DB_PATH
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(setattr, database, "DB_PATH", self._original_db_path)
+        database.DB_PATH = Path(self._tmp.name) / "residue.db"
+        self.root = Path(self._tmp.name) / "files"
+        self.root.mkdir()
+
+    def _seed(self, rows: list[tuple[str, str | None]], imports: list[str]) -> None:
+        """`rows` is (source_path, missing_since); `imports` are imported paths."""
+        database.init_db()
+        with sqlite3.connect(database.DB_PATH) as conn:
+            for index, (source_path, missing_since) in enumerate(rows):
+                conn.execute(
+                    """
+                    INSERT INTO agent_cli_agent_seen (
+                        source_path, candidate_id, location, name, description,
+                        state, detail, first_seen_at, last_seen_at, missing_since
+                    ) VALUES (?, ?, 'plugin:x/y', ?, '', 'candidate', NULL,
+                              '2026-08-01T00:00:00+00:00',
+                              '2026-08-01T00:00:00+00:00', ?)
+                    """,
+                    (source_path, f"c{index}", Path(source_path).stem, missing_since),
+                )
+            for index, source_path in enumerate(imports):
+                conn.execute(
+                    """
+                    INSERT INTO agent_cli_agent_imports (id, source_path, agent_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    (f"imp_{index}", source_path, f"agent_{index}"),
+                )
+            # The migration is already recorded by the init_db above, so undo
+            # that to make this the pre-correction database it is meant to run
+            # against.
+            conn.execute(
+                "DELETE FROM schema_migrations WHERE version = ?",
+                (database.CLI_AGENT_SEEN_RESIDUE_SCHEMA_VERSION,),
+            )
+            conn.commit()
+
+    def _seen(self) -> dict[str, str | None]:
+        with sqlite3.connect(database.DB_PATH) as conn:
+            return {
+                str(row[0]): row[1]
+                for row in conn.execute(
+                    "SELECT source_path, missing_since FROM agent_cli_agent_seen"
+                )
+            }
+
+    def test_it_forgets_ghosts_and_spares_imported_and_existing_paths(self):
+        ghost = str(self.root / "ghost.md")
+        depended_on = str(self.root / "depended_on.md")
+        present = self.root / "present.md"
+        present.write_text("---\nname: present\n---\n", encoding="utf-8")
+        untouched = self.root / "untouched.md"
+        untouched.write_text("---\nname: untouched\n---\n", encoding="utf-8")
+
+        missing_at = "2026-08-10T05:49:02+00:00"
+        self._seed(
+            rows=[
+                (ghost, missing_at),
+                (depended_on, missing_at),
+                # Marked missing while sitting on disk — the stale mark.
+                (str(present), missing_at),
+                (str(untouched), None),
+            ],
+            imports=[depended_on],
+        )
+
+        database.init_db()
+
+        seen = self._seen()
+        # The ghost is gone: no file, and nothing was imported from it.
+        self.assertNotIn(ghost, seen)
+        # The one an agent runs stays, still warning.
+        self.assertEqual(seen[depended_on], missing_at)
+        # The one that is actually there stops claiming to be missing...
+        self.assertIsNone(seen[str(present)])
+        # ...and a row that was never marked is not touched at all.
+        self.assertIn(str(untouched), seen)
+        self.assertIsNone(seen[str(untouched)])
+
+    def test_it_is_idempotent(self):
+        ghost = str(self.root / "ghost.md")
+        depended_on = str(self.root / "depended_on.md")
+        self._seed(
+            rows=[
+                (ghost, "2026-08-10T05:49:02+00:00"),
+                (depended_on, "2026-08-10T05:49:02+00:00"),
+            ],
+            imports=[depended_on],
+        )
+
+        database.init_db()
+        first = self._seen()
+        database.init_db()
+
+        self.assertEqual(self._seen(), first)
+        self.assertEqual(list(first), [depended_on])
+
+    def test_an_empty_seen_set_is_left_alone(self):
+        database.init_db()
+        database.init_db()
+        self.assertEqual(self._seen(), {})
+
+
 if __name__ == "__main__":
     unittest.main()

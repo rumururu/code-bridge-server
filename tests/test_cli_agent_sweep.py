@@ -25,6 +25,16 @@ What these tests defend:
   an empty success: an empty list reads as "you have no agents", which is a
   different and much worse statement than "I could not check".
 - A notification failure never changes what the sweep did or recorded.
+- The seen-set forgets a long-gone path nothing was imported from, and never
+  forgets one an agent depends on. This is the residue rule, and it was
+  learned the hard way: reinstalling the Claude plugin marketplace moved 31
+  definition files to new paths and left 31 rows for files that will never
+  exist again, every one of them a red "this agent lost its source file"
+  warning for an agent nobody had created — and another 31 waiting on the
+  next reinstall.
+- A path that comes back has its missing mark cleared. A row left marked
+  missing while its file sits on disk warns forever about an agent that is
+  working fine.
 """
 
 from __future__ import annotations
@@ -33,6 +43,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -194,16 +205,306 @@ class NewAndMissingTest(CliAgentSweepTestCase):
         self.assertEqual([entry["name"] for entry in record["new"]], ["blinker"])
         self.assertIsNone(cli_agent_sweep.load_seen()[str(path.resolve())]["missing_since"])
 
+    def test_a_path_that_is_found_again_has_its_missing_mark_cleared(self):
+        """A file back on disk must stop reading as missing, everywhere.
+
+        The mark is not just bookkeeping: it is what puts an entry in the
+        stored view's `missing` bucket, which is what the dashboard paints a
+        blocking warning from, and it is what the forgetting rule reads to
+        decide what to delete. A row left marked while its file is right there
+        warns forever about an agent that is working fine, and queues a live
+        entry for deletion. `_record_present` clears it on *every* sweep that
+        finds the file, not only the first one after it returns.
+        """
+        path = self._write_eligible("blinker.md", name="blinker")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+        path.unlink()
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+        self.assertIsNotNone(
+            cli_agent_sweep.load_seen()[str(path.resolve())]["missing_since"]
+        )
+
+        self._write_eligible("blinker.md", name="blinker")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+        # And again, on a sweep where nothing changed at all.
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+
+        self.assertIsNone(
+            cli_agent_sweep.load_seen()[str(path.resolve())]["missing_since"]
+        )
+        view = cli_agent_sweep.get_stored_view()
+        self.assertEqual(view["known"]["missing"], [])
+        self.assertEqual(
+            [entry["source_path"] for entry in view["known"]["candidates"]],
+            [str(path.resolve())],
+        )
+
+
+class ForgettingMissingEntriesTest(CliAgentSweepTestCase):
+    """The seen-set must not grow a row per vanished file forever.
+
+    Every path ever discovered gets a row, and a vanished one keeps its row
+    with `missing_since` stamped. That is right for the case the sweep exists
+    to catch — an imported agent whose file is gone will fail its next
+    scheduled run, and the warning has to stand until someone acts on it — and
+    wrong for everything else.
+
+    The concrete failure: reinstalling the Claude plugin marketplace renames
+    the old checkout and installs a fresh one, so 31 definition files move to
+    31 new paths. Nothing was imported from any of them. Left alone the seen
+    set keeps all 31 dead paths, the dashboard renders 31 red "lost its source
+    file" warnings for agents that were never created, and the next reinstall
+    adds 31 more. If this regresses, that is what comes back — with the real
+    warning, the one about an agent that is actually breaking, buried
+    somewhere in the middle of it.
+    """
+
+    def _sweep_at(self, moment: datetime) -> dict:
+        with mock.patch.object(cli_agent_sweep, "_now", lambda: moment):
+            return cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+
+    def _gone(self, filename: str = "reviewer.md", *, name: str = "reviewer") -> Path:
+        """A file that was seen, then deleted, and is now recorded missing."""
+        path = self._write_eligible(filename, name=name)
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+        path.unlink()
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+        self.assertIsNotNone(
+            cli_agent_sweep.load_seen()[str(path.resolve())]["missing_since"]
+        )
+        return path
+
+    def test_a_missing_file_an_agent_was_imported_from_is_never_forgotten(self):
+        path = self._write_eligible("reviewer.md", name="reviewer")
+        result = cli_agent_sources.import_cli_agent(str(path))
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+        path.unlink()
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+
+        # A year later, and with the retention set to nothing at all, on the
+        # theory that whoever tunes this knob must not be able to switch the
+        # warning off with it.
+        with mock.patch.dict(
+            "os.environ", {cli_agent_sweep.MISSING_RETENTION_ENV: "0"}
+        ):
+            record = self._sweep_at(datetime.now(UTC) + timedelta(days=365))
+
+        self.assertEqual(record["forgotten"], [])
+        seen = cli_agent_sweep.load_seen()
+        self.assertIn(str(path.resolve()), seen)
+        self.assertIsNotNone(seen[str(path.resolve())]["missing_since"])
+
+        missing = cli_agent_sweep.get_stored_view()["known"]["missing"]
+        self.assertEqual(
+            [entry["imported_agent_id"] for entry in missing], [result.agent["id"]]
+        )
+
+    def test_a_missing_file_nothing_was_imported_from_is_forgotten_after_a_fortnight(self):
+        path = self._gone()
+
+        record = self._sweep_at(datetime.now(UTC) + timedelta(days=15))
+
+        self.assertEqual(record["forgotten"], [str(path.resolve())])
+        self.assertEqual(record["counts"]["forgotten"], 1)
+        self.assertNotIn(str(path.resolve()), cli_agent_sweep.load_seen())
+        self.assertEqual(cli_agent_sweep.get_stored_view()["known"]["missing"], [])
+
+    def test_a_file_missing_for_less_than_that_is_still_on_record(self):
+        """The grace period is the point: files come back.
+
+        An unmounted drive, a fortnight away, a branch checked out over a
+        weekend — forget too eagerly and the same file reads as brand new
+        every time the machine changes shape.
+        """
+        path = self._gone()
+
+        record = self._sweep_at(datetime.now(UTC) + timedelta(days=13))
+
+        self.assertEqual(record["forgotten"], [])
+        self.assertIn(str(path.resolve()), cli_agent_sweep.load_seen())
+
+    def test_a_file_is_reported_missing_before_it_can_be_forgotten(self):
+        """Even with no retention at all, the sweep that notices still reports.
+
+        Forgetting runs last for this reason. A file that disappears and gets
+        dropped in the same sweep must still appear in that sweep's diff —
+        otherwise the one moment the disappearance was visible is the one
+        moment it was silently discarded.
+        """
+        path = self._write_eligible("reviewer.md", name="reviewer")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+        path.unlink()
+
+        with mock.patch.dict(
+            "os.environ", {cli_agent_sweep.MISSING_RETENTION_ENV: "0"}
+        ):
+            record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+
+        self.assertEqual(
+            [entry["source_path"] for entry in record["missing"]], [str(path.resolve())]
+        )
+        self.assertEqual(record["forgotten"], [str(path.resolve())])
+        self.assertNotIn(str(path.resolve()), cli_agent_sweep.load_seen())
+
+    def test_a_present_file_is_never_forgotten_however_old_the_row_is(self):
+        self._write_eligible("stays.md", name="stays")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+
+        record = self._sweep_at(datetime.now(UTC) + timedelta(days=400))
+
+        self.assertEqual(record["forgotten"], [])
+        self.assertEqual(len(cli_agent_sweep.load_seen()), 1)
+
+    def test_an_unreadable_import_table_forgets_nothing(self):
+        """Fail closed: without provenance, everything might be actionable."""
+        path = self._gone()
+
+        with mock.patch.object(
+            cli_agent_sweep, "_import_map", side_effect=RuntimeError("db is down")
+        ):
+            record = self._sweep_at(datetime.now(UTC) + timedelta(days=99))
+
+        self.assertEqual(record["forgotten"], [])
+        self.assertIn(str(path.resolve()), cli_agent_sweep.load_seen())
+
+    def test_a_failed_sweep_forgets_nothing(self):
+        path = self._gone()
+
+        with mock.patch.object(
+            cli_agent_sweep,
+            "discover_cli_agents",
+            side_effect=OSError("the disk went away"),
+        ):
+            record = self._sweep_at(datetime.now(UTC) + timedelta(days=99))
+
+        self.assertEqual(record["status"], cli_agent_sweep.STATUS_FAILED)
+        self.assertEqual(record["forgotten"], [])
+        self.assertIn(str(path.resolve()), cli_agent_sweep.load_seen())
+
+
+class StoredViewProvenanceTest(CliAgentSweepTestCase):
+    """The stored view has to say which entries anything depends on.
+
+    The dashboard cannot work this out from `state`: that describes the file
+    (importable, excluded, unparseable), not whether a Code Bridge agent was
+    ever made from it. Guessing from `state == 'candidate'` is what turned a
+    plugin marketplace reinstall into 31 blocking warnings about agents that
+    do not exist.
+    """
+
+    def test_every_entry_says_whether_an_agent_was_imported_from_it(self):
+        imported_path = self._write_eligible("reviewer.md", name="reviewer")
+        untouched_path = self._write_eligible("drafter.md", name="drafter")
+        result = cli_agent_sources.import_cli_agent(str(imported_path))
+
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+        view = cli_agent_sweep.get_stored_view()
+
+        by_path = {
+            entry["source_path"]: entry for entry in view["known"]["candidates"]
+        }
+        self.assertEqual(
+            by_path[str(imported_path.resolve())]["imported_agent_id"],
+            result.agent["id"],
+        )
+        self.assertEqual(
+            by_path[str(imported_path.resolve())]["imported_agent_name"],
+            result.agent["name"],
+        )
+        self.assertIsNone(by_path[str(untouched_path.resolve())]["imported_agent_id"])
+        self.assertIsNone(by_path[str(untouched_path.resolve())]["imported_agent_name"])
+
+    def test_a_missing_entry_carries_the_agent_that_will_break(self):
+        path = self._write_eligible("reviewer.md", name="reviewer")
+        result = cli_agent_sources.import_cli_agent(str(path))
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+        path.unlink()
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+
+        missing = cli_agent_sweep.get_stored_view()["known"]["missing"]
+
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(missing[0]["imported_agent_id"], result.agent["id"])
+        self.assertEqual(missing[0]["imported_agent_name"], result.agent["name"])
+
+    def test_a_missing_entry_nothing_points_at_is_marked_as_such(self):
+        """The 31-ghosts case: recorded, listed, and not actionable."""
+        path = self._write_eligible("offered.md", name="offered")
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+        path.unlink()
+        cli_agent_sweep.run_cli_agent_sweep(trigger="test")
+
+        missing = cli_agent_sweep.get_stored_view()["known"]["missing"]
+
+        self.assertEqual(len(missing), 1)
+        self.assertIsNone(missing[0]["imported_agent_id"])
+        self.assertIsNone(missing[0]["imported_agent_name"])
+
+
+class DashboardWarnsOnlyOnActionableEntriesTest(unittest.TestCase):
+    """The card must warn about agents that will break, not files that left.
+
+    Reading the shipped template because there is no other way to hold a page
+    of inline JavaScript to a behaviour, and the behaviour is small and named:
+    `cliAgentMissingAgents` is the one place the card and the page-wide banner
+    decide what counts as a problem.
+
+    It used to decide from `state === 'candidate'` — "this file could have
+    produced an agent" — because the stored view carried no link to the agent
+    imported from a path. A plugin marketplace reinstall then moved 31
+    definition files and painted 31 red warnings for agents nobody had ever
+    created. If this regresses, the real warning goes back to being one red
+    box among dozens of meaningless ones.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.template = (
+            SERVER_DIR / "dashboard" / "templates" / "agents.html"
+        ).read_text(encoding="utf-8")
+
+    def test_the_warning_is_driven_by_the_import_mapping(self):
+        self.assertIn(
+            "return missing.filter((entry) => !!entry.imported_agent_id);",
+            self.template,
+        )
+        self.assertNotIn("missing.filter((entry) => entry.state === 'candidate')", self.template)
+
+    def test_the_rest_is_counted_quietly_rather_than_dropped(self):
+        """The user can still see a file went away; it just is not an alarm."""
+        self.assertIn("function cliAgentMissingQuietCount(sweep)", self.template)
+        self.assertIn("return missing.filter((entry) => !entry.imported_agent_id).length;", self.template)
+        self.assertIn("t('cli_sweep_missing_quiet')", self.template)
+
+    def test_the_warning_names_the_agent_not_just_the_file(self):
+        self.assertIn("entry.imported_agent_name || entry.name", self.template)
+
+    def test_the_strings_exist_in_both_dashboard_locales(self):
+        for key in ("cli_sweep_missing_quiet", "cli_sweep_missing_detail"):
+            # Once under `en`, once under `ko`.
+            self.assertEqual(
+                self.template.count(f"{key}: '"), 2, f"{key} is not in both locales"
+            )
+
 
 class NotificationTest(CliAgentSweepTestCase):
-    def test_a_new_importable_definition_notifies(self):
+    def test_a_new_definition_is_recorded_but_never_pushed(self):
+        """Discovering a file is not worth interrupting anyone.
+
+        This did notify, and it was wrong: a push landed on the user's phone
+        saying a file they could register exists. That is only useful once
+        they are already on the registration screen, which lists it anyway.
+        It still has to be *recorded* — the screen and the stored view are
+        built from that — so this asserts both halves: found, not pushed.
+        """
         self._write_eligible("reviewer.md", name="reviewer")
 
         record = cli_agent_sweep.run_cli_agent_sweep(trigger="test")
 
-        self.assertTrue(record["notified"]["new"])
+        self.assertEqual([entry["name"] for entry in record["new"]], ["reviewer"])
+        self.assertFalse(record["notified"]["new"])
         titles = [row["title"] for row in self._notifications()]
-        self.assertTrue(any("reviewer" in title for title in titles), titles)
+        self.assertEqual(titles, [], f"a discovery must not notify: {titles}")
 
     def test_a_sweep_where_nothing_changed_does_not_notify(self):
         self._write_eligible("reviewer.md", name="reviewer")
