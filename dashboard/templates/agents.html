@@ -4520,6 +4520,24 @@
             }
         }
 
+        // `agent:<id>` is the scope a standing rule granted to a scheduled
+        // agent is filed under, and the id alone ("agent:agent_5f3a91c…")
+        // tells a reader nothing about whose permission they are looking at —
+        // or which row to revoke. Show the agent's name and keep the raw scope
+        // beside it, since that is what the revoke call and the API use.
+        // Every other scope shape, and an id we cannot resolve, prints
+        // verbatim.
+        function policyScopeLabel(scope) {
+            const raw = String(scope || '');
+            if (!raw.startsWith('agent:')) return escapeHtml(raw);
+            const agentId = raw.slice('agent:'.length);
+            const agent = agents.find((candidate) => candidate.id === agentId);
+            if (!agent || !agent.name) return escapeHtml(raw);
+            return `${escapeHtml(agent.name)} `
+                + `<span style="font-family:var(--mono);font-size:11.5px;color:var(--text-muted);">`
+                + `${escapeHtml(raw)}</span>`;
+        }
+
         function renderPolicyRules() {
             const host = document.getElementById('ruleList');
             document.getElementById('ruleCount').textContent =
@@ -4531,7 +4549,7 @@
             const rows = policyRules.map((rule) => `
                 <tr>
                     <td>${escapeHtml(rule.operation)}</td>
-                    <td>${escapeHtml(rule.scope)}</td>
+                    <td>${policyScopeLabel(rule.scope)}</td>
                     <td><span class="badge ${rule.effect === 'allow' ? 'on' : 'off'}">${escapeHtml(rule.effect)}</span></td>
                     <td>${escapeHtml(rule.expires_at || t('never'))}</td>
                     <td style="text-align:right;">

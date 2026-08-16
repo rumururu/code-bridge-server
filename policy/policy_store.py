@@ -10,6 +10,20 @@ from .policy_engine import decide_policy
 from core.timestamps import to_utc_iso
 
 ALLOWED_RULE_EFFECTS = {"allow", "confirm_once", "confirm_each", "desktop_only", "forbidden"}
+
+#: The ``project_name`` a project-less run carries — ``GLOBAL_TASK_PROJECT_NAME``
+#: in ``agent/task_orchestrator.py``. Duplicated as a literal rather than
+#: imported because the policy layer must not depend on the agent runtime.
+#:
+#: It is not a project. Every project-less agent on the server shares it, so a
+#: rule at ``project:__global__`` would be a near-global grant wearing a
+#: project's name. The write side (``standing_rule_scope_for_request``) has
+#: always refused to *create* one; :func:`_scope_candidates` used to still
+#: *match* one, so a rule written there by hand (the dashboard's free-text
+#: scope box, or the rules API) applied to every project-less run on the box.
+#: Both sides now go through :func:`scope_project_name`, which is the only
+#: way the two can't drift apart again.
+GLOBAL_PROJECT_SENTINEL = "__global__"
 _EFFECT_RISK = {
     "allow": "low",
     "confirm_once": "medium",
@@ -196,20 +210,70 @@ def decide_policy_with_rules(
     }
 
 
+def _clean(value: Any) -> str | None:
+    """``value`` as a non-empty stripped string, else ``None``."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def scope_agent_id(details: dict[str, Any]) -> str | None:
+    """The agent a standing rule for ``details`` may be anchored to.
+
+    ``None`` when the operation did not come from a nameable agent, which is
+    the honest answer for interactive chat: those runs are all filed under one
+    pseudo-agent, so an ``agent:`` rule there would grant the operation to
+    every chat on the server. ``chat/chat_stream_service.py`` only puts
+    ``agent_id`` in the details when it resolves to a real, non-pseudo agent —
+    this reads what it wrote.
+    """
+    return _clean(details.get("agent_id"))
+
+
+def scope_workspace_id(details: dict[str, Any]) -> str | None:
+    """The workspace a standing rule for ``details`` may be anchored to."""
+    return _clean(details.get("workspace_id"))
+
+
+def scope_project_name(details: dict[str, Any]) -> str | None:
+    """The project a standing rule for ``details`` may be anchored to.
+
+    ``None`` for :data:`GLOBAL_PROJECT_SENTINEL`, which names no project.
+    """
+    project_name = _clean(details.get("project_name"))
+    if project_name == GLOBAL_PROJECT_SENTINEL:
+        return None
+    return project_name
+
+
 def _scope_candidates(
     *,
     run_id: str | None,
     details: dict[str, Any],
 ) -> list[str]:
+    """Scopes a rule may be filed under, narrowest first.
+
+    ``find_effective_rule`` ranks by position, so the first entry that has a
+    rule wins. The order is the exact inverse of the one
+    ``approvals.approval_service.standing_rule_scope_for_request`` writes at —
+    a rule written at the scope that function picks is found here, which is
+    the only property that makes "always allow" mean anything.
+
+    ``agent:`` sits between the run and the workspace: it is one named actor
+    rather than everything that happens in a place, and it is what survives a
+    schedule — a new fire is a new run, so a ``run:`` rule is dead on arrival
+    for the unattended case it was granted for.
+    """
     candidates: list[str] = []
     if run_id:
         candidates.append(f"run:{run_id}")
-    workspace_id = details.get("workspace_id")
-    if isinstance(workspace_id, str) and workspace_id.strip():
-        candidates.append(f"workspace:{workspace_id.strip()}")
-    project_name = details.get("project_name")
-    if isinstance(project_name, str) and project_name.strip():
-        candidates.append(f"project:{project_name.strip()}")
+    agent_id = scope_agent_id(details)
+    if agent_id:
+        candidates.append(f"agent:{agent_id}")
+    workspace_id = scope_workspace_id(details)
+    if workspace_id:
+        candidates.append(f"workspace:{workspace_id}")
+    project_name = scope_project_name(details)
+    if project_name:
+        candidates.append(f"project:{project_name}")
     candidates.append("global")
     return candidates
 

@@ -392,6 +392,58 @@ def _run_workspace_root(run_id: str) -> str | None:
     return cwd.strip() if isinstance(cwd, str) and cwd.strip() else None
 
 
+def _run_agent_identity(run_id: str) -> dict[str, str] | None:
+    """The real agent behind a run, as ``{"id", "name"}``, or ``None``.
+
+    This is what lets a standing rule outlive the run it was granted in: a
+    scheduled fire is a new run, so an ``agent:`` scope is the narrowest thing
+    that is still there next time
+    (``approvals/approval_service.py::standing_rule_scope_for_request``).
+
+    ``None`` is returned for anything that is not one nameable agent, and that
+    is the whole safety of the feature:
+
+    * **Pseudo-agents.** Interactive chat files its runs under
+      ``agent_adhoc_dev`` (``routes/chat_ws.py:285``) and migrated rows under
+      ``agent_legacy_chat`` (``core/database.py:605``). Both are shared by
+      every chat on the server, exactly like the ``__global__`` project
+      sentinel, so a rule there would be a near-global grant wearing an
+      agent's name. Chat therefore keeps today's behaviour untouched.
+    * **Anything unresolvable.** A missing run, a run with no agent, a store
+      that raises — all fall through to ``None``, which drops the scope back
+      to ``run:``. Failing that way costs a repeated prompt; failing the other
+      way would grant a permission to the wrong agent.
+
+    The run row carries ``agent_id`` directly (``agent/agent_store.py:520``,
+    set from the task's ``assigned_agent_id`` at
+    ``agent/task_orchestrator.py:421``); the task is consulted only as a
+    fallback for a run that predates that column being written.
+    """
+    try:
+        store = get_agent_store()
+        run = store.get_run(run_id)
+        if not isinstance(run, dict):
+            return None
+        agent_id = run.get("agent_id")
+        if not (isinstance(agent_id, str) and agent_id.strip()):
+            task_id = run.get("task_id")
+            task = store.get_task(task_id) if isinstance(task_id, str) and task_id else None
+            agent_id = task.get("assigned_agent_id") if isinstance(task, dict) else None
+        if not (isinstance(agent_id, str) and agent_id.strip()):
+            return None
+        agent = store.get_agent(agent_id.strip())
+        if not isinstance(agent, dict) or agent.get("is_pseudo"):
+            return None
+        identity = {"id": agent_id.strip()}
+        name = agent.get("name")
+        if isinstance(name, str) and name.strip():
+            identity["name"] = name.strip()
+        return identity
+    except Exception:  # noqa: BLE001 - policy must not fail on a store read
+        logger.warning("[chat_stream] agent identity lookup failed run=%s", run_id)
+        return None
+
+
 def _approval_display(tool_name: Any, tool_input: Any) -> dict[str, Any]:
     """``{"action", "target"}`` for the approval card.
 
@@ -890,6 +942,17 @@ async def _handle_control_request(
             }
             if workspace_root:
                 details["workspace_root"] = workspace_root
+            # Which agent asked. Only present for a real (non-pseudo) agent,
+            # and it is what a standing rule can be anchored to so the grant
+            # survives to the agent's next scheduled fire. Absent for chat,
+            # which keeps resolving exactly as it did.
+            agent_identity = _run_agent_identity(agent_run_id)
+            if agent_identity:
+                details["agent_id"] = agent_identity["id"]
+                if agent_identity.get("name"):
+                    # Display only — the card names the agent the rule would
+                    # cover instead of printing an opaque `agent_…` id.
+                    details["agent_name"] = agent_identity["name"]
             details.update(
                 _approval_target_details(
                     tool_name,

@@ -7,7 +7,13 @@ from typing import Any
 
 from audit.audit_store import get_audit_store
 from policy.policy_engine import default_policy_snapshot
-from policy.policy_store import decide_policy_with_rules, get_policy_rule_store
+from policy.policy_store import (
+    decide_policy_with_rules,
+    get_policy_rule_store,
+    scope_agent_id,
+    scope_project_name,
+    scope_workspace_id,
+)
 
 from .approval_store import get_approval_store, is_request_expired
 from .approver_channel import CHANNEL_REMOTE, is_desktop_channel, stamp_approver
@@ -180,17 +186,34 @@ def standing_rule_scope_for_request(request: dict[str, Any]) -> str:
     """Narrowest policy scope a standing rule for ``request`` should use.
 
     Prefer the project the operation happened in, then the workspace, then the
-    run. ``global`` is the last resort and is never chosen to *widen* an
-    approval — a caller that wants it has to ask for it explicitly.
+    agent that ran it, then the single run. ``global`` is the last resort and
+    is never chosen to *widen* an approval — a caller that wants it has to ask
+    for it explicitly.
+
+    The agent step exists because without it the product's headline case could
+    never be answered. An agent built purely by conversation has no project, so
+    ``details.project_name`` is the ``__global__`` sentinel (refused: every
+    project-less agent shares it), and its runs carry no ``workspace_id`` — so
+    the scope fell through to ``run:``. A scheduled fire is a new run, so the
+    rule granted on one fire matched nothing on the next and the agent parked
+    on the same approval again, unattended, forever.
+
+    Agent sits *below* project and workspace so nothing that resolves today
+    changes: a request with a real project still gets ``project:``, one with a
+    workspace still gets ``workspace:``. It sits *above* ``run:`` because the
+    run is the one unit guaranteed not to exist next time.
     """
-    details = request.get("details") or {}
-    if isinstance(details, dict):
-        project_name = details.get("project_name")
-        if isinstance(project_name, str) and project_name.strip() and project_name.strip() != "__global__":
-            return f"project:{project_name.strip()}"
-        workspace_id = details.get("workspace_id")
-        if isinstance(workspace_id, str) and workspace_id.strip():
-            return f"workspace:{workspace_id.strip()}"
+    details = request.get("details")
+    details = details if isinstance(details, dict) else {}
+    project_name = scope_project_name(details)
+    if project_name:
+        return f"project:{project_name}"
+    workspace_id = scope_workspace_id(details)
+    if workspace_id:
+        return f"workspace:{workspace_id}"
+    agent_id = scope_agent_id(details)
+    if agent_id:
+        return f"agent:{agent_id}"
     run_id = request.get("run_id")
     if isinstance(run_id, str) and run_id.strip():
         return f"run:{run_id.strip()}"
