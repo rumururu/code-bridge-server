@@ -7,6 +7,8 @@
 #   $env:CODE_BRIDGE_AUTO_START     "0" to skip auto-start after install
 #   $env:CODE_BRIDGE_AUTOSTART      "1"/"0" to register the login item without prompting
 #   $env:CODE_BRIDGE_FORCE_RESET    "1" to overwrite local changes during upgrade
+#   $env:CODE_BRIDGE_BROWSER        "0" to skip the Chromium download (browser
+#                                   steps then wait for a human at run time)
 
 $ErrorActionPreference = "Stop"
 
@@ -280,6 +282,50 @@ function Setup-Venv {
     Write-Host "[OK] Python environment ready" -ForegroundColor Green
 }
 
+# Download the Chromium build that browser_action workflow steps run on.
+#
+# pip installs the playwright package but never the browser binary, so a server
+# without this step reports browser runtime "unavailable" and parks every
+# browser step waiting for a human. This is the one step in the installer that
+# downloads hundreds of megabytes, so it says so before it starts: an installer
+# that goes silent for four minutes reads as hung, and the user kills it.
+function Setup-BrowserRuntime {
+    $python = "$INSTALL_DIR\venv\Scripts\python.exe"
+
+    if ($env:CODE_BRIDGE_BROWSER -eq "0") {
+        Write-Host ""
+        Write-Host "[SKIP] Browser runtime skipped (CODE_BRIDGE_BROWSER=0)" -ForegroundColor Yellow
+        Write-Host "  Browser workflow steps will wait for manual handling until you run:"
+        Write-Host "  $python -m playwright install chromium"
+        return
+    }
+
+    Write-Host ""
+    Write-Host "Installing browser runtime (Chromium for browser workflow steps)..." -ForegroundColor Cyan
+    Write-Host "  Download: about 200MB. On disk: about 450MB. Takes 1-5 minutes."
+    Write-Host "  Skip with `$env:CODE_BRIDGE_BROWSER = `"0`" (browser steps then wait for a human)."
+
+    # Never fail the install over this: the server runs fine without a browser,
+    # and it reports the missing runtime honestly rather than pretending.
+    $succeeded = $false
+    try {
+        $ErrorActionPreference = "Continue"
+        & $python -m playwright install chromium
+        $succeeded = ($LASTEXITCODE -eq 0)
+    } catch {
+        $succeeded = $false
+    }
+
+    if ($succeeded) {
+        Write-Host "[OK] Browser runtime ready" -ForegroundColor Green
+        return
+    }
+
+    Write-Host "[WARN] Chromium download failed - the server still starts." -ForegroundColor Yellow
+    Write-Host "  Browser workflow steps will wait for manual handling until you run:"
+    Write-Host "  $python -m playwright install chromium"
+}
+
 function Create-StartScript {
     Write-Host ""
     Write-Host "Creating start scripts..." -ForegroundColor Cyan
@@ -370,6 +416,7 @@ Test-Cloudflared
 Test-MermaidCli
 Setup-Repository
 Setup-Venv -PythonCmd $PythonCmd
+Setup-BrowserRuntime
 Create-StartScript
 Set-AutoStart
 

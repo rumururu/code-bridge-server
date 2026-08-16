@@ -231,6 +231,59 @@ class BuilderCommitTruthTest(unittest.TestCase):
         self.assertIn("interval.seconds", schedule["detail"])
         self.assertFalse(result["commit_result"]["runs_unattended"])
 
+    # --- what the schedule is called --------------------------------------
+
+    def test_a_schedule_is_named_after_what_it_does_not_after_the_chat(self):
+        """The name is a label in every list; it must not be a chat fragment.
+
+        ``name=phrase`` stored the sentence the parser happened to accept, so a
+        schedule ended up called "그리고 **매일 오전 9시에** flutter test 돌려서
+        실패하면 알려줘" — markdown, conjunction and all — in the schedules list,
+        the edit dialog and every notification about it. The user's own wording
+        is still worth keeping, so it stays in ``requested_text``.
+        """
+        session = self._session(
+            (
+                "user",
+                "그리고 **매일 오전 9시에** 맥 디스크 남은 용량 확인해서 메일 보내줘",
+            ),
+        )
+
+        result = self._commit(session)
+
+        schedules = self._schedules_for(result["task"]["id"])
+        self.assertEqual(len(schedules), 1, schedules)
+        self.assertEqual(schedules[0]["name"], "매일 09:00")
+        self.assertEqual(schedules[0]["expression"], {"kind": "daily_at", "time": "09:00"})
+
+        schedule_fact = result["commit_result"]["schedule"]
+        self.assertEqual(schedule_fact["name"], "매일 09:00")
+        # The user's words, minus the markdown and the conjunction that only
+        # existed because of where the sentence was quoted from.
+        self.assertEqual(
+            schedule_fact["requested_text"],
+            "매일 오전 9시에 맥 디스크 남은 용량 확인해서 메일 보내줘",
+        )
+        self.assertNotEqual(schedule_fact["requested_text"], schedule_fact["name"])
+
+    def test_an_interval_schedule_is_named_by_its_interval(self):
+        # Each commit is its own session, agent and task, so the three run
+        # against one database without resetting anything between them.
+        for phrase, expected_name, expected_expression in (
+            ("30분마다 디스크 확인해줘", "30분마다", {"kind": "interval", "seconds": 1800}),
+            ("6시간마다 디스크 확인해줘", "6시간마다", {"kind": "interval", "seconds": 21600}),
+            ("2일마다 디스크 확인해줘", "2일마다", {"kind": "interval", "seconds": 172800}),
+        ):
+            with self.subTest(phrase=phrase):
+                result = self._commit(self._session(("user", phrase)))
+                schedules = self._schedules_for(result["task"]["id"])
+                self.assertEqual(len(schedules), 1, schedules)
+                self.assertEqual(schedules[0]["expression"], expected_expression)
+                self.assertEqual(schedules[0]["name"], expected_name)
+                self.assertEqual(
+                    result["commit_result"]["schedule"]["requested_text"], phrase
+                )
+
     # --- nothing to schedule is a legitimate answer -----------------------
 
     def test_a_commit_with_no_timing_intent_says_nothing_will_run(self):

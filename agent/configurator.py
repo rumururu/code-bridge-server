@@ -23,6 +23,7 @@ from agent.agent_models import (
     TaskDraft,
     WorkflowStep,
 )
+from agent.capability_registry import ToolVerification, verify_declared_mcp_ids
 
 logger = logging.getLogger(__name__)
 
@@ -374,6 +375,18 @@ def build_configurator_system_prompt(_unused: list[Any] | None = None) -> str:
     return template + _registered_scripts_block()
 
 
+def _step_id_for_script(script_name: str) -> str:
+    """A step id for a script proposal that never named one.
+
+    ``ScriptRequest.step_id`` is optional in the draft schema, so the model can
+    ask for a script without saying which step runs it. That must not decide
+    whether approval wires the script in — the id is bookkeeping, the wiring is
+    the promise the user read.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", script_name.strip().casefold()).strip("_")
+    return f"run_{slug}"[:64] if slug else "run_script"
+
+
 @dataclass(frozen=True)
 class ParsedConfiguratorResponse:
     """Parsed Configurator response content."""
@@ -436,18 +449,43 @@ class BuilderSession:
         The step's ``script_id`` is filled in the same act, because the whole
         point of ``step_id`` on the request is that the user should not have to
         copy an id from one panel into another.
+
+        When no step carries that id yet, the step is *created* here rather
+        than skipped. Prompt rule 2d tells the Configurator to keep the shell
+        step out of ``flow`` until the script exists ("never invent a
+        script_id"), so "no matching step" is the ordinary case, not the odd
+        one — and the reply the user read said the script would be wired into
+        the workflow on approval. Filling in nothing left that promise unkept:
+        the conversation went on referring to a step that was in no draft, and
+        the agent committed without the work it was built to do.
         """
         script_id = str(script.get("id") or "").strip()
         if not script_id:
             return self.current_draft
 
+        script_name = str(script.get("name") or request_name).strip()
+        target = (step_id or "").strip() or _step_id_for_script(script_name)
         flow = self.current_draft.flow
-        if step_id:
+        matched = any((step.id or "").strip() == target for step in flow)
+        if matched:
             flow = [
                 step.model_copy(update={"script_id": script_id})
-                if (step.id or "").strip() == step_id.strip()
+                if (step.id or "").strip() == target
                 else step
                 for step in flow
+            ]
+        else:
+            # Head of the flow: a shell step reads, and the llm steps that
+            # judge what it read are already written to run after it.
+            flow = [
+                WorkflowStep(
+                    id=target,
+                    type="shell",
+                    name=(script_name or target)[:120],
+                    description=str(script.get("description") or "").strip()[:2000],
+                    script_id=script_id,
+                ),
+                *flow,
             ]
         remaining = [
             request
@@ -458,11 +496,10 @@ class BuilderSession:
             update={"flow": flow, "script_requests": remaining}
         )
 
-        name = str(script.get("name") or request_name).strip()
         description = str(script.get("description") or "").strip()
         suffix = f" — {description}" if description else ""
-        line = f"  - {script_id}: {name}{suffix}"
-        step_note = f" Use it as the script_id of step '{step_id}'." if step_id else ""
+        line = f"  - {script_id}: {script_name}{suffix}"
+        step_note = f" It is already the script_id of step '{target}'."
         self.system_prompt = (
             f"{self.system_prompt}\n"
             f"\nThe user approved a new script, now registered:\n{line}\n"
@@ -508,6 +545,33 @@ class BuilderSession:
                 parsed,
                 assistant_message=_with_disclosure(parsed.assistant_message, gate_disclosure),
             )
+        # After enrichment, so both what the model declared and what
+        # `_ensure_playwright_tool` / `_ensure_app_action_tool` added are
+        # checked by the same rule. Runs every turn, not only turns that
+        # carried a draft block: a tool the model declared two turns ago is
+        # still in `current_draft` and still on its way to `tools_json`.
+        # `dropped` is empty on the turns after the first, so the user is told
+        # once rather than in every reply.
+        self.current_draft, dropped_tools = _drop_unverifiable_tools(self.current_draft)
+        if dropped_tools:
+            parsed = replace(
+                parsed,
+                assistant_message=_with_disclosure(
+                    parsed.assistant_message, _unverified_tool_disclosure(dropped_tools)
+                ),
+            )
+        if parsed.draft is not None:
+            # Only when this turn actually put a draft on the screen. Saying
+            # "there are no workflow steps" during a turn that proposed no
+            # draft at all (a greeting, a question) would be noise.
+            flow_disclosure = _empty_flow_disclosure(self.current_draft.flow)
+            if flow_disclosure is not None:
+                parsed = replace(
+                    parsed,
+                    assistant_message=_with_disclosure(
+                        parsed.assistant_message, flow_disclosure
+                    ),
+                )
         if parsed.is_ready_to_commit:
             self.is_ready_to_commit = True
         self.messages.append({"role": "assistant", "content": parsed.assistant_message})
@@ -688,8 +752,8 @@ def _deterministic_gate_disclosure(
 ) -> str | None:
     """Warn the user the turn a park-for-human step lands in a scheduled flow.
 
-    `_join_request_steps`, `_install_app_steps`, and `_naver_note_flow` add an
-    `approval_gate` step ahead of a sensitive external action -- correctly,
+    `_join_request_steps` and `_install_app_steps` add an `approval_gate` step
+    ahead of a sensitive external action -- correctly,
     per rules 13/14 below. But that step type is dispatched unconditionally
     every run (see `_GATE_STEP_TYPES` above), and it was inserted here rather
     than written by the model, so the model never saw it and never had a
@@ -728,6 +792,121 @@ def _deterministic_gate_disclosure(
     )
 
 
+def _empty_flow_disclosure(flow: list[WorkflowStep]) -> str | None:
+    """Say plainly that the draft has no runnable workflow yet.
+
+    This file used to answer an empty flow by writing one: a keyword classifier
+    decided the agent "looked like" Naver cafe / Naver note / generic web
+    automation and `enrich_draft_from_user_intent` dropped a six-step template
+    into the draft. The user then read a workflow they had never asked for,
+    described in confident detail, and had no way to tell it apart from the
+    model's own work. The global rule this project runs on is that when the
+    model does not produce something the server does not manufacture a
+    rule-based substitute and present it as the model's -- so the flow now
+    stays empty, and this says so.
+
+    Commit is already refused for an empty flow by `_validate_commit_draft`
+    (`routes/agents.py`), which is a 422 the user meets *after* they press
+    save. This is the same fact told during the conversation, where it can
+    still be acted on.
+
+    A flow of nothing but bare "Step 1" placeholders gets its own wording: it
+    is not empty, so it clears the commit check, but nothing in it says what to
+    do or what success means, and that is exactly the shape the deleted
+    templates used to overwrite.
+    """
+
+    if flow and not all(_is_placeholder_step(step) for step in flow):
+        return None
+
+    if not flow:
+        return (
+            "참고: 이 초안에는 아직 워크플로 단계가 하나도 없습니다. 단계가 없으면 "
+            "에이전트를 저장할 수 없고, 서버가 대신 단계를 만들어 넣지도 않습니다. "
+            "어떤 순서로 무엇을 하면 되는지 알려주시면 그대로 단계로 옮기겠습니다."
+        )
+    return (
+        "참고: 이 초안의 워크플로 단계에는 아직 이름만 있고 실제 내용(무엇을 하는지, "
+        "무엇이 성공인지)이 없습니다. 서버가 그 내용을 임의로 채우지 않으므로, "
+        "각 단계에서 할 일과 성공 기준을 알려주시면 그대로 반영하겠습니다."
+    )
+
+
+def _drop_unverifiable_tools(
+    draft: AgentDraft,
+) -> tuple[AgentDraft, list[ToolVerification]]:
+    """Remove declared tools that name nothing existing on this machine.
+
+    `draft.tools` is a promise, not a wish list. It is written into
+    `agents.tools_json` at commit (`routes/agents.py` builder_commit), read
+    back by `agent_store.simulate_run_from_workflow` to tell the user
+    "this step would call X", shown in the app as what the agent will need
+    permission for, and — since C6-2 — used to decide which MCP servers a
+    Claude run is actually given. An entry naming a server that is not
+    configured anywhere makes all four of those lie in the same direction:
+    the agent looks more capable than it is, and the user only finds out at
+    run time, when the step does nothing.
+
+    Two options were on the table: drop the entry, or keep it flagged
+    ``verified: false``. Dropping is what happens here, because
+
+    1. `AgentToolDraft` (`agent/agent_models.py`) has no such field and
+       pydantic ignores unknown keys, so a flag would need a schema change
+       plus matching work in every consumer above. Until each one rendered
+       the flag, an unverified tool would be displayed exactly like a real
+       one — the fabricated promise, with extra steps.
+    2. The flag would still have to be enforced at run time to be worth
+       anything, and the run-time answer is already "there is no such server";
+       carrying the declaration forward only postpones the same sentence.
+
+    Dropping is not the same as hiding: every removal is named back to the
+    user in the same turn by `_unverified_tool_disclosure`, while they are
+    still in the conversation that can fix it — install the server, or plan
+    without it.
+
+    Returns the draft (unchanged object when nothing was dropped) and the
+    verdicts for what was removed.
+    """
+    if not draft.tools:
+        return draft, []
+
+    verdicts = {
+        verdict.mcp_id: verdict
+        for verdict in verify_declared_mcp_ids(tool.mcp_id for tool in draft.tools)
+    }
+    kept: list[AgentToolDraft] = []
+    dropped: list[ToolVerification] = []
+    dropped_ids: set[str] = set()
+    for tool in draft.tools:
+        verdict = verdicts.get(tool.mcp_id.strip())
+        if verdict is not None and not verdict.verified:
+            if verdict.mcp_id not in dropped_ids:
+                dropped_ids.add(verdict.mcp_id)
+                dropped.append(verdict)
+            continue
+        kept.append(tool)
+
+    if not dropped:
+        return draft, []
+    logger.warning(
+        "builder_dropped_unverified_tools mcp_ids=%s",
+        ",".join(verdict.mcp_id for verdict in dropped),
+    )
+    return draft.model_copy(update={"tools": kept}), dropped
+
+
+def _unverified_tool_disclosure(dropped: list[ToolVerification]) -> str:
+    """Name every tool that was removed from the draft, and why."""
+    names = ", ".join(f"'{verdict.mcp_id}'" for verdict in dropped)
+    return (
+        f"참고: {names} 도구는 이 초안에서 제외했습니다. 이 서버(그리고 이 Mac의 CLI 설정)에 "
+        "해당 이름의 MCP 서버가 등록되어 있지 않아서, 선언만으로는 실행되지 않기 때문입니다. "
+        "초안에 남겨 두면 저장 후 앱에는 '이 에이전트가 쓸 수 있는 도구'로 보이지만 실행 시에는 "
+        "아무 일도 일어나지 않습니다. 이 도구가 꼭 필요하면 먼저 CLI에 MCP 서버를 설치·등록한 뒤 "
+        "다시 말씀해 주시고, 아니면 이 도구 없이 가능한 방법으로 워크플로를 다시 잡겠습니다."
+    )
+
+
 def _with_disclosure(message: str, disclosure: str) -> str:
     message = (message or "").strip()
     if not message:
@@ -751,14 +930,21 @@ def enrich_draft_from_user_intent(
     plausible-looking agent with empty ``tools``/``flow``/``task_draft``.
     This deterministic pass keeps the builder useful for obvious intents while
     preserving the user's responsibility to install MCPs in their CLI.
+
+    What it does **not** do any more is write the workflow. An empty ``flow``
+    used to be answered with a keyword-selected six-step template
+    (`_naver_cafe_flow` / `_naver_note_flow` / `_generic_web_automation_flow`,
+    all deleted): the user was handed a detailed workflow they never asked for
+    and could not distinguish from the model's own output. An empty flow now
+    stays empty and `_empty_flow_disclosure` tells the user so in the same
+    turn. `_add_playwright_hints` remains because it only tags steps the model
+    actually wrote -- that is normalisation, not authorship.
     """
 
     raw_text = _raw_intent_text(user_message, draft)
     text = raw_text.casefold()
-    is_naver_note = _looks_like_naver_note(text)
     prefers_app_automation = _prefers_app_automation(text)
     is_web = _looks_like_web_automation(text) and not prefers_app_automation
-    is_naver_cafe = _looks_like_naver_cafe(text)
     schedule = _extract_schedule(text)
     next_draft = draft
     next_task_draft = task_draft
@@ -771,30 +957,9 @@ def enrich_draft_from_user_intent(
 
     if is_web:
         next_draft = _ensure_playwright_tool(next_draft)
-        plan_kind = (
-            "naver_note"
-            if is_naver_note
-            else "naver_cafe"
-            if is_naver_cafe
-            else "generic_web"
+        next_draft = next_draft.model_copy(
+            update={"flow": _add_playwright_hints(next_draft.flow)}
         )
-        if _flow_needs_operational_plan(next_draft.flow, plan_kind=plan_kind):
-            next_draft = next_draft.model_copy(
-                update={
-                    "flow": _naver_note_flow(text)
-                    if is_naver_note
-                    else _naver_cafe_flow()
-                    if is_naver_cafe
-                    else _generic_web_automation_flow(
-                        target_url=_extract_url(raw_text),
-                        required_text=_extract_required_visible_text(raw_text),
-                    )
-                }
-            )
-        else:
-            next_draft = next_draft.model_copy(
-                update={"flow": _add_playwright_hints(next_draft.flow)}
-            )
 
     if not is_web:
         next_draft = _ensure_requested_generic_capabilities(next_draft, user_message)
@@ -835,15 +1000,47 @@ def _ensure_basic_save_fields(
     previous_draft: AgentDraft | None,
     user_message: str,
 ) -> AgentDraft:
-    updates: dict[str, Any] = {}
-    text = _intent_text(user_message, draft)
+    """Give back a field the model dropped. Do not invent one it never wrote.
 
-    if not (draft.name or "").strip():
-        updates["name"] = _fallback_agent_name(text)
-    if not (draft.description or "").strip():
-        updates["description"] = _fallback_agent_description(text)
-    if not draft.system_prompt.strip():
-        updates["system_prompt"] = _fallback_system_prompt(text)
+    Three keyword-driven writers used to live here -- `_fallback_agent_name`,
+    `_fallback_agent_description` and `_fallback_system_prompt` -- and they
+    were the flow-template defect one field further down. A draft with no
+    name became "Naver Cafe Agent"; a draft with no description got a
+    paragraph promising "duplicate checks and user handoff for login or
+    captcha"; a draft with no `system_prompt` was given a whole set of
+    operating instructions, written by a keyword match, that then governed the
+    agent at runtime. All three are text the user reads as the model's work,
+    and none of them were.
+
+    What is left is preservation, not authorship: if the model returned a
+    draft with a field blank and the *previous* draft -- the one the user has
+    already read on screen -- had a value, that value is carried forward. The
+    model dropping a field mid-conversation must not silently erase what the
+    user already approved (that is what `_preserve_flow_for_additive_request`
+    does for the flow). When there is nothing to carry forward the field stays
+    empty and `_validate_commit_draft` (`routes/agents.py`) refuses the commit
+    with 422 naming the missing field, which is the honest outcome.
+
+    `provider_id` is deliberately still defaulted. It selects which configured
+    backend runs the agent -- a setting, not content the user reads as having
+    been written for them -- and the chain here is the user's own words
+    (`_infer_provider_id`), then the previous draft, then the app-wide
+    default. Changing that default to "refuse the commit" is a product
+    decision about the builder's entry experience, not a fabrication fix.
+    """
+
+    updates: dict[str, Any] = {}
+
+    if previous_draft is not None:
+        if not (draft.name or "").strip() and (previous_draft.name or "").strip():
+            updates["name"] = previous_draft.name
+        if (
+            not (draft.description or "").strip()
+            and (previous_draft.description or "").strip()
+        ):
+            updates["description"] = previous_draft.description
+        if not draft.system_prompt.strip() and previous_draft.system_prompt.strip():
+            updates["system_prompt"] = previous_draft.system_prompt
     if draft.provider_id is None:
         provider_id = _infer_provider_id(user_message)
         if provider_id is None and previous_draft is not None:
@@ -853,73 +1050,6 @@ def _ensure_basic_save_fields(
     if not updates:
         return draft
     return draft.model_copy(update=updates)
-
-
-def _fallback_agent_name(text: str) -> str:
-    if _looks_like_android_review_exchange(text):
-        return "Android Review Exchange Agent"
-    if _looks_like_naver_note(text):
-        return "Naver Note Agent"
-    if _looks_like_naver_cafe(text):
-        return "Naver Cafe Agent"
-    if _prefers_app_automation(text):
-        return "Android App Agent"
-    if _looks_like_web_automation(text):
-        return "Web Automation Agent"
-    return "Custom Agent"
-
-
-def _fallback_agent_description(text: str) -> str:
-    if _looks_like_android_review_exchange(text):
-        return "Handles Android review exchange requests with duplicate checks, approval gates, app install, launch verification, and result recording."
-    if _looks_like_naver_note(text):
-        return "Prepares and sends Naver Note messages with login handoff, send approval, and result recording."
-    if _looks_like_naver_cafe(text):
-        return "Automates safe Naver Cafe participation workflows with duplicate checks and user handoff for login or captcha."
-    if _prefers_app_automation(text):
-        return "Runs Android app automation with user approval for sensitive actions and result reporting."
-    if _looks_like_web_automation(text):
-        return "Runs a browser workflow with target confirmation, safe interaction, and result reporting."
-    return "Runs the requested workflow, asks for missing details, and reports the result."
-
-
-def _fallback_system_prompt(text: str) -> str:
-    if _looks_like_android_review_exchange(text):
-        return (
-            "Run Android review exchange requests using app/device automation only. "
-            "Confirm the target request, avoid duplicate submissions using memory, "
-            "require approval before joining requests or installing apps, stop for "
-            "login/captcha/account challenges, verify app launch, and record results."
-        )
-    if _looks_like_naver_note(text):
-        return (
-            "Prepare Naver Note sends safely. Confirm recipient and body, do not bypass "
-            "login/captcha/account challenges, require explicit approval before sending, "
-            "and record send results and duplicate-prevention memory."
-        )
-    if _looks_like_naver_cafe(text):
-        return (
-            "Run Naver Cafe participation safely. Check login and access state, avoid "
-            "captcha or policy bypass, prevent duplicate applications using memory, "
-            "ask before uncertain external actions, and report each result."
-        )
-    if _prefers_app_automation(text):
-        return (
-            "Run the requested Android app workflow safely. Confirm targets, require "
-            "approval before installs or submissions, stop for account/device prompts, "
-            "verify visible results, and record outcomes."
-        )
-    if _looks_like_web_automation(text):
-        return (
-            "Run the requested browser workflow safely. Confirm target URL and inputs, "
-            "stop for login/captcha/account challenges, ask before sensitive submissions, "
-            "verify visible results, and summarize outcomes."
-        )
-    return (
-        "Run the requested workflow safely. Ask for missing required details, require "
-        "approval before sensitive external actions, stop for manual handoff when needed, "
-        "and report concise results."
-    )
 
 
 def _infer_provider_id(user_message: str) -> str | None:
@@ -1017,6 +1147,14 @@ def _intent_text(user_message: str, draft: AgentDraft) -> str:
 
 
 def _raw_intent_text(user_message: str, draft: AgentDraft) -> str:
+    """What the user asked for — never what we already concluded from it.
+
+    `draft.tools` is deliberately absent. Tools are an *output* of this
+    classification, so feeding their text back in makes the pass self-
+    confirming: one injected Playwright tool whose examples said "네이버 카페
+    게시판 열기" was enough to make the next call classify a completely
+    unrelated agent as Naver-cafe automation and overwrite its workflow.
+    """
     parts = [
         user_message,
         draft.name or "",
@@ -1025,8 +1163,6 @@ def _raw_intent_text(user_message: str, draft: AgentDraft) -> str:
     ]
     for step in draft.flow:
         parts.extend([step.name, step.description, step.tool_hint or ""])
-    for tool in draft.tools:
-        parts.extend([tool.mcp_id, tool.user_capability, " ".join(tool.user_examples)])
     return "\n".join(part for part in parts if part)
 
 
@@ -1068,8 +1204,9 @@ def _looks_like_web_automation(text: str) -> bool:
             "게시판",
             "댓글",
             "쪽지",
-            "메시지",
-            "message",
+            # "메시지"/"message" are deliberately NOT markers. They appear in
+            # ordinary system-prompt prose ("에러 메시지를 요약해줘") and were
+            # measured misclassifying non-web agents as browser automation.
         )
     ) or _looks_like_naver_cafe(text) or _looks_like_naver_note(text)
 
@@ -1185,34 +1322,6 @@ def _extract_android_package_name(text: str) -> str | None:
             continue
         return package_name
     return None
-
-
-def _extract_required_visible_text(text: str) -> str | None:
-    patterns = (
-        r"본문에\s+(.{2,120}?)\s*(?:문구|텍스트|글자)",
-        r"(.{2,120}?)\s*(?:문구|텍스트|글자)(?:가|이)?\s*(?:보이는지|있는지|포함되는지|포함되어)",
-        r"(?:contains|include|includes|including)\s+['\"]?(.{2,120}?)['\"]?(?:\s|$)",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if not match:
-            continue
-        value = _clean_visible_text_candidate(match.group(1))
-        if value:
-            return value
-    quoted = re.search(r"['\"]([^'\"]{2,120})['\"]", text)
-    if quoted:
-        return _clean_visible_text_candidate(quoted.group(1))
-    return None
-
-
-def _clean_visible_text_candidate(value: str) -> str | None:
-    text = value.strip()
-    text = re.sub(r"^(?:에|에서|the)\s+", "", text, flags=re.IGNORECASE)
-    text = text.strip(" \t\r\n'\"`.,;:!?()[]{}")
-    if not text or text.startswith("http://") or text.startswith("https://"):
-        return None
-    return text[:120]
 
 
 def _ensure_requested_generic_capabilities(
@@ -2266,10 +2375,23 @@ def _extract_schedule(text: str) -> str | None:
     match = re.search(r"daily\s+([0-2]?\d:[0-5]\d)", text)
     if match:
         return f"daily {match.group(1)}"
-    match = re.search(r"매일\s*([0-2]?\d)[:시]\s*([0-5]\d)?", text)
+    # "매일 오전 9시" is how people actually write it, and the period word sat
+    # between "매일" and the hour, so the digit was never reached and the turn
+    # came back with no schedule at all. `routes/agents.py` already reads the
+    # same phrasing; the two disagreeing is what left `session.task_draft`
+    # empty during a turn whose commit went on to create the schedule anyway.
+    match = re.search(r"매일\s*(오전|오후|아침|저녁|밤|새벽)?\s*([0-2]?\d)[:시]\s*([0-5]\d)?", text)
     if match:
-        minute = match.group(2) or "00"
-        return f"daily {int(match.group(1)):02d}:{minute}"
+        period = match.group(1)
+        hour = int(match.group(2))
+        minute = match.group(3) or "00"
+        # 오후 12시 is midday and 오전 12시 is midnight: shifting both by 12
+        # would put one of them half a day out.
+        if period in {"오후", "저녁", "밤"} and hour < 12:
+            hour += 12
+        elif period in {"오전", "아침", "새벽"} and hour == 12:
+            hour = 0
+        return f"daily {hour:02d}:{minute}"
     return None
 
 
@@ -2289,7 +2411,9 @@ def _ensure_playwright_tool(draft: AgentDraft) -> AgentDraft:
                         "browser_type",
                     ],
                     user_capability="웹사이트를 열고 상태를 읽고 필요한 버튼/입력 필드를 조작한다.",
-                    user_examples=["네이버 카페 게시판 열기", "신청 버튼 클릭", "댓글/폼 입력"],
+                    # Neutral by design: these examples are shown to the user and
+                    # must not name a site the agent has nothing to do with.
+                    user_examples=["웹페이지 열기", "버튼 클릭", "입력 필드 채우기"],
                     category=MCPCategory.BROWSER,
                     risk_tier=MCPRiskTier.MEDIUM,
                 ),
@@ -2328,327 +2452,20 @@ def _ensure_app_action_tool(draft: AgentDraft) -> AgentDraft:
     )
 
 
-def _flow_needs_operational_plan(
-    flow: list[WorkflowStep],
-    *,
-    plan_kind: str,
-) -> bool:
-    if not flow:
-        return True
-    if plan_kind in {"naver_cafe", "naver_note"} and len(flow) < 3:
-        return True
-    return all(_is_placeholder_step(step) for step in flow)
-
-
 def _is_placeholder_step(step: WorkflowStep) -> bool:
+    """A step with a bare "Step 1" name and nothing else in it.
+
+    This used to decide which flows were eligible to be overwritten by a
+    template. Nothing is overwritten any more; the only caller left is
+    `_empty_flow_disclosure`, which uses it to tell the user their workflow
+    has names but no content.
+    """
     return (
         bool(re.fullmatch(r"step\s*\d+", step.name.strip(), flags=re.IGNORECASE))
         and not step.description.strip()
         and not (step.tool_hint or "").strip()
         and not step.success_criteria.strip()
     )
-
-
-def _naver_cafe_flow() -> list[WorkflowStep]:
-    return [
-        WorkflowStep(
-            id="check_run_context",
-            type="llm",
-            name="실행 조건과 처리 이력 확인",
-            description="대상 카페 URL, 게시판, 검색어, 신청 문구 템플릿, 시간당 처리 한도, 최근 처리 이력을 확인한다.",
-            success_criteria="대상과 제한 조건이 확인되고 중복 방지 기준이 준비됨",
-            on_failure={"type": "ask_user", "resume": "same_step"},
-        ),
-        WorkflowStep(
-            id="open_cafe_and_check_login",
-            type="browser_action",
-            name="네이버 카페 열기와 로그인 상태 확인",
-            description="Playwright로 대상 네이버 카페/게시판을 열고 로그인 세션, 접근 권한, 캡차/봇 차단 여부를 확인한다.",
-            tool_hint="playwright",
-            actions=[
-                {"type": "navigate", "target": "configured_cafe_url"},
-                {"type": "assert", "kind": "login_or_access_state_visible"},
-                {"type": "screenshot", "label": "login_state"},
-            ],
-            success_criteria="게시판이 열리고 캡차 없이 자동화 가능한 상태임",
-            on_failure={
-                "type": "manual_handoff",
-                "resume": "same_step",
-                "prompt": "네이버 로그인, 접근 권한 확인, 캡차 같은 수동 처리를 완료한 뒤 재개하세요.",
-            },
-        ),
-        WorkflowStep(
-            id="discover_pumasi_posts",
-            type="browser_action",
-            name="품앗이 후보 글 탐색",
-            description="게시판의 최신 글을 읽고 사용자가 지정한 조건에 맞는 품앗이/출석/답방 후보를 선별한다.",
-            tool_hint="playwright",
-            actions=[
-                {"type": "extract", "target": "post_list"},
-                {"type": "assert", "kind": "candidate_posts_evaluated"},
-            ],
-            success_criteria="후보 글 URL, 제목, 작성자, 조건 목록이 추려짐",
-            on_failure={
-                "type": "retry",
-                "max_attempts": 1,
-                "then": {"type": "ask_user", "resume": "same_step"},
-            },
-        ),
-        WorkflowStep(
-            id="dedupe_and_safety_check",
-            type="llm",
-            name="중복과 안전 조건 검사",
-            description="이미 신청한 글, 24시간 내 중복 대상, 캡차/개인정보/금전 요구, 카페 규정 위반 가능성을 걸러낸다.",
-            tool_hint="playwright",
-            success_criteria="신청 가능한 대상만 남고 위험/중복 대상은 스킵 사유와 함께 제외됨",
-            on_failure={"type": "abort", "reason": "safety_check_failed"},
-        ),
-        WorkflowStep(
-            id="submit_participation_requests",
-            type="browser_action",
-            name="참여신청 수행",
-            description="허용된 대상에 한해 사용자의 문구 템플릿 또는 짧고 정중한 기본 문구로 참여신청을 입력/제출한다.",
-            tool_hint="playwright",
-            actions=[
-                {"type": "click", "target": "eligible_post_or_reply_control"},
-                {"type": "type", "target": "reply_or_application_field", "source": "configured_message_template"},
-                {"type": "click", "target": "submit_button"},
-                {"type": "assert", "kind": "submission_recorded_or_failure_reason_visible"},
-            ],
-            success_criteria="각 신청 대상에 대해 제출 성공 또는 명확한 실패 사유가 기록됨",
-            on_failure={
-                "type": "ask_user",
-                "resume": "same_step",
-                "prompt": "신청 제출 중 자동으로 판단하기 어려운 화면이 나오면 처리 방법을 알려주세요.",
-            },
-        ),
-        WorkflowStep(
-            id="record_results_and_report",
-            type="llm",
-            name="결과 기록과 요약 보고",
-            description="확인한 글 수, 신청한 URL, 스킵 사유, 오류, 다음 실행에서 참고할 중복 방지 이력을 요약한다.",
-            success_criteria="사용자에게 실행 요약이 전달되고 처리 이력이 메모리에 남을 준비가 됨",
-            on_failure={"type": "ask_user", "resume": "same_step"},
-        ),
-    ]
-
-
-def _naver_note_flow(text: str) -> list[WorkflowStep]:
-    recipient = _extract_naver_note_recipient(text) or "{{recipient}}"
-    return [
-        WorkflowStep(
-            id="prepare_note_context",
-            type="llm",
-            name="쪽지 대상과 본문 확인",
-            description="받는 사람, 쪽지 본문, 발송 목적, 중복 발송 여부를 확인한다. 본문이 없으면 발송 단계로 진행하지 않고 사용자에게 요청한다.",
-            instruction=(
-                "Confirm the Naver Note recipient, message body, and safety constraints. "
-                "Do not proceed to sending if the message body is missing."
-            ),
-            observation="Recipient and body must be explicit. Duplicate sends must be avoided.",
-            memory_read="최근 네이버 쪽지 발송 이력과 동일 수신자/동일 본문 여부를 확인한다.",
-            memory_write="발송 성공/실패, 수신자, 본문 요약, 발송 시각을 다음 실행의 중복 방지 이력으로 저장한다.",
-            success_criteria="수신자와 본문이 확인되고 중복/위험 조건이 없음",
-            on_failure={
-                "type": "ask_user",
-                "resume": "same_step",
-                "prompt": "받는 사람과 보낼 쪽지 본문을 알려주세요.",
-            },
-        ),
-        WorkflowStep(
-            id="open_naver_note_and_login",
-            type="browser_action",
-            name="네이버 쪽지 열기와 로그인 확인",
-            description="서버 브라우저에서 네이버 쪽지를 열고 로그인/캡차/추가 인증 상태를 확인한다.",
-            instruction="Open Naver Note and stop for user handoff if login, captcha, or account challenge appears.",
-            tool_hint="playwright",
-            actions=[
-                {"type": "navigate", "url": "https://note.naver.com/"},
-                {"type": "assert", "kind": "page_state_readable"},
-                {"type": "screenshot", "label": "naver_note_login_state"},
-            ],
-            success_criteria="네이버 쪽지 화면이 열리고 로그인 세션 또는 수동 개입 필요 상태가 확인됨",
-            on_failure={
-                "type": "manual_handoff",
-                "resume": "same_step",
-                "prompt": "네이버 로그인, 2FA, 캡차 또는 접근 권한 확인을 직접 완료한 뒤 재개하세요.",
-            },
-        ),
-        WorkflowStep(
-            id="compose_note_draft",
-            type="browser_action",
-            name="쪽지 초안 작성",
-            description="쪽지쓰기 화면을 열고 수신자와 본문을 입력하되 아직 발송하지 않는다.",
-            instruction="Fill the recipient and approved message body. Do not click the final send button in this step.",
-            tool_hint="playwright",
-            actions=[
-                {"type": "click", "selector": "text=쪽지쓰기"},
-                {"type": "fill", "selector": "input[name='to'], input[title*='받는'], textarea[name='to']", "value": recipient},
-                {"type": "fill", "selector": "textarea[name='content'], textarea[title*='내용'], div[contenteditable='true']", "value": "{{approved_note_body}}"},
-                {"type": "screenshot", "label": "naver_note_draft_before_send"},
-            ],
-            success_criteria="수신자와 본문이 입력된 발송 직전 초안 화면이 캡처됨",
-            on_failure={
-                "type": "manual_handoff",
-                "resume": "same_step",
-                "prompt": "쪽지쓰기 화면 구조가 자동화와 다릅니다. 수신자와 본문을 직접 입력한 뒤 발송하지 말고 재개하세요.",
-            },
-        ),
-        WorkflowStep(
-            id="approve_note_send",
-            type="approval_gate",
-            name="발송 전 사용자 승인",
-            description="수신자와 본문을 사용자에게 확인받고 발송을 승인받는다.",
-            instruction="Ask for explicit approval before clicking the final send button.",
-            success_criteria="사용자가 수신자/본문을 확인하고 발송을 승인함",
-            on_failure={"type": "abort", "reason": "send_not_approved"},
-        ),
-        WorkflowStep(
-            id="submit_note_and_capture_result",
-            type="browser_action",
-            name="쪽지 발송과 결과 확인",
-            description="사용자 승인 후 발송 버튼을 클릭하고 성공/실패 상태를 캡처한다.",
-            instruction="Only run after the approval gate has completed. Click send and capture the result state.",
-            tool_hint="playwright",
-            actions=[
-                {"type": "click", "selector": "text=보내기"},
-                {"type": "wait", "timeout_ms": 1200},
-                {"type": "screenshot", "label": "naver_note_send_result"},
-                {"type": "extract", "selector": "body"},
-            ],
-            success_criteria="쪽지 발송 성공 메시지 또는 명확한 실패 사유가 기록됨",
-            on_failure={
-                "type": "ask_user",
-                "resume": "same_step",
-                "prompt": "발송 결과를 자동으로 판단하지 못했습니다. 화면 상태를 확인하고 계속할지 알려주세요.",
-            },
-        ),
-        WorkflowStep(
-            id="record_note_result",
-            type="llm",
-            name="결과 기록과 보고",
-            description="발송 여부, 수신자, 본문 요약, 실패 사유, 다음 실행에서 피해야 할 중복 조건을 정리한다.",
-            instruction="Summarize the Naver Note send result and record duplicate-prevention memory.",
-            memory_write="수신자, 본문 요약, 발송 결과, 오류 사유를 저장한다.",
-            success_criteria="사용자가 결과와 남은 조치를 이해할 수 있음",
-            on_failure={"type": "ask_user", "resume": "same_step"},
-        ),
-    ]
-
-
-def _generic_web_automation_flow(
-    *,
-    target_url: str | None = None,
-    required_text: str | None = None,
-) -> list[WorkflowStep]:
-    if target_url:
-        check_actions: list[dict[str, Any]] = [
-            {"type": "navigate", "url": target_url},
-        ]
-        if required_text:
-            check_actions.append(
-                {
-                    "type": "assert",
-                    "kind": "text_visible",
-                    "value": required_text,
-                    "timeout_ms": 5000,
-                }
-            )
-        else:
-            check_actions.append({"type": "assert", "kind": "page_state_readable"})
-        check_actions.append({"type": "screenshot", "label": "web_check_result"})
-        return [
-            WorkflowStep(
-                id="prepare_web_check",
-                type="llm",
-                name="점검 조건 확인",
-                description="대상 URL과 성공 조건을 확인하고 로그인이나 민감한 제출이 필요 없는 점검인지 판단한다.",
-                success_criteria="대상 URL과 성공 조건이 명확함",
-                on_failure={"type": "ask_user", "resume": "same_step"},
-            ),
-            WorkflowStep(
-                id="open_page_and_verify_content",
-                type="browser_action",
-                name="웹페이지 열기와 문구 확인",
-                description="Playwright로 대상 페이지를 열고 요청된 문구 또는 읽기 가능한 페이지 상태를 확인한다.",
-                tool_hint="playwright",
-                actions=check_actions,
-                success_criteria=(
-                    f"'{required_text}' 문구가 확인됨"
-                    if required_text
-                    else "페이지가 열리고 읽기 가능한 상태임"
-                ),
-                on_failure={
-                    "type": "retry",
-                    "max_attempts": 1,
-                    "then": {"type": "ask_user", "resume": "same_step"},
-                },
-            ),
-            WorkflowStep(
-                id="report_web_check_result",
-                type="llm",
-                name="점검 결과 보고",
-                description="페이지 열기, 문구 확인, 스크린샷 위치, 실패 사유를 요약한다.",
-                tool_hint="playwright",
-                success_criteria="사용자가 점검 결과와 증거를 이해할 수 있음",
-                on_failure={"type": "ask_user", "resume": "same_step"},
-            ),
-        ]
-    return [
-        WorkflowStep(
-            id="confirm_target_and_constraints",
-            type="llm",
-            name="대상과 조건 확인",
-            description="자동화할 URL, 입력값, 제한 조건, 사용자 승인 필요 여부를 확인한다.",
-            success_criteria="실행 대상과 제한 조건이 명확함",
-            on_failure={"type": "ask_user", "resume": "same_step"},
-        ),
-        WorkflowStep(
-            id="open_page_and_check_state",
-            type="browser_action",
-            name="웹페이지 열기와 상태 확인",
-            description="Playwright로 대상 웹페이지를 열고 로그인/권한/차단 상태를 확인한다.",
-            tool_hint="playwright",
-            actions=[
-                {"type": "navigate", "target": "configured_url"},
-                {"type": "assert", "kind": "page_state_readable"},
-                {"type": "screenshot", "label": "initial_state"},
-            ],
-            success_criteria="페이지 상태를 읽고 다음 동작 가능 여부를 판단함",
-            on_failure={
-                "type": "manual_handoff",
-                "resume": "same_step",
-                "prompt": "로그인, 캡차, 권한 확인 등 수동 처리를 완료한 뒤 재개하세요.",
-            },
-        ),
-        WorkflowStep(
-            id="perform_allowed_browser_actions",
-            type="browser_action",
-            name="조건에 맞는 작업 수행",
-            description="허용된 범위 안에서 클릭, 입력, 제출 등 필요한 웹 조작을 수행한다.",
-            tool_hint="playwright",
-            actions=[
-                {"type": "click", "target": "configured_control"},
-                {"type": "type", "target": "configured_input", "source": "configured_value"},
-                {"type": "assert", "kind": "requested_action_completed"},
-            ],
-            success_criteria="요청된 웹 작업이 완료되거나 실패 사유가 확인됨",
-            on_failure={
-                "type": "retry",
-                "max_attempts": 1,
-                "then": {"type": "ask_user", "resume": "same_step"},
-            },
-        ),
-        WorkflowStep(
-            id="verify_and_report_result",
-            type="llm",
-            name="결과 검증과 보고",
-            description="화면 상태를 다시 확인하고 완료/스킵/오류를 사용자에게 요약한다.",
-            tool_hint="playwright",
-            success_criteria="사용자가 결과와 남은 조치를 이해할 수 있음",
-            on_failure={"type": "ask_user", "resume": "same_step"},
-        ),
-    ]
 
 
 def _add_playwright_hints(flow: list[WorkflowStep]) -> list[WorkflowStep]:

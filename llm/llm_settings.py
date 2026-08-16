@@ -485,6 +485,20 @@ def warmup_cli_cache() -> None:
     _cli_warmup_done = True
 
 
+def reset_cli_cache() -> None:
+    """Clear cached CLI availability results and warmup state.
+
+    Startup doesn't need this: ``core.env_bootstrap.bootstrap_path()`` runs
+    before ``warmup_cli_cache()``, so the cache fills correctly from a
+    healthy PATH the first time. This exists for callers that want to force
+    re-detection later in the process lifetime (e.g. PATH changed at
+    runtime) without waiting out the 60s TTL.
+    """
+    global _cli_warmup_done
+    _cli_cache.clear()
+    _cli_warmup_done = False
+
+
 # --- Snapshot Building ---
 
 

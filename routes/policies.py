@@ -19,12 +19,14 @@ router = APIRouter(prefix="/api/policies", tags=["policies"])
 # covers every operation an LLM tool-permission prompt can carry; `device.control`
 # is a separate, real surface — direct device-action API routes (see
 # routes/projects.py) call `evaluate_direct_action_gate(operation="device.control", ...)`
-# directly, never through a chat/LLM tool call. Two operations the dashboard
-# used to also offer, `file.read` and `browser.control`, are deliberately not
-# here: no call site anywhere (LLM tool path or direct-action gate) ever asks
-# for approval under either name, so a rule for them can never be consulted —
-# offering them told the user they had authorized something that does not
-# exist.
+# directly, never through a chat/LLM tool call. `browser.control`, which the
+# dashboard used to also offer, is deliberately not here: no call site
+# anywhere (LLM tool path or direct-action gate) ever asks for approval under
+# that name, so a rule for it can never be consulted — offering it told the
+# user they had authorized something that does not exist. `file.read` was in
+# that same category and is no longer: the read-only tools now request
+# approval under it (see `_approval_operation_for_tool`), so it arrives here
+# through `LLM_TOOL_APPROVAL_OPERATIONS` like any other real operation.
 _DIRECT_ACTION_OPERATIONS: tuple[dict[str, str], ...] = (
     {
         "value": "device.control",

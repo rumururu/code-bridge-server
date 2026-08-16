@@ -681,6 +681,33 @@ class AgentsCrudTest(unittest.TestCase):
         self.assertEqual(listed["activation"]["schedule_count"], 1)
         self.assertTrue(listed["activation"]["has_enabled_schedules"])
 
+    def test_list_agents_says_how_the_last_run_went_and_who_is_waiting(self):
+        """The list is where the user decides which agent to open.
+
+        Without these two fields it can only say "활성 N개", which reads the
+        same whether the agent is working fine, has been failing every morning,
+        or is parked waiting for an answer only the user can give.
+        """
+        agent = self._create_agent(name="listed run status")
+        store = agent_store.get_agent_store()
+        task = store.create_task(title="Run", assigned_agent_id=agent["id"])
+        for status in ("completed", "waiting_for_user"):
+            run = store.create_run(
+                task_id=task["id"], agent_id=agent["id"], title="Run task"
+            )
+            store.update_run_status(run["id"], status)
+
+        response = self.client.get("/api/agent/agents")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        listed = next(
+            item for item in response.json()["agents"] if item["id"] == agent["id"]
+        )
+        self.assertEqual(listed["last_run_status"], "waiting_for_user")
+        self.assertEqual(listed["waiting_run_count"], 1)
+        self.assertEqual(listed["active_run_count"], 0)
+        self.assertIsNotNone(listed["last_fire_at"])
+
 
 if __name__ == "__main__":
     unittest.main()

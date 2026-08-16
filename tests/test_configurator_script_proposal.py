@@ -269,6 +269,123 @@ class ScriptProposalTest(unittest.TestCase):
         self.assertEqual(filled["script_id"], script_id)
         self.assertEqual(payload["updated_draft"]["script_requests"], [])
 
+    def test_approving_attaches_the_step_the_flow_never_had(self):
+        """Approval must build the step, because the prompt forbids drafting it.
+
+        Rule 2d tells the Configurator to keep the shell step out of ``flow``
+        until the script exists ("never invent a script_id"), so the ordinary
+        state at approval time is a flow with no matching step at all. Filling
+        in only pre-existing steps therefore did nothing in the common case:
+        the reply promised "승인하시면 이 단계에 연결됩니다", the flow came back
+        unchanged, and the later steps went on summarising output from a step
+        that was in no draft and no database.
+        """
+        turn = self._converse("디스크 확인 에이전트 만들어줘.")
+        proposal_id = turn["script_proposals"][0]["proposal_id"]
+
+        session = configurator.get_builder_session(turn["session_id"])
+        assert session is not None
+        # The state rule 2d asks for: the judging step is drafted, the shell
+        # step that feeds it is not.
+        session.current_draft = session.current_draft.model_copy(
+            update={
+                "flow": [
+                    step for step in session.current_draft.flow if step.id != "check_disk"
+                ]
+            }
+        )
+        self.assertEqual([step.id for step in session.current_draft.flow], ["judge"])
+
+        approved = self._approve(proposal_id)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        payload = approved.json()
+
+        flow = payload["updated_draft"]["flow"]
+        self.assertEqual(
+            [step["id"] for step in flow],
+            ["check_disk", "judge"],
+            "the approved script was not wired into the workflow",
+        )
+        head = flow[0]
+        self.assertEqual(head["type"], "shell")
+        self.assertEqual(head["script_id"], payload["script_id"])
+        self.assertEqual(head["name"], "Check disk usage")
+        # The purpose the user read on the proposal card, so the step in the
+        # editor says the same thing the approval dialog said.
+        self.assertEqual(head["description"], "Print how full the root filesystem is")
+        self.assertEqual(payload["updated_draft"]["script_requests"], [])
+
+    def test_approving_an_existing_step_updates_it_without_duplicating(self):
+        """The step the draft already has is filled in, not shadowed by a copy.
+
+        A head-insert that ignored the existing step would leave two shell
+        steps with the same id, and `normalize_workflow` would rename one of
+        them rather than reject it — a silently doubled run of the script.
+        """
+        turn = self._converse("디스크 확인 에이전트 만들어줘.")
+        proposal_id = turn["script_proposals"][0]["proposal_id"]
+
+        session = configurator.get_builder_session(turn["session_id"])
+        assert session is not None
+        self.assertEqual(
+            [step.id for step in session.current_draft.flow], ["check_disk", "judge"]
+        )
+
+        payload = self._approve(proposal_id).json()
+        flow = payload["updated_draft"]["flow"]
+
+        self.assertEqual([step["id"] for step in flow], ["check_disk", "judge"])
+        self.assertEqual(flow[0]["script_id"], payload["script_id"])
+        # Untouched in place: the name is the model's, not the script's.
+        self.assertEqual(flow[0]["name"], "Check disk usage")
+        self.assertEqual(flow[0]["description"], "Read how full the root filesystem is.")
+
+    def test_a_shell_step_with_no_script_is_refused_at_commit(self):
+        """Committing an unapproved shell step is the defect, not a warning.
+
+        A saved step with no ``script_id`` names no script. The run fails at
+        execution time, unattended, hours later — and the steps after it were
+        written to judge output it never produced.
+        """
+        turn = self._converse("디스크 확인 에이전트 만들어줘.")
+        draft = turn["updated_draft"]
+        self.assertEqual(draft["flow"][0]["type"], "shell")
+        self.assertIsNone(draft["flow"][0].get("script_id"))
+
+        response = self.client.post(
+            "/api/agent/builder/commit",
+            json={"session_id": turn["session_id"], "draft": draft},
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        detail = response.json()["detail"]
+        self.assertIn("check_disk", detail)
+        self.assertIn("Check disk usage", detail)
+        self.assertEqual(
+            agent_store.get_agent_store().list_agents(limit=10),
+            [],
+            "an agent was created around a step that runs nothing",
+        )
+
+    def test_the_same_draft_commits_once_the_script_is_approved(self):
+        """The refusal is a gate, not a dead end: approving opens it."""
+        turn = self._converse("디스크 확인 에이전트 만들어줘.")
+        proposal_id = turn["script_proposals"][0]["proposal_id"]
+        approved = self._approve(proposal_id).json()
+
+        response = self.client.post(
+            "/api/agent/builder/commit",
+            json={
+                "session_id": turn["session_id"],
+                "draft": approved["updated_draft"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        saved = response.json()["agent"]["flow_json"]
+        self.assertEqual(saved[0]["type"], "shell")
+        self.assertEqual(saved[0]["script_id"], approved["script_id"])
+
     def test_approving_twice_does_not_register_twice(self):
         turn = self._converse("디스크 확인 에이전트 만들어줘.")
         proposal_id = turn["script_proposals"][0]["proposal_id"]

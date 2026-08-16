@@ -1,6 +1,7 @@
 """Streaming service for websocket chat turns."""
 
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -9,7 +10,10 @@ from typing import Any
 from fastapi import WebSocket
 
 from .chat_event_utils import extract_assistant_text, format_tool_result_content
-from approvals.approval_service import request_approval_for_operation
+from approvals.approval_service import (
+    default_approval_expires_at,
+    request_approval_for_operation,
+)
 from agent.agent_store import get_agent_store
 from llm.llm_session import LlmSession
 from llm.claude_usage import fetch_claude_usage_snapshot, merge_usage_for_display
@@ -158,16 +162,61 @@ def _normalized_event_from(event: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+# Tools that only observe the *local* workspace. Nothing here mutates the
+# workspace, the host, or the repository; the worst any of them can do is
+# *look at* something it should not, and that is exactly what the path guard
+# and the secret classifier exist to catch (see `_approval_target_details`
+# below, which promotes the tool's own target into the policy details so
+# those classifiers have something to inspect).
+READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "read",
+        "glob",
+        "grep",
+        "ls",
+        "notebookread",
+        "todoread",
+        "todowrite",
+    }
+)
+
+# WebFetch/WebSearch read too, but what they read is a URL, and that changes
+# who can choose it. The safety valve under `file.read` is the path guard,
+# and a URL never reaches it: `decide_policy("file.read", details={})` has
+# nothing to inspect and returns `allow`. Filing these two as read-only would
+# therefore auto-approve every outbound request an unattended run makes,
+# including a URL the model was talked into by content it fetched earlier —
+# the target of a prompt injection is chosen by the attacker, not the user.
+# `network.external` is `CONFIRM_EACH`, which is the honest default for
+# "leaves this machine".
+NETWORK_TOOL_NAMES: frozenset[str] = frozenset({"webfetch", "websearch"})
+
+
 def _approval_operation_for_tool(tool_name: Any) -> str:
     """Map provider-native tool names to Code Bridge policy operations.
 
     The literal strings this returns are the entire set of operations a
     standing policy rule can ever match for an LLM tool-permission prompt —
     see ``LLM_TOOL_APPROVAL_OPERATIONS`` below, which must list exactly these
-    four values. A rule created for anything outside that set (the dashboard
-    used to also offer ``file.read`` and ``browser.control``) looks like a
-    working standing permission and is not: it can never be consulted,
-    because no call site ever asks for approval under that operation name.
+    values. A rule created for anything outside that set (the dashboard
+    used to also offer ``browser.control``) looks like a working standing
+    permission and is not: it can never be consulted, because no call site
+    ever asks for approval under that operation name.
+
+    The read-only branch exists because its absence inverted the whole
+    product. Read/Glob/Grep used to fall through to ``provider.tool``, which
+    is in no policy set at all, so it hit ``decide_policy``'s unknown branch
+    and came back ``confirm_each`` — "Unknown operations require explicit
+    confirmation". Meanwhile ``process.terminal`` *is* a named operation, so
+    a single standing allow rule (the natural thing to create the first time
+    a run stalls on a shell command) silently auto-approved every subsequent
+    ``Bash``. The result asked permission to read a file and did not ask to
+    run a shell command. Mapping the read-only tools to ``file.read`` — an
+    ``ALLOW_OPERATIONS`` member and already a ``_PATH_OPERATIONS`` member, so
+    the path guard still runs over the target — puts the low-risk half back
+    where it belongs without weakening anything. ``Bash`` deliberately stays
+    on ``process.terminal``: the inversion was the Read side, and a user's
+    existing standing rule stays theirs.
     """
     normalized = str(tool_name or "").strip().lower()
     if normalized in {"bash", "shell", "terminal", "run_command"}:
@@ -176,6 +225,10 @@ def _approval_operation_for_tool(tool_name: Any) -> str:
         return "file.write"
     if normalized in {"git", "git_commit", "git_push"}:
         return "git.commit"
+    if normalized in NETWORK_TOOL_NAMES:
+        return "network.external"
+    if normalized in READ_ONLY_TOOL_NAMES:
+        return "file.read"
     return "provider.tool"
 
 
@@ -183,21 +236,185 @@ def _approval_operation_for_tool(tool_name: Any) -> str:
 # The dashboard's "Unattended permissions" form used to hand-copy a second,
 # independent list of operations into an HTML <select> instead of reading
 # this one, and the two drifted: the form offered `file.read` and
-# `browser.control` (which this function never returns, so a rule for them
-# never matches anything) and omitted `git.commit` and `provider.tool`
-# (which it does return, so the common case of a scheduled run stalling on a
+# `browser.control` (which this function did not then return, so a rule for
+# them never matched anything) and omitted `git.commit` and `provider.tool`
+# (which it did return, so the common case of a scheduled run stalling on a
 # plain tool read had no way to be pre-authorized at all). Anything that
 # builds that option list must derive it from here rather than copying it
 # again, or the same drift happens the next time a branch is added or
 # renamed. `tests/test_llm_tool_approval_operations.py` enforces this by
 # reading `_approval_operation_for_tool`'s source and diffing its literal
 # return values against this tuple.
+#
+# `file.read` is on this list now because the read-only tools map to it. Note
+# what that does *not* retroactively make true of the old dashboard form: a
+# rule created back then still could not match anything, because at the time
+# nothing asked for approval under that name. The fix was to make the runtime
+# ask, not to re-offer the option.
 LLM_TOOL_APPROVAL_OPERATIONS: tuple[str, ...] = (
     "process.terminal",
     "file.write",
+    "file.read",
+    "network.external",
     "git.commit",
     "provider.tool",
 )
+
+
+# Which input key names the filesystem target of each tool, per tool. The
+# distinction that matters here is `pattern`: for `Glob` it is a path glob
+# (`src/**/*.ts`, and just as easily `~/.ssh/*`), so it must reach the path
+# guard; for `Grep` it is a *regular expression* over file contents, and
+# feeding a regex to the path guard would produce escalations that mean
+# nothing. Guessing one rule for both keys gets one of them wrong, so this
+# table is per-tool rather than a single key list.
+_TOOL_PATH_INPUT_KEYS: dict[str, tuple[str, ...]] = {
+    "read": ("file_path",),
+    "write": ("file_path",),
+    "edit": ("file_path",),
+    "multiedit": ("file_path",),
+    "notebookread": ("notebook_path",),
+    "notebookedit": ("notebook_path",),
+    "glob": ("path", "pattern"),
+    "grep": ("path",),
+    "ls": ("path",),
+}
+
+# For a tool this module has never heard of, only keys whose name states they
+# are a path are trusted. An unknown tool's `pattern`/`query`/`url` could be
+# anything.
+_GENERIC_PATH_INPUT_KEYS: tuple[str, ...] = ("file_path", "path", "notebook_path")
+
+
+def _approval_target_details(
+    tool_name: Any,
+    tool_input: Any,
+    *,
+    workspace_root: str | None,
+) -> dict[str, Any]:
+    """Lift a tool's own target into the keys the policy classifiers read.
+
+    This is the safety valve that makes mapping the read-only tools to
+    ``file.read`` (an ``ALLOW_OPERATIONS`` member) acceptable. ``decide_policy``
+    only runs :mod:`policy.path_guard` over ``details["path"]`` /
+    ``details["paths"]``; the tool's target used to live one level down under
+    ``details["input"]["file_path"]``, where no classifier looks. Without this
+    promotion the allow would be an unconditional allow, and reading
+    ``~/.ssh/id_rsa`` would be auto-approved. With it, ``_apply_classifiers``
+    escalates that same request to ``desktop_only`` — escalation applies to a
+    base effect of ``allow`` exactly as it does to any other.
+
+    Relative targets are resolved against ``workspace_root`` rather than the
+    server process's own CWD, which has nothing to do with the project the
+    model is working in.
+    """
+    if not isinstance(tool_input, dict):
+        return {}
+
+    normalized = str(tool_name or "").strip().lower()
+    keys = _TOOL_PATH_INPUT_KEYS.get(normalized, _GENERIC_PATH_INPUT_KEYS)
+
+    paths: list[str] = []
+    for key in keys:
+        value = tool_input.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        candidate = value.strip()
+        if (
+            workspace_root
+            and not candidate.startswith("~")
+            and not os.path.isabs(candidate)
+        ):
+            candidate = os.path.join(workspace_root, candidate)
+        if candidate not in paths:
+            paths.append(candidate)
+
+    if not paths:
+        return {}
+    return {"path": paths[0], "paths": paths}
+
+
+# Normalized approval-card vocabulary. The server knows every tool's input
+# schema; the app does not, and should not have to learn nine of them to say
+# "the agent wants to read a file". `action` is a stable key the app maps to
+# its own localized sentence — deliberately not a sentence itself, because the
+# app ships four locales (en/ko/ja/zh) and a server-side Korean string would
+# be wrong in three of them.
+_TOOL_DISPLAY_ACTIONS: dict[str, str] = {
+    "read": "read_file",
+    "notebookread": "read_file",
+    "bash": "run_command",
+    "shell": "run_command",
+    "terminal": "run_command",
+    "run_command": "run_command",
+    "edit": "write_file",
+    "multiedit": "write_file",
+    "write": "write_file",
+    "notebookedit": "write_file",
+}
+
+# The key that names each normalized action's target, in priority order.
+_DISPLAY_TARGET_KEYS: dict[str, tuple[str, ...]] = {
+    "read_file": ("file_path", "notebook_path", "path"),
+    "run_command": ("command",),
+    "write_file": ("file_path", "notebook_path", "path"),
+}
+
+# Fallback target probe for a tool with no normalized action. Same key order
+# as `agent/task_orchestrator.py::_approval_tool_target`, which already picks
+# the parked step's `tool_target` this way — one vocabulary, not two.
+_FALLBACK_TARGET_KEYS: tuple[str, ...] = (
+    "file_path",
+    "path",
+    "command",
+    "url",
+    "pattern",
+    "notebook_path",
+    "query",
+)
+
+
+def _run_workspace_root(run_id: str) -> str | None:
+    """The registered cwd of an agent run, or ``None`` if it has none.
+
+    Never raises: a store lookup failing here must not turn into a failed
+    permission prompt. Returning ``None`` costs an extra confirmation, which
+    is the right way to be wrong.
+    """
+    try:
+        run = get_agent_store().get_run(run_id)
+    except Exception:  # noqa: BLE001 - policy must not fail on a store read
+        logger.warning("[chat_stream] workspace root lookup failed run=%s", run_id)
+        return None
+    if not isinstance(run, dict):
+        return None
+    cwd = run.get("cwd")
+    return cwd.strip() if isinstance(cwd, str) and cwd.strip() else None
+
+
+def _approval_display(tool_name: Any, tool_input: Any) -> dict[str, Any]:
+    """``{"action", "target"}`` for the approval card.
+
+    Unrecognised tools keep their own name as the action, verbatim: an MCP
+    tool called ``linear__create_issue`` is more informative shown as itself
+    than flattened into a generic bucket, and the app already has a JSON
+    fallback for an action it cannot localize. ``target`` is ``None`` rather
+    than a guess when nothing in the input names one.
+    """
+    raw_name = str(tool_name).strip() if isinstance(tool_name, str) else ""
+    normalized = raw_name.lower()
+    action = _TOOL_DISPLAY_ACTIONS.get(normalized) or raw_name or "unknown"
+
+    target: str | None = None
+    if isinstance(tool_input, dict):
+        keys = _DISPLAY_TARGET_KEYS.get(action, _FALLBACK_TARGET_KEYS)
+        for key in keys:
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip():
+                target = value.strip()
+                break
+
+    return {"action": action, "target": target}
 
 
 async def _emit_app_event(
@@ -649,21 +866,48 @@ async def _handle_control_request(
         tool_use_id = request.get("tool_use_id")
         approval_id = None
         approval_result: dict[str, Any] | None = None
+        display = _approval_display(tool_name, tool_input)
         agent_run_id = getattr(websocket, "agent_run_id", None)
         if isinstance(agent_run_id, str) and agent_run_id.strip():
+            # The run's registered cwd is the workspace root the path guard
+            # measures against. Without it every path reads as
+            # `workspace_external` (confirm_each) and mapping the read-only
+            # tools to `file.read` would change nothing — the whole point is
+            # that reading *inside the project you pointed the agent at* is
+            # the low-risk case, and reading outside it is not. When the run
+            # has no cwd we pass none and the guard's own default (treat as
+            # external, confirm) applies: fail closed, never open.
+            workspace_root = _run_workspace_root(agent_run_id)
+            details: dict[str, Any] = {
+                "project_name": project_name,
+                "provider_id": state.provider_id,
+                "session_id": state.session_id,
+                "tool_name": tool_name,
+                "tool_use_id": tool_use_id,
+                "input": tool_input if isinstance(tool_input, dict) else {},
+                "provider_request_id": request_id,
+                "display": display,
+            }
+            if workspace_root:
+                details["workspace_root"] = workspace_root
+            details.update(
+                _approval_target_details(
+                    tool_name,
+                    tool_input,
+                    workspace_root=workspace_root,
+                )
+            )
             approval_result = request_approval_for_operation(
                 operation=_approval_operation_for_tool(tool_name),
                 run_id=agent_run_id,
                 actor={"type": "agent_session"},
-                details={
-                    "project_name": project_name,
-                    "provider_id": state.provider_id,
-                    "session_id": state.session_id,
-                    "tool_name": tool_name,
-                    "tool_use_id": tool_use_id,
-                    "input": tool_input if isinstance(tool_input, dict) else {},
-                    "provider_request_id": request_id,
-                },
+                details=details,
+                # A tool call parks the whole run until someone answers it, so
+                # the question has to stop being askable eventually — see
+                # `approvals.approval_service.default_approval_expires_at` and
+                # the scheduler's expiry sweep, which resumes the parked turn
+                # down the deny path once this deadline passes.
+                expires_at=default_approval_expires_at(),
             )
             approval = (
                 approval_result.get("approval") if isinstance(approval_result, dict) else None
@@ -725,6 +969,7 @@ async def _handle_control_request(
                 "tool_name": tool_name,
                 "tool_use_id": tool_use_id,
                 "input": tool_input if isinstance(tool_input, dict) else {},
+                "display": display,
                 "policy": approval_result.get("policy") if isinstance(approval_result, dict) else None,
                 "desktop_only": bool(
                     approval_result.get("policy", {}).get("desktop_only")

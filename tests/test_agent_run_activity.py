@@ -63,6 +63,50 @@ class AgentRunActivityTest(unittest.TestCase):
         self._run("completed")
         self.assertEqual(_agent_run_activity(self.agent["id"])["active_run_count"], 1)
 
+    def test_never_run_reports_no_status(self):
+        activity = _agent_run_activity(self.agent["id"])
+        self.assertIsNone(activity["last_run_status"])
+        self.assertEqual(activity["waiting_run_count"], 0)
+
+    def test_the_last_run_reports_how_it_went(self):
+        """"Ran 3 hours ago" and "ran 3 hours ago and failed" are different agents.
+
+        `last_fire_at` alone cannot tell sixty clean runs from sixty failures,
+        so a list built only on it shows a broken agent exactly as it shows a
+        working one.
+        """
+        for status in ("completed", "failed"):
+            with self.subTest(status=status):
+                self._run(status)
+                activity = _agent_run_activity(self.agent["id"])
+                self.assertEqual(activity["last_run_status"], status)
+                self.assertIsNotNone(activity["last_fire_at"])
+
+    def test_a_run_waiting_on_the_user_is_not_counted_as_active(self):
+        """Waiting is the state the user has to act on; active is the one they don't.
+
+        Counting them together is what made the one agent that needed an answer
+        indistinguishable from every agent that was simply busy — it read as
+        "활성 1개", the same words a healthy run produces, so nobody opened it.
+        """
+        self._run("running")
+        self._run("waiting_for_user")
+
+        activity = _agent_run_activity(self.agent["id"])
+
+        self.assertEqual(activity["waiting_run_count"], 1)
+        self.assertEqual(activity["active_run_count"], 1)
+        self.assertEqual(activity["last_run_status"], "waiting_for_user")
+
+    def test_every_waiting_status_the_scheduler_knows_is_counted(self):
+        # The two sets describe the same runs; a status parked by the scheduler
+        # but unknown here would be a run waiting invisibly.
+        from agent.scheduler import _WAITING_RUN_STATUSES as scheduler_waiting
+
+        from routes.agents import _WAITING_RUN_STATUSES as routes_waiting
+
+        self.assertEqual(set(routes_waiting), set(scheduler_waiting))
+
     def test_another_agents_runs_are_not_borrowed(self):
         other = self.store.create_agent(name="Other", system_prompt="")
         self._run("completed")

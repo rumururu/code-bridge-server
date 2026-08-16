@@ -40,6 +40,24 @@ class LlmSession(ABC):
         """Whether there is a pending permission request."""
         ...
 
+    @property
+    def has_pending_permission(self) -> bool:
+        """Whether this session is parked on a prompt it can still answer.
+
+        Not the same question as :attr:`has_pending_permission_denials`, which
+        only says a request exists. This one says the turn is still open and
+        ``approve_pending_permissions_and_retry`` /
+        ``deny_pending_permissions`` will actually continue it — which is what
+        the orchestrator needs before it resumes a run from an approval instead
+        of starting the step over.
+
+        False by default: a provider that cannot hold a turn open across a
+        decision (Codex's exec adapter answers both retry methods with an
+        error) must not claim it can, or the resume would report success while
+        the tool call never ran.
+        """
+        return False
+
     @abstractmethod
     async def send_message(
         self,

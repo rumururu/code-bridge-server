@@ -298,14 +298,18 @@ class AgentRoutesTest(unittest.TestCase):
             },
         ).json()["task"]
 
-        response = self.client.post(
-            f"/api/agent/tasks/{task['id']}/start",
-            json={
-                "provider_id": "google",
-                "model": "gemini-test",
-                "auto_start": False,
-            },
-        )
+        # Detection is pinned to "no MCP servers configured" so the assertion
+        # below is about the code's behaviour rather than about whatever the
+        # developer running the suite happens to have in ~/.claude.json.
+        with patch("agent.capability_registry._detect_mcp_servers", return_value=[]):
+            response = self.client.post(
+                f"/api/agent/tasks/{task['id']}/start",
+                json={
+                    "provider_id": "google",
+                    "model": "gemini-test",
+                    "auto_start": False,
+                },
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -314,7 +318,16 @@ class AgentRoutesTest(unittest.TestCase):
         self.assertGreaterEqual(len(payload["steps"]), 3)
         capability_names = {item["name"] for item in payload["capabilities"]}
         self.assertIn("browser", capability_names)
-        self.assertIn("github", capability_names)
+        # This used to assert `github` was selected. It was: the catalog
+        # hardcoded a github MCP server and marked it available on every
+        # refresh, whether or not one existed. The task text still says
+        # "github" and the keyword match still looks for it — but a task
+        # cannot be handed a connector this machine does not have.
+        self.assertNotIn(
+            "github",
+            capability_names,
+            "an MCP server that is not configured must not be offered to a task",
+        )
         self.assertIn("launch_message", payload)
 
         timeline_response = self.client.get(f"/api/agent/tasks/{task['id']}/timeline")

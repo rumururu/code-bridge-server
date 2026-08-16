@@ -69,6 +69,13 @@ def __getattr__(name: str):
 
 
 if __name__ == "__main__":
+    # start.sh's entry point: same PATH bootstrap server_cli.main() does for
+    # itself, run here too since server_cli's own bootstrap call happens
+    # later than this module's top-level imports.
+    from core.env_bootstrap import bootstrap_path
+
+    bootstrap_path()
+
     from server_cli import main as run_server_cli
 
     run_server_cli()

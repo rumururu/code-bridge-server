@@ -89,7 +89,18 @@ READY_TO_COMMIT
             "매시간 지정한 웹사이트를 열어 정상 동작 여부를 확인하고, 오류가 발견되면 요약해서 보고한다.",
         )
 
-    def test_sparse_android_review_exchange_request_gets_saveable_defaults(self) -> None:
+    def test_sparse_android_review_exchange_request_gets_no_invented_prose(self) -> None:
+        """A blank description/system_prompt stays blank.
+
+        This used to assert the opposite -- that the sparse draft came back
+        "saveable", with a description and a full system prompt written for it
+        by `_fallback_agent_description` / `_fallback_system_prompt`. The
+        system prompt is the agent's runtime instruction set: writing one from
+        a keyword match means the agent runs on rules the user never read and
+        the model never wrote. `provider_id` still defaults, because that
+        selects a configured backend rather than authoring text.
+        """
+
         session = create_builder_session(system_prompt="test")
 
         session.apply_llm_response(
@@ -113,8 +124,9 @@ I'll create a simple agent draft.
 
         draft = session.current_draft
         self.assertEqual(draft.provider_id, "openai")
-        self.assertTrue(draft.system_prompt.strip())
-        self.assertTrue(draft.description)
+        self.assertEqual(draft.system_prompt, "")
+        self.assertEqual(draft.description, "")
+        self.assertEqual(draft.name, "Android Review Exchange")
         self.assertTrue(any(tool.mcp_id == "app_action" for tool in draft.tools))
         step_ids = [step.id for step in draft.flow]
         self.assertIn("collect_review_exchange_requests", step_ids)
@@ -507,9 +519,19 @@ I'll model this after the existing runner.
         )
 
         draft = session.current_draft
-        self.assertEqual(draft.name, "Android App Agent")
-        self.assertIn("Android app automation", draft.description)
-        self.assertIn("Android app workflow", draft.system_prompt)
+        # This draft block does not even parse: `AgentDraft.name` has
+        # min_length=1, so `"name": ""` fails validation and the block is
+        # dropped whole (`builder_configurator_invalid_draft_block`). The
+        # identity fields therefore stay at their session defaults. That the
+        # old assertions here read "Android App Agent" and a paragraph of
+        # operating instructions shows what the fabrication was doing: a draft
+        # the model never successfully produced was presented to the user as
+        # a named, described, fully-instructed agent, assembled entirely from
+        # keyword matches on their own sentence. Commit now refuses (422)
+        # naming the missing fields.
+        self.assertIsNone(draft.name)
+        self.assertIsNone(draft.description)
+        self.assertEqual(draft.system_prompt, "")
         self.assertTrue(any(tool.mcp_id == "app_action" for tool in draft.tools))
         self.assertTrue(all(step.type != "browser_action" for step in draft.flow))
         verify_step = _step_by_id(draft.flow, "verify_app_launch")
@@ -1104,7 +1126,21 @@ Generic mobile QA workflow.
         self.assertIn("verify_app_launch", step_ids)
         self.assertIn("record_execution_result", step_ids)
 
-    def test_naver_hourly_web_agent_gets_tools_flow_and_schedule(self) -> None:
+    def test_naver_hourly_web_agent_gets_tools_and_schedule_but_no_invented_flow(
+        self,
+    ) -> None:
+        """An empty flow stays empty, and the reply says so.
+
+        This test used to assert the opposite: that the server answered an
+        empty `flow` with a six-step `_naver_cafe_flow()` template, complete
+        with cafe URLs, captcha handling and duplicate checks. The user had
+        asked for none of it and could not tell it from the model's own work.
+        Under the project's "no fabricated fallback" rule the server may
+        declare the browser tool the request needs, but it may not author the
+        workflow -- so the flow stays as the model left it and the turn says
+        out loud that there are no steps yet.
+        """
+
         session = create_builder_session(system_prompt="test")
 
         parsed = session.apply_llm_response(
@@ -1133,25 +1169,37 @@ Generic mobile QA workflow.
         self.assertEqual(parsed.draft.name, "UI F966N Naver Cafe 20260608")
         self.assertEqual(draft.tools[0].mcp_id, "playwright")
         self.assertEqual(draft.tools[0].category.value, "browser")
-        self.assertGreaterEqual(len(draft.flow), 5)
-        self.assertIn("네이버 카페", draft.flow[1].description)
-        self.assertEqual(draft.flow[1].id, "open_cafe_and_check_login")
-        self.assertEqual(draft.flow[1].type, "browser_action")
-        self.assertEqual(draft.flow[1].actions[0]["type"], "navigate")
-        self.assertEqual(draft.flow[1].on_failure["type"], "manual_handoff")
-        self.assertEqual(draft.flow[1].on_failure["resume"], "same_step")
-        self.assertTrue(
-            any(step.tool_hint == "playwright" for step in draft.flow),
-            "browser automation steps should declare Playwright",
+
+        self.assertEqual(
+            draft.flow,
+            [],
+            "the model returned no steps; the server must not write them",
         )
+        # The user is told, in the reply they actually read, rather than
+        # finding out at save time when `_validate_commit_draft` 422s.
+        self.assertIn("워크플로 단계가 하나도 없습니다", parsed.assistant_message)
+        self.assertIn("서버가 대신 단계를 만들어 넣지도 않습니다", parsed.assistant_message)
+        # Nothing from the deleted cafe template may appear anywhere.
+        self.assertNotIn("open_cafe_and_check_login", parsed.assistant_message)
+
         self.assertIsNotNone(session.task_draft)
         self.assertEqual(session.task_draft.schedule, "every 1h")
         self.assertIn("네이버 카페", session.task_draft.goal)
 
-    def test_placeholder_flow_is_replaced_for_web_automation(self) -> None:
+    def test_placeholder_flow_is_preserved_not_replaced_for_web_automation(self) -> None:
+        """A bare "Step 1" is the model's placeholder, not an invitation.
+
+        The old contract here was that a placeholder-only flow got thrown away
+        and `_generic_web_automation_flow()` written in its place. A
+        placeholder is a weak draft, but it is the draft the model produced and
+        the user is looking at; replacing it with invented steps is the same
+        defect as inventing them from nothing. It is kept, and the turn says
+        the steps have no content yet.
+        """
+
         session = create_builder_session(system_prompt="test")
 
-        session.apply_llm_response(
+        parsed = session.apply_llm_response(
             """
 초안입니다.
 
@@ -1174,16 +1222,31 @@ Generic mobile QA workflow.
 
         draft = session.current_draft
         self.assertEqual(draft.tools[0].mcp_id, "playwright")
-        self.assertGreaterEqual(len(draft.flow), 3)
-        self.assertNotEqual(draft.flow[0].name, "Step 1")
-        self.assertEqual(draft.flow[1].type, "browser_action")
-        self.assertTrue(draft.flow[1].actions)
-        self.assertTrue(any(step.tool_hint == "playwright" for step in draft.flow))
+        self.assertEqual(len(draft.flow), 1)
+        self.assertEqual(draft.flow[0].name, "Step 1")
+        self.assertEqual(draft.flow[0].description, "")
+        self.assertNotIn(
+            "browser_action",
+            [step.type for step in draft.flow],
+            "no step may appear that the model did not write",
+        )
+        self.assertIn("이름만 있고", parsed.assistant_message)
+        self.assertIn("임의로 채우지 않으므로", parsed.assistant_message)
 
-    def test_naver_note_agent_gets_concrete_workflow_and_send_approval(self) -> None:
+    def test_naver_note_agent_gets_no_invented_workflow_or_approval_gate(self) -> None:
+        """The note-sending template was the most convincing fabrication.
+
+        `_naver_note_flow()` read the recipient address out of the user's
+        sentence and built six steps around it -- a login step pointed at
+        note.naver.com, a compose step pre-filled with that address, an
+        approval gate, a send step and a memory write. It looked exactly like
+        careful work by the model, and none of it was. It is gone: the empty
+        flow the model returned stays empty and the reply says so.
+        """
+
         session = create_builder_session(system_prompt="test")
 
-        session.apply_llm_response(
+        parsed = session.apply_llm_response(
             """
 네이버 쪽지 발송 에이전트 초안을 만들게요.
 
@@ -1207,68 +1270,75 @@ Generic mobile QA workflow.
 
         draft = session.current_draft
         self.assertEqual(draft.tools[0].mcp_id, "playwright")
-        self.assertGreaterEqual(len(draft.flow), 6)
-        self.assertEqual(draft.flow[0].id, "prepare_note_context")
-        self.assertEqual(draft.flow[1].id, "open_naver_note_and_login")
-        self.assertEqual(draft.flow[1].type, "browser_action")
-        self.assertEqual(draft.flow[1].actions[0]["url"], "https://note.naver.com/")
-        self.assertEqual(draft.flow[1].on_failure["type"], "manual_handoff")
-        compose = draft.flow[2]
-        self.assertEqual(compose.id, "compose_note_draft")
-        self.assertEqual(compose.actions[1]["value"], "rumururu@naver.com")
-        self.assertEqual(compose.actions[2]["value"], "{{approved_note_body}}")
-        self.assertEqual(draft.flow[3].type, "approval_gate")
-        self.assertEqual(draft.flow[3].id, "approve_note_send")
-        self.assertEqual(draft.flow[4].id, "submit_note_and_capture_result")
-        self.assertTrue(
-            any(
-                getattr(step, "memory_write", None)
-                for step in draft.flow
-            ),
-            "note workflow should persist send-result memory",
-        )
+        self.assertEqual(draft.flow, [])
+        self.assertIn("워크플로 단계가 하나도 없습니다", parsed.assistant_message)
+        # The address the user typed must not come back as a pre-filled form
+        # value in a step nobody wrote.
+        self.assertNotIn("rumururu@naver.com", parsed.assistant_message)
 
-    def test_scheduled_flow_that_gains_approval_gate_discloses_stall_risk(self) -> None:
-        """A deterministically-added gate must warn the user in the same turn.
-
-        `_naver_note_flow` inserts an `approval_gate` step (`approve_note_send`)
-        ahead of the send action per rules 13/14 -- correctly. But that step
-        parks every single run for a human (task_orchestrator._wait_for_user_step
-        dispatches it unconditionally), and here the schedule is set in the very
-        same turn the gate is added. If nothing discloses that, the user walks
-        away believing they built an unattended daily agent when they actually
-        built a chore that stalls the first morning nobody answers it -- the
-        defect this initiative exists to close.
-        """
-
-        session = create_builder_session(system_prompt="test")
-
-        parsed = session.apply_llm_response(
-            """
-네이버 쪽지 발송 에이전트 초안을 만들게요.
+    # The gate these two tests need must be one *this file* inserts, not one
+    # the model wrote. `_deterministic_gate_disclosure` compares the flow
+    # before enrichment with the flow after it, and a gate that arrived inside
+    # the model's own ```draft``` block is present in both -- so it produces no
+    # disclosure, by design (the model saw its own gate and rule 7 tells it to
+    # mention the cost itself). Measured, not assumed: an `approval_gate` in
+    # the draft block plus a "매일 09:00" schedule yields an assistant message
+    # with no notice in it at all.
+    #
+    # These tests used to get their gate from `_naver_note_flow`, which A6
+    # deleted. `_install_app_steps` still inserts `approve_app_install`
+    # deterministically -- correctly, per rules 13/14 -- so it is the same
+    # situation the disclosure exists for: a park-for-human step the model
+    # never wrote, landing in a flow that is being scheduled.
+    _INSTALL_AGENT_RESPONSE = """
+설치 확인 에이전트 초안입니다.
 
 ```draft
 {
-  "name": "Naver Note Sender",
-  "description": "매일 아침 지정된 대상에게 네이버 쪽지를 보내는 에이전트",
-  "system_prompt": "로그인과 캡차는 우회하지 않고 사용자에게 요청한다.",
+  "name": "Mobile Install Verifier",
+  "description": "스토어 페이지를 열고 앱을 설치한 뒤 실행을 확인한다.",
+  "system_prompt": "민감한 외부 동작 전에는 사용자에게 확인받는다.",
   "provider_id": "openai",
   "tools": [],
   "flow": [],
   "memory_seeds": []
 }
 ```
-""",
+"""
+
+    def test_scheduled_flow_that_gains_approval_gate_discloses_stall_risk(self) -> None:
+        """A deterministically-added gate must warn the user in the same turn.
+
+        `_install_app_steps` inserts an `approval_gate` step
+        (`approve_app_install`) ahead of the install per rules 13/14 --
+        correctly. But that step parks every single run for a human
+        (task_orchestrator._wait_for_user_step dispatches it unconditionally),
+        and here the schedule is set in the very same turn the gate is added.
+        If nothing discloses that, the user walks away believing they built an
+        unattended daily agent when they actually built a chore that stalls the
+        first morning nobody answers it -- the defect this initiative exists to
+        close.
+        """
+
+        session = create_builder_session(system_prompt="test")
+
+        parsed = session.apply_llm_response(
+            self._INSTALL_AGENT_RESPONSE,
             user_message=(
-                "mktoolbox로 로그인해서 rumururu@naver.com으로 매일 09:00에 "
-                "네이버 쪽지 보내는 워크플로우를 만들어줘"
+                "Create an agent that opens the Play Store, installs the app and "
+                "verifies launch. 매일 09:00에 자동으로 실행해줘."
             ),
         )
 
         self.assertIsNotNone(session.task_draft)
         self.assertEqual(session.task_draft.schedule, "daily 09:00")
-        self.assertTrue(
-            any(step.type == "approval_gate" for step in session.current_draft.flow)
+        gate_ids = [
+            step.id for step in session.current_draft.flow if step.type == "approval_gate"
+        ]
+        self.assertIn(
+            "approve_app_install",
+            gate_ids,
+            "the gate under test must be one the server inserted, not one the model wrote",
         )
 
         # The disclosure must be in the reply actually handed back to the
@@ -1295,24 +1365,10 @@ Generic mobile QA workflow.
         session = create_builder_session(system_prompt="test")
 
         parsed = session.apply_llm_response(
-            """
-네이버 쪽지 발송 에이전트 초안을 만들게요.
-
-```draft
-{
-  "name": "Naver Note Sender",
-  "description": "네이버 쪽지로 지정된 대상에게 메시지를 보내는 에이전트",
-  "system_prompt": "로그인과 캡차는 우회하지 않고 사용자에게 요청한다.",
-  "provider_id": "openai",
-  "tools": [],
-  "flow": [],
-  "memory_seeds": []
-}
-```
-""",
+            self._INSTALL_AGENT_RESPONSE,
             user_message=(
-                "mktoolbox로 로그인해서 rumururu@naver.com으로 네이버 쪽지 보내는 "
-                "워크플로우를 만들어줘"
+                "Create an agent that opens the Play Store, installs the app and "
+                "verifies launch."
             ),
         )
 
@@ -1343,6 +1399,70 @@ Generic mobile QA workflow.
             prompt,
         )
         self.assertIn("false statement", prompt)
+
+
+class SpokenDailyScheduleTest(unittest.TestCase):
+    """"매일 오전 9시" is how the time is actually written, and it was unread.
+
+    The turn's own schedule extractor needed the hour to follow "매일"
+    immediately, so a period word in between ("오전", "아침") made the whole
+    phrase invisible and `session.task_draft` stayed None for the rest of the
+    conversation. The commit path reads the same phrasing correctly
+    (`routes/agents.py::_schedule_expression_from_draft`), which is why the
+    schedule still got created and the gap went unnoticed: the two disagreed,
+    and only the quieter one was wrong.
+    """
+
+    def test_a_spoken_period_before_the_hour_is_read(self) -> None:
+        from agent.configurator import _extract_schedule  # noqa: PLC0415
+
+        cases = {
+            "매일 오전 9시": "daily 09:00",
+            "매일 아침 9시": "daily 09:00",
+            "매일 9시": "daily 09:00",
+            "매일 오후 3시": "daily 15:00",
+            "매일 오후 3시 30분": "daily 15:30",
+            # Midday and midnight are the two the naive +12 gets backwards.
+            "매일 오후 12시": "daily 12:00",
+            "매일 오전 12시": "daily 00:00",
+            "매일 09:00": "daily 09:00",
+        }
+        for phrase, expected in cases.items():
+            with self.subTest(phrase=phrase):
+                self.assertEqual(_extract_schedule(phrase), expected)
+
+    def test_a_weekly_phrase_is_still_not_a_daily_one(self) -> None:
+        # "매주 월요일 오전 9시" has no daily reading, and inventing one would
+        # silently run a weekly job seven times a week.
+        from agent.configurator import _extract_schedule  # noqa: PLC0415
+
+        self.assertIsNone(_extract_schedule("매주 월요일 오전 9시"))
+
+    def test_the_turn_now_carries_the_schedule_it_was_told(self) -> None:
+        session = create_builder_session(system_prompt="test")
+        session.apply_llm_response(
+            """
+초안입니다.
+
+```draft
+{
+  "name": "Disk Watch",
+  "description": "디스크 여유 공간을 확인한다.",
+  "system_prompt": "디스크를 확인하고 보고한다.",
+  "provider_id": "openai",
+  "tools": [],
+  "flow": [
+    {"id": "check", "type": "llm", "name": "확인", "description": "디스크를 확인한다."}
+  ],
+  "memory_seeds": []
+}
+```
+""",
+            user_message="매일 오전 9시에 디스크 확인해줘",
+        )
+
+        self.assertIsNotNone(session.task_draft)
+        self.assertEqual(session.task_draft.schedule, "daily 09:00")
 
 
 def _step_by_id(flow, step_id):

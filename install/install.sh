@@ -8,6 +8,8 @@
 #   CODE_BRIDGE_AUTO_START     0 to skip auto-start after install
 #   CODE_BRIDGE_AUTOSTART      1/0 to register the login item without prompting
 #   CODE_BRIDGE_FORCE_RESET    1 to overwrite local changes during upgrade
+#   CODE_BRIDGE_BROWSER        0 to skip the Chromium download (browser steps
+#                              will then wait for a human at run time)
 
 set -euo pipefail
 
@@ -312,6 +314,40 @@ setup_venv() {
     echo -e "${GREEN}✓ Python environment ready${NC}"
 }
 
+# Download the Chromium build that browser_action workflow steps run on.
+#
+# pip installs the playwright package but never the browser binary, so a server
+# without this step reports browser runtime "unavailable" and parks every
+# browser step waiting for a human. This is the one step in the installer that
+# downloads hundreds of megabytes, so it says so before it starts: an installer
+# that goes silent for four minutes reads as hung, and the user kills it.
+setup_browser_runtime() {
+    if [ "${CODE_BRIDGE_BROWSER:-1}" = "0" ]; then
+        echo ""
+        echo -e "${YELLOW}! Skipping browser runtime (CODE_BRIDGE_BROWSER=0)${NC}"
+        echo "  Browser workflow steps will wait for manual handling until you run:"
+        echo "  $INSTALL_DIR/venv/bin/python -m playwright install chromium"
+        return 0
+    fi
+
+    echo ""
+    echo -e "${CYAN}Installing browser runtime (Chromium for browser workflow steps)...${NC}"
+    echo "  Download: about 200MB. On disk: about 450MB. Takes 1-5 minutes."
+    echo "  Skip with CODE_BRIDGE_BROWSER=0 (browser steps then wait for a human)."
+
+    # Never fail the install over this: the server runs fine without a browser,
+    # and it reports the missing runtime honestly rather than pretending.
+    if "$INSTALL_DIR/venv/bin/python" -m playwright install chromium; then
+        echo -e "${GREEN}✓ Browser runtime ready${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}! Chromium download failed — the server still starts.${NC}"
+    echo "  Browser workflow steps will wait for manual handling until you run:"
+    echo "  $INSTALL_DIR/venv/bin/python -m playwright install chromium"
+    return 0
+}
+
 # Create start script
 create_start_script() {
     echo ""
@@ -391,6 +427,7 @@ main() {
     check_mermaid_cli
     setup_repository
     setup_venv
+    setup_browser_runtime
     create_start_script
     configure_autostart
 

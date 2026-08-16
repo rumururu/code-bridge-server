@@ -18,11 +18,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from fastapi.responses import JSONResponse, Response
 
 from agent.agent_models import (
-    AgentCreate,
     AgentRunOnceRequest,
     AgentTaskCreate,
-    AgentUpdate,
-    BuilderCommitRequest,
     BuilderTurn,
     DryRunRequest,
 )
@@ -36,6 +33,13 @@ from agent.script_models import (
 from policy.policy_models import PolicyRuleCreate
 
 from . import agents as agents_routes
+# The mirrors below must declare the *route-level* body models, not the shared
+# draft models. `agents_routes` reads `body.commit_incomplete`, which only the
+# Body subclasses carry; typing a mirror with the plain model made every
+# dashboard create/update/commit raise AttributeError at runtime while the
+# phone's identical call succeeded, because only the phone reached the real
+# route. Tests did not catch it — they exercised `routes/agents.py` directly.
+from .agents import AgentCreateBody, AgentUpdateBody, BuilderCommitBody
 from . import approvals as approvals_routes
 from . import policies as policies_routes
 from . import script_proposals as script_proposals_routes
@@ -64,7 +68,7 @@ async def list_agents(
 
 
 @router.post("/agents", response_model=None)
-async def create_agent(body: AgentCreate) -> dict[str, Any] | JSONResponse:
+async def create_agent(body: AgentCreateBody) -> dict[str, Any] | JSONResponse:
     return await agents_routes.create_agent(body)
 
 
@@ -76,7 +80,7 @@ async def get_agent(agent_id: str) -> dict[str, Any]:
 @router.patch("/agents/{agent_id}", response_model=None)
 async def update_agent(
     agent_id: str,
-    body: AgentUpdate,
+    body: AgentUpdateBody,
 ) -> dict[str, Any] | JSONResponse:
     return await agents_routes.update_agent(agent_id, body)
 
@@ -116,7 +120,7 @@ async def get_builder_converse_job(job_id: str) -> dict[str, Any]:
 
 
 @router.post("/builder/commit", response_model=None)
-async def builder_commit(body: BuilderCommitRequest) -> Any:
+async def builder_commit(body: BuilderCommitBody) -> Any:
     """Persist the agent the builder conversation has been assembling."""
     return await agents_routes.builder_commit(body)
 
@@ -130,6 +134,18 @@ async def get_workflow_step_schema() -> dict[str, Any]:
     like every other agent-builder read below.
     """
     return await agents_routes.get_workflow_step_schema()
+
+
+@router.get("/browser-runtime/readiness", response_model=None)
+async def browser_runtime_readiness() -> dict[str, Any]:
+    """Same probe the phone gets from `/api/agent/browser-runtime/readiness`.
+
+    The agents page draws a readiness chip from this. Without the mirror the
+    dashboard would get a 401 (the shared route is api-key-gated) and the
+    page would have to guess — and guessing "ready" is exactly the claim a
+    browser step cannot honour.
+    """
+    return await agents_routes.browser_runtime_readiness()
 
 
 @router.post("/agents/{agent_id}/dry-run", response_model=None)
@@ -374,6 +390,10 @@ async def list_pending_approvals(run_id: str | None = None) -> dict[str, Any]:
 
 @router.post("/approvals/{approval_id}/decision", response_model=None)
 async def decide_approval(approval_id: str, body: ApprovalDecisionCreate) -> Any:
+    # Delegating to the api-key route rather than calling `decide_approval`
+    # directly is what makes the dashboard resume a parked run too: the
+    # `agent.approval_resume` hand-off lives in that handler, and adding a
+    # second call here would spawn the same resume twice.
     return await approvals_routes.create_approval_decision(approval_id, body)
 
 

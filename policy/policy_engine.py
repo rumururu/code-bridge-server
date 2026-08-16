@@ -25,6 +25,12 @@ ALLOW_OPERATIONS = {
     "chat.send",
     "log.tail",
     "preview.token",
+    # Reading a file changes nothing. What makes *which* file matter is
+    # handled below, not here: `file.read` is a `_PATH_OPERATIONS` member, so
+    # every request carrying a path runs through the path guard, and
+    # `_apply_classifiers` escalates away from `allow` whenever that path is
+    # sensitive. An allow here is "allow by default", never "allow always".
+    "file.read",
 }
 
 CONFIRM_ONCE_OPERATIONS = {

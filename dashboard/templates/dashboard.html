@@ -1530,6 +1530,49 @@
             color: var(--success-color);
         }
 
+        /* Missing-dependency hint (cloudflared) */
+        .install-hint {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            margin-top: 12px;
+            padding: 12px;
+            border: 1px solid var(--warning-color);
+            border-radius: 8px;
+            background: var(--bg-primary);
+        }
+
+        .install-hint-text strong {
+            display: block;
+            font-size: 0.85rem;
+            color: var(--warning-color);
+            margin-bottom: 4px;
+        }
+
+        .install-hint-text p {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin: 0 0 8px;
+        }
+
+        .install-hint-text code {
+            display: inline-block;
+            font-size: 0.75rem;
+            padding: 4px 8px;
+            border-radius: 4px;
+            background: var(--bg-secondary);
+            word-break: break-all;
+        }
+
+        .install-hint-text code:empty {
+            display: none;
+        }
+
+        .install-hint-note {
+            margin: 8px 0 0 !important;
+        }
+
         /* Tunnel Action Section inside Access Mode Card */
         .tunnel-action-section {
             margin-top: 10px;
@@ -1894,6 +1937,23 @@
                         </label>
                     </div>
 
+                    <!--
+                      External access cannot start at all without the cloudflared
+                      binary, and the failure without this banner reads as "the
+                      tunnel just does not turn on" — the toggle flips back with
+                      the reason only in the server log. Sits outside the label
+                      above so its copy button does not also toggle the radio.
+                    -->
+                    <div id="cloudflaredMissingBanner" class="install-hint" style="display: none;">
+                        <div class="install-hint-text">
+                            <strong data-i18n="cloudflared_missing_title">External access needs cloudflared</strong>
+                            <p data-i18n="cloudflared_missing_desc">cloudflared is not installed on this machine, so the tunnel cannot start. Install it, then restart the server.</p>
+                            <code id="cloudflaredInstallCommand"></code>
+                            <p id="cloudflaredManualNote" class="install-hint-note" style="display: none;"></p>
+                        </div>
+                        <button id="cloudflaredCopyBtn" class="btn btn-secondary btn-sm" onclick="copyCloudflaredCommand()" data-i18n="copy_command">Copy command</button>
+                    </div>
+
                     <!-- Dashboard Password -->
                     <div class="info-row" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-color);">
                         <div style="display: flex; flex-direction: column; gap: 2px;">
@@ -2137,6 +2197,12 @@
                 agent_no_runs: 'Nothing has run yet.',
                 agent_no_schedules: 'No schedules yet.',
                 time_just_now: 'just now',
+                cloudflared_missing_title: 'External access needs cloudflared',
+                cloudflared_missing_desc: 'cloudflared is not installed on this machine, so the tunnel cannot start. Install it, then restart the server.',
+                cloudflared_manual_note: 'No install command for this platform. Download cloudflared from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/',
+                copy_command: 'Copy command',
+                copied: 'Copied',
+                copy_failed: 'Could not copy',
                 save: 'Save',
                 cancel: 'Cancel',
                 reset: 'Reset',
@@ -2224,6 +2290,12 @@
                 agent_no_runs: '아직 실행된 적이 없습니다.',
                 agent_no_schedules: '예약된 스케줄이 없습니다.',
                 time_just_now: '방금',
+                cloudflared_missing_title: '외부 접속에는 cloudflared가 필요합니다',
+                cloudflared_missing_desc: '이 컴퓨터에 cloudflared가 설치되어 있지 않아 터널을 시작할 수 없습니다. 설치한 뒤 서버를 재시작하세요.',
+                cloudflared_manual_note: '이 플랫폼용 설치 명령이 없습니다. https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/ 에서 cloudflared를 내려받으세요.',
+                copy_command: '명령 복사',
+                copied: '복사했습니다',
+                copy_failed: '복사하지 못했습니다',
                 save: '저장',
                 cancel: '취소',
                 reset: '초기화',
@@ -2703,7 +2775,68 @@
             handleAccessModeChange(mode);
         }
 
+        // The command that actually installs cloudflared on this host. Only
+        // macOS gets a command: install.sh's own cloudflared step falls back
+        // to Cloudflare's download page everywhere else, and printing a guessed
+        // package-manager line for a platform nobody verified would be the
+        // same fabrication this banner exists to remove.
+        function cloudflaredInstallHint() {
+            const platform = (dashboardData && dashboardData.autostart && dashboardData.autostart.platform) || '';
+            if (platform === 'darwin') return { command: 'brew install cloudflared', note: '' };
+            return { command: '', note: t('cloudflared_manual_note') };
+        }
+
+        function updateCloudflaredBanner() {
+            const banner = document.getElementById('cloudflaredMissingBanner');
+            if (!banner) return;
+            // Only `false` hides nothing — a missing key (older server, failed
+            // fetch) is unknown, and a banner asserting "not installed" on a
+            // machine where it is installed would be its own false claim.
+            const installed = dashboardData && dashboardData.tunnel
+                ? dashboardData.tunnel.cloudflared_installed
+                : undefined;
+            if (installed !== false) {
+                banner.style.display = 'none';
+                return;
+            }
+            banner.style.display = 'flex';
+
+            const hint = cloudflaredInstallHint();
+            const commandEl = document.getElementById('cloudflaredInstallCommand');
+            const noteEl = document.getElementById('cloudflaredManualNote');
+            const copyBtn = document.getElementById('cloudflaredCopyBtn');
+            if (commandEl) commandEl.textContent = hint.command;
+            if (copyBtn) copyBtn.style.display = hint.command ? '' : 'none';
+            if (noteEl) {
+                noteEl.textContent = hint.note || '';
+                noteEl.style.display = hint.note ? '' : 'none';
+            }
+        }
+
+        async function copyCloudflaredCommand() {
+            const command = cloudflaredInstallHint().command;
+            if (!command) return;
+            let copied = false;
+            try {
+                await navigator.clipboard.writeText(command);
+                copied = true;
+            } catch (error) {
+                // Clipboard API requires a secure context; the dashboard is
+                // served over plain http, so fall back rather than fail silently.
+                const scratch = document.createElement('textarea');
+                scratch.value = command;
+                scratch.style.position = 'fixed';
+                scratch.style.opacity = '0';
+                document.body.appendChild(scratch);
+                scratch.select();
+                try { copied = document.execCommand('copy'); } catch (fallbackError) { copied = false; }
+                document.body.removeChild(scratch);
+            }
+            showToast(copied ? t('copied') : t('copy_failed'), copied ? 'success' : 'error');
+        }
+
         function updateAccessModeUI() {
+            updateCloudflaredBanner();
             const ipLoginCard = document.getElementById('ipLoginCard');
             const externalAccessCard = document.getElementById('externalAccessCard');
             const refreshTunnelBtn = document.getElementById('refreshTunnelBtn');

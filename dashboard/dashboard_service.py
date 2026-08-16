@@ -35,6 +35,7 @@ from devices.device_action_service import (
 )
 from llm.llm_settings import get_llm_options_snapshot
 from system.optional_services import FIREBASE_AVAILABLE, TUNNEL_AVAILABLE, get_firebase_auth, get_tunnel_service
+from system.system_status_service import is_cloudflared_installed
 from pairing.pairing import get_pairing_service
 from projects.project_action_service import list_projects_for_current_server
 
@@ -152,12 +153,18 @@ class DashboardTunnelStatus:
     available: bool
     running: bool
     url: Optional[str]
+    # Whether the cloudflared binary is on the server's PATH. Distinct from
+    # `available` (the tunnel integration importing) and from `running`:
+    # without this the dashboard could only say "the tunnel is not running"
+    # for a machine where the tunnel can never start at all.
+    cloudflared_installed: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "available": self.available,
             "running": self.running,
             "url": self.url,
+            "cloudflared_installed": self.cloudflared_installed,
         }
 
 
@@ -355,11 +362,17 @@ async def _build_device_status() -> DashboardDeviceStatus:
 
 def _build_tunnel_status() -> DashboardTunnelStatus:
     """Build tunnel status from tunnel service."""
+    # Probed regardless of whether a tunnel service instance exists: the case
+    # worth telling the user about is precisely the one where no tunnel has
+    # ever started because the binary is not there.
+    cloudflared_installed = is_cloudflared_installed()
+
     if not TUNNEL_AVAILABLE:
         return DashboardTunnelStatus(
             available=False,
             running=False,
             url=None,
+            cloudflared_installed=cloudflared_installed,
         )
 
     tunnel_service = get_tunnel_service()
@@ -368,17 +381,24 @@ def _build_tunnel_status() -> DashboardTunnelStatus:
             available=True,
             running=False,
             url=None,
+            cloudflared_installed=cloudflared_installed,
         )
 
     status = tunnel_service.get_status()
     running = bool(status.get("running", False))
     raw_url = status.get("url")
     url = raw_url if isinstance(raw_url, str) else None
+    # The service's own status carries the same probe; prefer it when present
+    # so the banner and a tunnel start attempt cannot disagree.
+    installed = status.get("installed")
+    if isinstance(installed, bool):
+        cloudflared_installed = installed
 
     return DashboardTunnelStatus(
         available=True,
         running=running,
         url=url,
+        cloudflared_installed=cloudflared_installed,
     )
 
 

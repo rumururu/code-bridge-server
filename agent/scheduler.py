@@ -14,7 +14,9 @@ advance ``next_run_at`` based on the schedule expression.
 This is also the only periodic timer the server owns, so other work that has
 to happen "every so often" rides this tick rather than starting a rival loop —
 see :meth:`TaskScheduler._sweep_cli_agents_if_due`, which asks
-:mod:`agent.cli_agent_sweep` whether its (much coarser) interval has elapsed.
+:mod:`agent.cli_agent_sweep` whether its (much coarser) interval has elapsed,
+and :meth:`TaskScheduler._sweep_expired_approvals`, which ends approvals whose
+``expires_at`` has passed so the runs parked on them stop waiting forever.
 """
 
 from __future__ import annotations
@@ -310,8 +312,33 @@ class TaskScheduler:
         due = await asyncio.to_thread(store.list_due)
         for schedule in due:
             await _fire_schedule(schedule)
+        await self._sweep_expired_approvals()
         await self._sweep_cli_agents_if_due()
         return len(due)
+
+    async def _sweep_expired_approvals(self) -> None:
+        """Settle approvals whose deadline passed, on this same tick.
+
+        An approval nobody answers parks its run in ``waiting_for_user``
+        indefinitely, and — because that counts as active above — takes the
+        task's schedule down with it. ``_blocking_run_for_task`` already
+        abandons such a run after the stall grace period, but only when the
+        schedule next fires: a run started by hand, or one whose schedule is
+        disabled, has nobody to notice it. This sweep is the one that notices,
+        and unlike abandonment it settles the parked provider turn (deny) and
+        the step's failure policy rather than just failing the run row.
+
+        Every tick rather than on its own cadence: it is one indexed query
+        against a table that is nearly always empty of expired rows, and the
+        cost of being late is a run that stays stuck. Best-effort — an approval
+        sweep failure must never cost a scheduled run.
+        """
+        try:
+            from agent.approval_resume import sweep_expired_approvals
+
+            await sweep_expired_approvals()
+        except Exception:
+            logger.exception("scheduler: approval expiry sweep failed")
 
     async def _sweep_cli_agents_if_due(self) -> None:
         """Let the CLI agent sweep piggyback on this loop, if it is due.

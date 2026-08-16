@@ -1,7 +1,6 @@
 """Agent Cockpit API routes."""
 
 import asyncio
-import json
 import logging
 import re
 from contextlib import suppress
@@ -34,7 +33,6 @@ from agent.configurator import (
     build_configurator_turn_prompt,
     create_builder_session,
     delete_builder_session,
-    enrich_draft_from_user_intent,
     get_builder_session,
     looks_like_manual_timing,
     task_goal_from_draft,
@@ -78,7 +76,10 @@ from agent.agent_store import (
     add_memory_from_event,
     get_agent_store,
 )
-from agent.browser_action_adapter import get_browser_runtime_readiness
+from agent.browser_action_adapter import (
+    get_browser_runtime_readiness,
+    get_cached_browser_readiness_sync,
+)
 from agent.browser_session_store import get_browser_session_store
 from agent.capability_registry import refresh_capability_registry
 from agent.schedule_store import compute_next_fire_at, get_schedule_store
@@ -92,6 +93,14 @@ from agent.task_orchestrator import (
 )
 from agent.browser_action_executor import execute_browser_actions
 from agent.tool_artifacts import ARTIFACT_ROOT, record_tool_action_result
+from agent.workflow_contract import (
+    BROWSER_STEP_TYPES,
+    CODE_BROWSER_RUNTIME_UNAVAILABLE,
+    CODE_UNKNOWN_STEP_REFERENCE,
+    CODE_UNRESOLVED_BROWSER_TARGET,
+    ContractReport,
+    analyze_workflow,
+)
 from agent.workflow_v2 import WorkflowNormalizationError, normalize_workflow
 from agent.workflow_step_schema import get_step_schema as get_workflow_step_schema_payload
 from approvals.approval_service import decide_approval
@@ -200,29 +209,62 @@ def _with_script_names(flow: Any) -> Any:
 
 _ACTIVE_RUN_STATUSES = ("queued", "starting", "running")
 
+# A run in one of these has stopped and is waiting on the user. Counting it as
+# "active" is what made an agent that needs an answer read as busy: the list
+# said "활성 1개", which is the same thing it says while a run is working fine,
+# so the one agent that needed the user was the one they had no reason to open.
+# `agent/scheduler.py::_WAITING_RUN_STATUSES` is the same set for the same runs.
+_WAITING_RUN_STATUSES = ("blocked", "waiting_for_user", "waiting_user")
+
 
 def _agent_run_activity(agent_id: str) -> dict[str, Any]:
-    """When this agent last ran, and whether it is running now.
+    """When this agent last ran, how it went, and what it is doing now.
 
     The client renders "no runs yet" from ``last_fire_at``, so an agent that
     has run sixty times still reads as never-used until this is filled in —
-    the run history existed, it just never reached the phone.
+    the run history existed, it just never reached the phone. ``last_run_status``
+    is the other half: a list that shows only *when* cannot distinguish sixty
+    clean runs from sixty failures.
+
+    ``last_run_status`` describes the same run ``last_fire_at`` names, so the
+    two can never be read as one sentence about two different runs.
     """
+    empty = {
+        "last_fire_at": None,
+        "last_run_status": None,
+        "active_run_count": 0,
+        "waiting_run_count": 0,
+    }
     store = _store()
     try:
         runs = store.list_runs(agent_id=agent_id, limit=50)
     except Exception:
-        return {"last_fire_at": None, "active_run_count": 0}
+        return dict(empty)
+    if not runs:
+        return dict(empty)
 
-    active = sum(1 for run in runs if run.get("status") in _ACTIVE_RUN_STATUSES)
-    stamps = [
-        str(run.get("started_at") or run.get("created_at") or "")
-        for run in runs
-        if run.get("started_at") or run.get("created_at")
-    ]
+    latest: dict[str, Any] | None = None
+    latest_stamp = ""
+    for run in runs:
+        stamp = str(run.get("started_at") or run.get("created_at") or "")
+        if not stamp:
+            continue
+        # Strict `>`: `list_runs` already returns newest-first, so a tie on
+        # SQLite's second-resolution timestamps keeps the newer row.
+        if latest is None or stamp > latest_stamp:
+            latest = run
+            latest_stamp = stamp
+
+    last_run = latest if latest is not None else runs[0]
     return {
-        "last_fire_at": _as_utc_iso(max(stamps)) if stamps else None,
-        "active_run_count": active,
+        "last_fire_at": _as_utc_iso(latest_stamp) if latest_stamp else None,
+        "last_run_status": str(last_run.get("status") or "") or None,
+        "active_run_count": sum(
+            1 for run in runs if run.get("status") in _ACTIVE_RUN_STATUSES
+        ),
+        "waiting_run_count": sum(
+            1 for run in runs if run.get("status") in _WAITING_RUN_STATUSES
+        ),
     }
 
 
@@ -432,6 +474,22 @@ SUPPORTED_SCHEDULE_FORMS = (
 )
 
 
+_SCHEDULE_FRAGMENT_LEAD_RE = re.compile(r"^(?:그리고|그럼|그러면|또|또한|and)\s+", re.IGNORECASE)
+
+
+def _clean_schedule_fragment(fragment: str) -> str:
+    """Strip the noise around a quoted schedule phrase, keeping the words.
+
+    The phrase is shown back to the user and stored as ``requested_text``, and
+    it is lifted out of chat prose: markdown emphasis and the conjunction the
+    sentence started with ("그리고 **매일 오전 9시에**") are artefacts of where
+    it was quoted from, not of what the user asked for.
+    """
+    cleaned = fragment.replace("**", "").replace("__", "").strip()
+    cleaned = _SCHEDULE_FRAGMENT_LEAD_RE.sub("", cleaned).strip()
+    return cleaned or fragment.strip()
+
+
 def _first_schedule_fragment(text: str) -> str | None:
     """Return the smallest piece of ``text`` that reads as a schedule.
 
@@ -447,8 +505,31 @@ def _first_schedule_fragment(text: str) -> str | None:
         if not fragment:
             continue
         if _schedule_expression_from_draft(fragment) is not None:
-            return fragment[:120]
+            return _clean_schedule_fragment(fragment)[:120]
     return None
+
+
+def _schedule_display_name(expression: dict[str, Any]) -> str:
+    """Name a schedule after what it does, not after the sentence it came from.
+
+    ``name=phrase`` stored whatever chat fragment happened to parse — "그리고
+    **매일 오전 9시에** flutter test 돌려서 실패하면 알려줘" was a real schedule
+    name — and that string is the label every list, every edit dialog and every
+    notification shows. This is a deterministic rendering of the *parsed*
+    expression, so it can only say something the schedule actually does; the
+    user's own wording is kept verbatim in ``requested_text``.
+    """
+    kind = str(expression.get("kind") or "")
+    if kind == "daily_at":
+        return f"매일 {expression.get('time')}"
+    if kind == "interval":
+        seconds = int(expression.get("seconds") or 0)
+        if seconds % 86400 == 0 and seconds >= 86400:
+            return f"{seconds // 86400}일마다"
+        if seconds % 3600 == 0 and seconds >= 3600:
+            return f"{seconds // 3600}시간마다"
+        return f"{max(seconds // 60, 1)}분마다"
+    return "예약 실행"
 
 
 def _conversation_schedule_phrase(session: BuilderSession) -> str | None:
@@ -562,7 +643,7 @@ def _create_commit_schedule(
         schedule = get_schedule_store().create(
             task_id=task_id,
             expression=expression,
-            name=phrase,
+            name=_schedule_display_name(expression),
             provider_id=draft.provider_id,
             model=draft.model,
             cwd=task_draft.cwd,
@@ -590,6 +671,7 @@ def _create_commit_schedule(
     return schedule, {
         "created": True,
         "id": schedule["id"],
+        "name": schedule["name"],
         "expression": schedule["expression"],
         "enabled": bool(schedule["enabled"]),
         "next_run_at": schedule["next_run_at"],
@@ -628,6 +710,199 @@ def _normalize_agent_workflow(flow_json: Any) -> list[dict[str, Any]]:
         return normalize_workflow(flow_json)
     except WorkflowNormalizationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class BuilderCommitBody(BuilderCommitRequest):
+    """The commit request, plus the one answer only this gate ever asks for.
+
+    ``commit_incomplete`` is not part of what a draft *is*, so it does not
+    belong on ``BuilderCommitRequest``: it is the caller's reply to a refusal
+    this route made ("yes, save it anyway, I know it will stall"). Keeping it
+    on the route's own body model puts the escape hatch beside the gate that
+    offers it and leaves the shared draft model describing only the draft.
+    """
+
+    commit_incomplete: bool = False
+
+
+class AgentCreateBody(AgentCreate):
+    """``AgentCreate`` with the same deliberate-incomplete escape hatch."""
+
+    commit_incomplete: bool = False
+
+
+class AgentUpdateBody(AgentUpdate):
+    """``AgentUpdate`` with the same deliberate-incomplete escape hatch.
+
+    ``update_agent`` builds its patch with ``exclude_unset=True`` and hands it
+    to the store, so this field must be popped there before it reaches a column
+    that does not exist.
+    """
+
+    commit_incomplete: bool = False
+
+
+def _flow_has_browser_step(flow: Any) -> bool:
+    if not isinstance(flow, list):
+        return False
+    return any(
+        isinstance(step, dict)
+        and str(step.get("type") or step.get("step_type") or "").strip().lower()
+        in BROWSER_STEP_TYPES
+        for step in flow
+    )
+
+
+async def _browser_readiness_for_contract(flow: Any) -> dict[str, Any] | None:
+    """The readiness snapshot the contract check should judge against.
+
+    Cache first (``get_cached_browser_readiness_sync``): the probe starts a
+    Playwright driver, and doing that on every save would make writing an agent
+    pay for a diagnostic. When there is no fresh snapshot the answer is
+    genuinely unknown, and unknown is never reported as ready.
+
+    A flow with a browser step is the one case where unknown is not good
+    enough — that workflow's whole fate depends on the answer — so it falls
+    through to the cache-backed async getter, which probes at most once per TTL
+    and then serves every other commit in that window from the cache. A flow
+    with no browser step never triggers a probe at all.
+    """
+    cached = get_cached_browser_readiness_sync()
+    if cached is not None:
+        return cached
+    if not _flow_has_browser_step(flow):
+        return None
+    try:
+        return await get_browser_runtime_readiness()
+    except Exception:  # pragma: no cover - diagnostics must never fail a save
+        logger.warning("browser runtime readiness probe failed", exc_info=True)
+        return None
+
+
+async def _check_workflow_contract(
+    flow: Any,
+    *,
+    commit_incomplete: bool,
+) -> tuple[ContractReport, JSONResponse | None]:
+    """Run the builder-runtime contract check for a workflow about to be saved.
+
+    Returns the report and, when the request must be refused, the response to
+    return. Refusal is a plain ``400`` — the same code every other workflow
+    normalization refusal on this router answers with
+    (``_normalize_agent_workflow`` above, ``workflow_v2``): one class of
+    "this workflow cannot be saved as written", one status code. A second code
+    for the same class would only teach clients to branch on which validator
+    happened to speak first.
+
+    ``commit_incomplete=True`` saves anyway. That is not a bypass of the
+    judgement — the findings are still reported back in
+    ``commit_result.readiness`` — it is the answer to a real case: a draft
+    someone wants to keep working on tomorrow, whose browser target they do not
+    know yet. The runtime adapter still parks such a run honestly.
+    """
+    readiness = await _browser_readiness_for_contract(flow)
+    report = analyze_workflow(flow, browser_readiness=readiness)
+    if report.has_blocking and not commit_incomplete:
+        return report, _contract_refusal_response(report)
+    return report, None
+
+
+def _contract_refusal_response(report: ContractReport) -> JSONResponse:
+    """The refusal a client can act on, item by item.
+
+    ``detail`` is a sentence because every existing client renders that field
+    verbatim (``lib/services/builder_service.dart`` reads
+    ``detail ?? error ?? message``), so an app that knows nothing about this
+    check still tells the user something true. ``unresolved`` /
+    ``unknown_step_references`` carry the same facts in a shape a builder UI
+    can turn into one input box per unresolved target — ``step_id`` and a
+    **0-based** ``action_index`` address the exact action to patch.
+    """
+    unresolved = [
+        finding.to_dict()
+        for finding in report.by_code(CODE_UNRESOLVED_BROWSER_TARGET)
+    ]
+    unknown_refs = [
+        finding.to_dict() for finding in report.by_code(CODE_UNKNOWN_STEP_REFERENCE)
+    ]
+    error = (
+        "unresolved_browser_targets"
+        if unresolved
+        else ("unknown_step_reference" if unknown_refs else "workflow_contract_blocked")
+    )
+    asks = [finding.ask for finding in report.blocking if finding.ask]
+    detail = " ".join(
+        [
+            "저장하지 않았습니다. 지금 저장하면 실행할 때 반드시 멈추는 단계가 "
+            f"{len(report.blocking)}개 있습니다:",
+            *asks,
+            "값을 채운 뒤 다시 저장하거나, 미완성 상태로 남겨 두려면 "
+            "commit_incomplete=true 로 요청하세요.",
+        ]
+    )
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": error,
+            "detail": detail,
+            "message": detail,
+            "unresolved": unresolved,
+            "unknown_step_references": unknown_refs,
+            "blocking": [finding.to_dict() for finding in report.blocking],
+            "warnings": [finding.to_dict() for finding in report.warnings],
+            "can_save_incomplete": True,
+        },
+    )
+
+
+def _contract_readiness_fact(
+    report: ContractReport,
+    *,
+    saved_incomplete: bool,
+) -> dict[str, Any]:
+    """What the saved workflow still cannot do, stated on the success response.
+
+    A commit that returns 200 with a missing browser runtime is not a clean
+    commit — it is a saved workflow that will park at its first browser step
+    until someone installs Chromium on the server. The install is not the
+    author's to perform, so refusing their work would hold it hostage to
+    someone else's machine; saying nothing would let them believe it runs.
+    This says it.
+    """
+    runtime_findings = report.by_code(CODE_BROWSER_RUNTIME_UNAVAILABLE)
+    unresolved = [
+        finding.to_dict()
+        for finding in report.by_code(CODE_UNRESOLVED_BROWSER_TARGET)
+    ]
+    unknown_refs = [
+        finding.to_dict() for finding in report.by_code(CODE_UNKNOWN_STEP_REFERENCE)
+    ]
+    warnings = [finding.to_dict() for finding in report.warnings]
+
+    browser_runtime: dict[str, Any] | None = None
+    if runtime_findings:
+        finding = runtime_findings[0]
+        browser_runtime = {
+            "ready": False,
+            "install_command": finding.detail.get("install_command"),
+            "message": finding.ask,
+            "step_ids": finding.detail.get("step_ids") or [],
+        }
+
+    messages = [finding.ask for finding in report.findings if finding.ask]
+    # `ok` answers one question — "will this workflow run as written?" — so it
+    # is false for a blocking finding and for a missing browser runtime, and
+    # true despite an advisory `possible_unknown_step_reference`, which is a
+    # note about prose and stops nothing. The full list is still in `warnings`.
+    return {
+        "ok": not report.has_blocking and not runtime_findings,
+        "browser_runtime": browser_runtime,
+        "unresolved_targets": unresolved,
+        "unknown_step_references": unknown_refs,
+        "warnings": warnings,
+        "saved_incomplete": bool(saved_incomplete),
+        "message": " ".join(messages),
+    }
 
 
 async def run_configurator_turn(
@@ -713,21 +988,54 @@ def _validate_commit_draft(draft: AgentDraft) -> None:
         )
 
 
-def _builder_commit_intent(draft: AgentDraft, task_draft: TaskDraft | None) -> str:
-    parts = [
-        draft.name or "",
-        draft.description or "",
-        draft.system_prompt or "",
-        json.dumps([step.model_dump() for step in draft.flow], ensure_ascii=False),
+def _reject_unapproved_shell_steps(draft: AgentDraft) -> None:
+    """Refuse a shell step that names no script.
+
+    A ``shell`` step runs the script its ``script_id`` names. With that field
+    empty the step names nothing, and the agent was committed referring to work
+    that exists in no registry — the reported session saved a `run_flutter_test`
+    step whose output the next step then "summarised". The step id is in the
+    message because that is what the user sees in the flow editor, and the
+    pending proposal's name is there because approving it is the fix.
+
+    ``normalize_workflow`` refuses the same thing (``agent/workflow_v2.py``),
+    with a message written for whoever wrote the JSON. This runs first so the
+    person who never saw any JSON gets told which of *their* steps is unbuilt
+    and what to approve. Both refusals answer with 400 — see RESULT_004.
+    """
+    pending_by_step = {
+        (request.step_id or "").strip(): request.name.strip()
+        for request in draft.script_requests
+        if (request.step_id or "").strip() and request.name.strip()
+    }
+    unassigned = [
+        request.name.strip()
+        for request in draft.script_requests
+        if not (request.step_id or "").strip() and request.name.strip()
     ]
-    if task_draft is not None:
-        parts.extend(
-            [
-                task_draft.goal or "",
-                task_draft.schedule or "",
-            ]
+    offenders: list[str] = []
+    for index, step in enumerate(draft.flow, start=1):
+        if step.type != "shell":
+            continue
+        if str(getattr(step, "script_id", "") or "").strip():
+            continue
+        step_id = (step.id or "").strip() or f"step_{index}"
+        proposal = pending_by_step.get(step_id) or (unassigned[0] if unassigned else None)
+        if proposal:
+            offenders.append(
+                f"'{step_id}' (승인 대기 중인 스크립트 제안: '{proposal}')"
+            )
+        else:
+            offenders.append(f"'{step_id}' (연결된 스크립트 제안이 없습니다)")
+    if offenders:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "셸 스텝에 script_id가 없어 저장하지 않았습니다: "
+                + ", ".join(offenders)
+                + ". 스크립트를 승인하면 해당 단계에 연결됩니다."
+            ),
         )
-    return "\n".join(part for part in parts if isinstance(part, str) and part.strip())
 
 
 def _resolve_commit_task_draft(
@@ -1073,7 +1381,7 @@ async def get_builder_converse_job(job_id: str) -> dict[str, Any]:
     dependencies=[Depends(verify_api_key)],
     response_model=None,
 )
-async def builder_commit(body: BuilderCommitRequest) -> dict[str, Any]:
+async def builder_commit(body: BuilderCommitBody) -> dict[str, Any] | JSONResponse:
     """Commit the draft, and report exactly what now exists.
 
     ``commit_result`` is the point of this endpoint's response, not a decoration
@@ -1092,18 +1400,30 @@ async def builder_commit(body: BuilderCommitRequest) -> dict[str, Any]:
 
     draft = body.draft
     task_draft = _resolve_commit_task_draft(body, session)
-    draft, task_draft = enrich_draft_from_user_intent(
-        draft,
-        previous_draft=session.current_draft,
-        task_draft=task_draft,
-        user_message=_builder_commit_intent(draft, task_draft),
-    )
-    # `enrich_draft_from_user_intent` only ever sees the draft's own text, so a
-    # schedule that lives in the conversation ("매일 아침 9시") never reached it.
+    # Commit saves the draft the user read and approved. It deliberately does
+    # not re-run `enrich_draft_from_user_intent` here: that pass back-filled
+    # missing required fields (which `_validate_commit_draft` must reject with
+    # 422 instead of quietly inventing), re-extracted a schedule that
+    # `_task_draft_for_commit` already derives from the conversation, and —
+    # reading only the draft's own text — could replace an approved workflow
+    # with a keyword-matched template between the screen and the database.
     task_draft, task_origin = _task_draft_for_commit(session, draft, task_draft)
     _validate_commit_draft(draft)
+    _reject_unapproved_shell_steps(draft)
     if task_draft is not None:
         _validate_task_draft(task_draft)
+
+    # The contract check runs before anything is written: a workflow that is
+    # guaranteed to park at runtime must not first become an agent, a task and
+    # a schedule that someone then has to clean up. The builder session is left
+    # intact on refusal so the author can fix the draft and commit again.
+    flow_json = _normalize_agent_workflow([step.model_dump() for step in draft.flow])
+    contract_report, refusal = await _check_workflow_contract(
+        flow_json,
+        commit_incomplete=body.commit_incomplete,
+    )
+    if refusal is not None:
+        return refusal
 
     store = _store()
     agent = store.create_agent(
@@ -1113,7 +1433,7 @@ async def builder_commit(body: BuilderCommitRequest) -> dict[str, Any]:
         provider_id=draft.provider_id,
         model=draft.model,
         tools_json=[tool.model_dump() for tool in draft.tools],
-        flow_json=_normalize_agent_workflow([step.model_dump() for step in draft.flow]),
+        flow_json=flow_json,
         policy_overrides_json={},
     )
     for memory_seed in draft.memory_seeds:
@@ -1174,17 +1494,28 @@ async def builder_commit(body: BuilderCommitRequest) -> dict[str, Any]:
         }
 
     result["agent"] = _agent_with_next_fire(store.get_agent(agent["id"]) or agent)
+    readiness_fact = _contract_readiness_fact(
+        contract_report,
+        saved_incomplete=bool(body.commit_incomplete and contract_report.has_blocking),
+    )
+    summary = _commit_summary(
+        agent_fact=agent_fact,
+        task_fact=task_fact,
+        schedule_fact=schedule_fact,
+    )
+    # The summary is the sentence a user reads instead of the payload. A saved
+    # workflow that will stall belongs in that sentence, not only in a field
+    # nobody renders yet.
+    if not readiness_fact["ok"] and readiness_fact["message"]:
+        summary = f"{summary} {readiness_fact['message']}".strip()
     result["commit_result"] = {
         "agent": agent_fact,
         "task": task_fact,
         "schedule": schedule_fact,
         # The single question the user actually asked: will this run by itself?
         "runs_unattended": bool(schedule_fact.get("created") and schedule_fact.get("enabled")),
-        "summary": _commit_summary(
-            agent_fact=agent_fact,
-            task_fact=task_fact,
-            schedule_fact=schedule_fact,
-        ),
+        "readiness": readiness_fact,
+        "summary": summary,
     }
     delete_builder_session(body.session_id)
     return result
@@ -1391,12 +1722,26 @@ async def list_agents(
 
 
 @router.post("/agents", dependencies=[Depends(verify_api_key)], response_model=None)
-async def create_agent(body: AgentCreate) -> dict[str, Any] | JSONResponse:
+async def create_agent(body: AgentCreateBody) -> dict[str, Any] | JSONResponse:
+    """Create an agent — unless its workflow cannot run as written.
+
+    The same gate as ``builder_commit``. A workflow does not become safe by
+    arriving through a different door: the dashboard, a script and the phone
+    all reach an agent definition through this route, so a check that only the
+    builder performed would be a check the product does not have.
+    """
     if body.id in PSEUDO_AGENT_IDS:
         return JSONResponse(
             status_code=409,
             content={"error": "agent_id_conflict"},
         )
+    flow_json = _normalize_agent_workflow(body.flow_json)
+    contract_report, refusal = await _check_workflow_contract(
+        flow_json,
+        commit_incomplete=body.commit_incomplete,
+    )
+    if refusal is not None:
+        return refusal
     agent = _store().create_agent(
         name=body.name,
         description=body.description,
@@ -1404,10 +1749,20 @@ async def create_agent(body: AgentCreate) -> dict[str, Any] | JSONResponse:
         provider_id=body.provider_id,
         model=body.model,
         tools_json=body.tools_json,
-        flow_json=_normalize_agent_workflow(body.flow_json),
+        flow_json=flow_json,
         policy_overrides_json=body.policy_overrides_json,
     )
-    return _agent_with_next_fire(agent)
+    payload = _agent_with_next_fire(agent)
+    readiness_fact = _contract_readiness_fact(
+        contract_report,
+        saved_incomplete=bool(body.commit_incomplete and contract_report.has_blocking),
+    )
+    # Attached only when there is something to say. An agent payload is the
+    # same shape everywhere it is read; a permanent `readiness: {"ok": true}`
+    # on this one route would suggest `GET /agents` should carry it too.
+    if not readiness_fact["ok"]:
+        payload["readiness"] = readiness_fact
+    return payload
 
 
 @router.get("/agents/{agent_id}", dependencies=[Depends(verify_api_key)], response_model=None)
@@ -1543,7 +1898,7 @@ async def run_agent_once(
 @router.patch("/agents/{agent_id}", dependencies=[Depends(verify_api_key)], response_model=None)
 async def update_agent(
     agent_id: str,
-    body: AgentUpdate,
+    body: AgentUpdateBody,
 ) -> dict[str, Any] | JSONResponse:
     """Apply a patch, minus any part of it that would be stored and never run.
 
@@ -1555,8 +1910,21 @@ async def update_agent(
     fields are refused and, more importantly, which are not.
     """
     patch = body.model_dump(exclude_unset=True)
+    # Route-level field, never a column: strip it before the patch reaches the
+    # store or the origin guard.
+    commit_incomplete = bool(patch.pop("commit_incomplete", False))
+    contract_report: ContractReport | None = None
     if "flow_json" in patch:
         patch["flow_json"] = _normalize_agent_workflow(patch["flow_json"])
+        # A patch replaces the workflow wholesale, so the workflow this agent
+        # will actually run is the one in the patch — checked on the same terms
+        # as a fresh create.
+        contract_report, refusal = await _check_workflow_contract(
+            patch["flow_json"],
+            commit_incomplete=commit_incomplete,
+        )
+        if refusal is not None:
+            return refusal
     existing = _store().get_agent(agent_id)
     if existing:
         try:
@@ -1580,7 +1948,15 @@ async def update_agent(
         return _pseudo_agent_protected_response()
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    return _agent_with_next_fire(agent)
+    payload = _agent_with_next_fire(agent)
+    if contract_report is not None:
+        readiness_fact = _contract_readiness_fact(
+            contract_report,
+            saved_incomplete=bool(commit_incomplete and contract_report.has_blocking),
+        )
+        if not readiness_fact["ok"]:
+            payload["readiness"] = readiness_fact
+    return payload
 
 
 @router.delete("/agents/{agent_id}", dependencies=[Depends(verify_api_key)], response_model=None)

@@ -22,6 +22,7 @@ import httpx
 from core.runtime_paths import runtime_path
 
 from . import device_registration
+from .token_manager import TOKEN_REFRESH_THRESHOLD_SECONDS, TokenManager
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,19 @@ class PairedAccountsManager:
         self._storage_path = storage_path
         self._firebase_config = firebase_config
         self._accounts: dict[str, PairedAccount] = {}
+        self._token_helper: Optional[TokenManager] = None
         self._load()
+
+    @property
+    def _tokens(self) -> TokenManager:
+        """Lazy TokenManager, used only for its two pure token helpers.
+
+        ``TokenManager.__init__`` does no I/O and starts no tasks, so building
+        one on demand is cheap. We never call its network methods here.
+        """
+        if self._token_helper is None:
+            self._token_helper = TokenManager(self._firebase_config or {})
+        return self._token_helper
 
     def _load(self) -> None:
         """Load paired accounts from disk."""
@@ -306,6 +319,54 @@ class PairedAccountsManager:
             logger.error("Token refresh error for %s: %s", user_id, e)
             return None
 
+    async def ensure_valid_token(
+        self,
+        user_id: str,
+        api_key: str,
+    ) -> tuple[Optional[str], bool]:
+        """Return a usable ID token for an account, refreshing it if stale.
+
+        Firebase ID tokens live for one hour. Before this existed, callers
+        reused ``account.id_token`` verbatim however old it was, so every
+        paired account started failing an hour after it was paired. This
+        mirrors ``FirebaseAuthService.ensure_valid_token`` in service.py,
+        which is why that class's writes kept working while these did not.
+
+        A token is refreshed when it is absent, when its expiry cannot be
+        read (a malformed or non-JWT value), or when it expires within
+        ``TOKEN_REFRESH_THRESHOLD_SECONDS``.
+
+        Returns:
+            ``(id_token, refreshed)``. ``id_token`` is None when no usable
+            token could be obtained; ``refreshed`` says whether the token
+            was just re-issued, so callers know a retry would be pointless.
+        """
+        account = self._accounts.get(user_id)
+        if account is None:
+            return None, False
+
+        id_token = account.id_token
+        if not id_token:
+            return await self.refresh_account_token(user_id, api_key), True
+
+        expires_at = self._tokens.extract_token_expiration(id_token)
+        if expires_at is None:
+            # Not a decodable JWT. Never trust it — a stored value like this
+            # is what makes Firestore answer 401 ACCESS_TOKEN_TYPE_UNSUPPORTED.
+            logger.info("Stored token for %s is not a readable JWT; refreshing", user_id)
+            return await self.refresh_account_token(user_id, api_key), True
+
+        remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+        if remaining < TOKEN_REFRESH_THRESHOLD_SECONDS:
+            logger.info(
+                "Token for %s expires in %.0fs, refreshing before write",
+                user_id,
+                remaining,
+            )
+            return await self.refresh_account_token(user_id, api_key), True
+
+        return id_token, False
+
     async def update_url_for_all_accounts(
         self,
         project_id: str,
@@ -332,12 +393,10 @@ class PairedAccountsManager:
         """
         results: dict[str, bool] = {}
 
-        for user_id, account in self._accounts.items():
-            id_token = account.id_token
-
-            # Refresh token if needed
-            if not id_token and account.refresh_token:
-                id_token = await self.refresh_account_token(user_id, api_key)
+        # Snapshot the items: refreshing a token replaces the stored account
+        # object, and we do not want to mutate what we are iterating over.
+        for user_id, account in list(self._accounts.items()):
+            id_token, refreshed = await self.ensure_valid_token(user_id, api_key)
 
             if not id_token:
                 logger.warning("No valid token for account %s, skipping URL update", user_id)
@@ -353,6 +412,27 @@ class PairedAccountsManager:
                 tunnel_url=tunnel_url,
                 local_url=local_url,
             )
+
+            if not success and not refreshed:
+                # The token looked valid locally but Firestore rejected it —
+                # clock skew, a revoked session, or a signing key that rotated
+                # out. Refresh once and retry; register_device is an idempotent
+                # PATCH with an updateMask, so replaying it is safe.
+                logger.info(
+                    "URL update rejected for %s with a locally-valid token; "
+                    "refreshing once and retrying",
+                    user_id,
+                )
+                retry_token = await self.refresh_account_token(user_id, api_key)
+                if retry_token:
+                    success = await device_registration.register_device(
+                        project_id=project_id,
+                        user_id=user_id,
+                        server_id=server_id,
+                        id_token=retry_token,
+                        tunnel_url=tunnel_url,
+                        local_url=local_url,
+                    )
 
             results[user_id] = success
             if success:

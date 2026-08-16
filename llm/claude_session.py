@@ -68,6 +68,13 @@ class ClaudeSession(LlmSession):
     #: the declared tools real, and no other provider has one — the factory
     #: refuses them rather than dropping it. See :meth:`_build_options`.
     cli_agent: CliAgentDefinition | None = None
+    #: MCP servers this session should be able to reach, keyed by server name,
+    #: in the shape ``ClaudeAgentOptions.mcp_servers`` takes
+    #: (``{"type": "stdio", "command": …}`` / ``{"type": "http", "url": …}``).
+    #: Set by the orchestrator from the agent's declared tools; see
+    #: :meth:`set_mcp_servers`. ``None`` means "say nothing", which leaves the
+    #: CLI's own configuration in force — not "no servers".
+    mcp_servers: dict[str, Any] | None = None
     _claude_path: str = field(default="", init=False)
     _session_id: str | None = field(default=None, init=False)
     _client: ClaudeSDKClient | None = field(default=None, init=False)
@@ -133,6 +140,20 @@ class ClaudeSession(LlmSession):
     def has_pending_permission_denials(self) -> bool:
         """Backward-compatible flag for pending permission request."""
         return self._pending_permission_request is not None
+
+    @property
+    def has_pending_permission(self) -> bool:
+        """Whether a live turn is parked on an unanswered permission prompt.
+
+        Both halves matter. ``_pending_permission_request`` alone is the
+        request; ``_turn_in_progress`` is what
+        ``_respond_to_pending_permission`` checks before it hands a decision
+        back to the parked ``can_use_tool`` callback, and it refuses with "No
+        Claude turn in progress" otherwise. The orchestrator asks this before
+        resuming a run from an approval, so answering yes when the turn is gone
+        would turn a resume into an error event instead of a re-execution.
+        """
+        return self._turn_in_progress and self._pending_permission_request is not None
 
     def _resolve_start_cwd(self) -> tuple[str, str | None]:
         """Pick a safe working directory for the Claude subprocess.
@@ -208,8 +229,44 @@ class ClaudeSession(LlmSession):
             options.model = self.model.strip()
         if self._session_id:
             options.resume = self._session_id
+        self._apply_mcp_servers(options)
         self._apply_cli_agent(options)
         return options
+
+    def _apply_mcp_servers(self, options: ClaudeAgentOptions) -> None:
+        """Hand the declared MCP servers to the SDK, if there are any.
+
+        ``ClaudeAgentOptions.mcp_servers`` exists in claude-agent-sdk 0.2.128
+        (``types.py``: ``dict[str, McpServerConfig] | str | Path``) and is the
+        only route from an agent's declared tools to the process that would
+        run them — without it the agent's ``tools_json`` never left the
+        database and the run used whatever the user's CLI happened to have.
+
+        ``allowed_tools`` is deliberately *not* set alongside it. In this SDK
+        that field pre-approves tool calls, so listing ``mcp__x__y`` there
+        would let the injected servers run without the approval round-trip
+        that :meth:`_on_can_use_tool` exists to perform. The servers are made
+        reachable; each call still asks.
+        """
+        servers = self.mcp_servers
+        if not servers:
+            return
+        options.mcp_servers = dict(servers)
+
+    async def set_mcp_servers(self, servers: dict[str, Any] | None) -> None:
+        """Set the MCP servers for subsequent turns.
+
+        Options are built once per connection, so a live client is closed when
+        the set changes — the next turn reconnects with the new servers.
+        Mutating the field alone would leave a running session claiming
+        servers it was never started with.
+        """
+        next_servers = dict(servers) if servers else None
+        if next_servers == self.mcp_servers:
+            return
+        self.mcp_servers = next_servers
+        if self.is_running:
+            await self.close()
 
     def _apply_cli_agent(self, options: ClaudeAgentOptions) -> None:
         """Attach the agent definition and select it, if there is one."""

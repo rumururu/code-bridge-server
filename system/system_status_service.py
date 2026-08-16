@@ -13,6 +13,28 @@ def get_health_status_for_current_server() -> dict[str, str]:
     return {"status": "ok", "service": "claude-bridge"}
 
 
+def is_cloudflared_installed() -> bool:
+    """Whether the ``cloudflared`` binary is reachable from this process.
+
+    "From this process" is the load-bearing part: the launcher used to start
+    the server with a login-shell-free PATH, so a cloudflared installed by
+    Homebrew looked missing. With the PATH bootstrap in place this probe can
+    be shown to the user, which is what the dashboard banner does.
+
+    Deliberately delegates to :meth:`TunnelService.is_cloudflared_installed`
+    rather than calling ``shutil.which`` again — one definition of "installed"
+    keeps the banner and the tunnel start path from disagreeing.
+    """
+    try:
+        from remote.tunnel_service import TunnelService
+    except ImportError:
+        return False
+    try:
+        return bool(TunnelService.is_cloudflared_installed())
+    except Exception:  # pragma: no cover - probe must never break the overview
+        return False
+
+
 def get_debug_port_snapshot_for_current_server(
     *,
     config: Any | None = None,

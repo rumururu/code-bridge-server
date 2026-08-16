@@ -154,6 +154,25 @@ class ApprovalStore:
             if not is_request_expired(_row_to_request(row))
         ]
 
+    def list_expired_pending(self) -> list[dict[str, Any]]:
+        """Pending rows whose ``expires_at`` has already passed.
+
+        The complement of :meth:`list_pending`, which hides exactly these. They
+        are still ``pending`` on disk because nothing has swept them yet — a run
+        parked on one of them is parked on an approval that can never be
+        answered, which is what the expiry sweep exists to end.
+        """
+        with get_db_connection(use_row_factory=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM approval_requests
+                WHERE status = 'pending' AND expires_at IS NOT NULL
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+        requests = [_row_to_request(row) for row in rows]
+        return [request for request in requests if is_request_expired(request)]
+
     def mark_expired(self, approval_id: str) -> dict[str, Any] | None:
         """Flip a pending request to ``status = 'expired'`` if it's still pending."""
         with get_db_connection() as conn:

@@ -23,13 +23,19 @@ that can actually gate a workflow step's execution:
    ``_approval_operation_for_tool``, and that function can return any of
    ``LLM_TOOL_APPROVAL_OPERATIONS`` depending on which tool the model happens
    to reach for. Nothing on this side of the model call can predict which of
-   the four it will actually use for a given run — an ``llm`` step whose
-   prompt is "summarize the last build log" might only ever trigger
-   ``provider.tool``, or it might also shell out, write a file, or commit.
-   Rather than pretend to that precision, an ``llm`` step is reported as
-   requiring the *entire* ``LLM_TOOL_APPROVAL_OPERATIONS`` set: a deliberate,
-   documented superset, honest about not knowing the subset in advance
-   rather than a claim that every ``llm`` step definitely needs all four.
+   them it will actually use for a given run — an ``llm`` step whose prompt
+   is "summarize the last build log" might only ever trigger ``file.read``,
+   or it might also shell out, write a file, or commit. Rather than pretend
+   to that precision, an ``llm`` step is reported as requiring the *entire*
+   ``LLM_TOOL_APPROVAL_OPERATIONS`` set: a deliberate, documented superset,
+   honest about not knowing the subset in advance rather than a claim that
+   every ``llm`` step definitely needs all of them.
+
+   Note that "requires a standing rule" is a superset in a second sense
+   since ``file.read`` joined the set: ``file.read`` is allowed by default
+   policy, so a flow that only reads will not actually stall without a rule
+   for it. The rail overreports rather than underreports, which is the
+   direction that does not strand a scheduled run.
 
 2. **Every other current workflow step type** — ``shell``, ``browser_action``,
    ``device_action``, ``android_action``, ``mobile_action``, ``app_action``,

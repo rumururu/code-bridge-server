@@ -1,5 +1,8 @@
 """Approval service that combines policy decisions, persistence, and audit."""
 
+import logging
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from audit.audit_store import get_audit_store
@@ -7,6 +10,105 @@ from policy.policy_engine import default_policy_snapshot
 from policy.policy_store import decide_policy_with_rules, get_policy_rule_store
 
 from .approval_store import get_approval_store, is_request_expired
+
+logger = logging.getLogger(__name__)
+
+# How long a fresh approval stays answerable. A day is long enough that a
+# prompt raised overnight is still there in the morning, and short enough that
+# a run nobody ever answers stops occupying its task within a day instead of
+# until the next server restart. Override with
+# ``CODEBRIDGE_APPROVAL_EXPIRY_SECONDS``; ``0`` (or negative) means "never
+# expires", which is an explicit opt-out and not the default because the
+# default used to be, in effect, forever.
+_DEFAULT_APPROVAL_EXPIRY_SECONDS = 24 * 60 * 60
+
+
+def approval_expiry_seconds() -> int:
+    raw = os.environ.get("CODEBRIDGE_APPROVAL_EXPIRY_SECONDS")
+    if raw is None:
+        return _DEFAULT_APPROVAL_EXPIRY_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_APPROVAL_EXPIRY_SECONDS
+    return max(0, value)
+
+
+def default_approval_expires_at(*, now: datetime | None = None) -> str | None:
+    """When an approval created right now should stop being answerable.
+
+    ``None`` when expiry is switched off, which callers pass straight through
+    to ``expires_at=None`` — the pre-expiry behaviour.
+    """
+    seconds = approval_expiry_seconds()
+    if seconds <= 0:
+        return None
+    moment = now or datetime.now(tz=timezone.utc)
+    return (moment + timedelta(seconds=seconds)).isoformat()
+
+
+def expire_approval(
+    approval_id: str,
+    *,
+    trigger: str,
+    attempted_decision: str | None = None,
+    approver: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Flip a pending approval to ``expired`` and record that in the audit log.
+
+    An expiry is a denial, so it has to leave the same kind of trail a denial
+    does. ``trigger`` says who noticed — the periodic sweep, a resume that
+    found a stale row, or an approver who pressed a button too late.
+    """
+    store = get_approval_store()
+    request = store.get_request(approval_id)
+    if not isinstance(request, dict):
+        return None
+    expired = store.mark_expired(approval_id) or request
+    payload: dict[str, Any] = {
+        "approval_id": approval_id,
+        "expires_at": request.get("expires_at"),
+        "trigger": trigger,
+    }
+    if attempted_decision:
+        payload["attempted_decision"] = attempted_decision
+    if approver is not None:
+        payload["approver"] = approver
+    get_audit_store().record_event(
+        operation=request["operation"],
+        run_id=request["run_id"],
+        risk_level=request["risk_level"],
+        decision="approval_expired",
+        payload=payload,
+    )
+    return expired
+
+
+def expire_stale_approvals() -> list[dict[str, Any]]:
+    """Expire every pending approval whose deadline has passed.
+
+    Returns the expired rows so a caller (the scheduler sweep) can settle the
+    runs that were parked on them. Never raises: a broken row must not stop the
+    rest of the sweep.
+    """
+    try:
+        stale = get_approval_store().list_expired_pending()
+    except Exception:
+        logger.exception("could not list expired approvals")
+        return []
+    expired: list[dict[str, Any]] = []
+    for request in stale:
+        approval_id = request.get("id")
+        if not isinstance(approval_id, str) or not approval_id:
+            continue
+        try:
+            row = expire_approval(approval_id, trigger="sweep")
+        except Exception:
+            logger.exception("could not expire approval %s", approval_id)
+            continue
+        if isinstance(row, dict):
+            expired.append(row)
+    return expired
 
 
 def request_approval_for_operation(
@@ -124,18 +226,11 @@ def decide_approval(
     # dedicated audit event so reviewers can see expired-then-actioned
     # attempts in the timeline.
     if is_request_expired(request):
-        store.mark_expired(approval_id)
-        get_audit_store().record_event(
-            operation=request["operation"],
-            run_id=request["run_id"],
-            risk_level=request["risk_level"],
-            decision="approval_expired",
-            payload={
-                "approval_id": approval_id,
-                "attempted_decision": decision,
-                "expires_at": request.get("expires_at"),
-                "approver": approver or {},
-            },
+        expire_approval(
+            approval_id,
+            trigger="decision",
+            attempted_decision=decision,
+            approver=approver or {},
         )
         return {
             "error": "Approval request has expired",

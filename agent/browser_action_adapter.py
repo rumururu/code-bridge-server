@@ -8,6 +8,9 @@ Playwright-backed adapter when the runtime has a browser available.
 from __future__ import annotations
 
 import re
+import sys
+import time
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -15,7 +18,22 @@ from typing import Any, Protocol
 from agent.tool_artifacts import ARTIFACT_ROOT
 from .browser_runtime_manager import get_browser_runtime_manager
 
-PLAYWRIGHT_CHROMIUM_INSTALL_COMMAND = "server/.venv/bin/python -m playwright install chromium"
+# Derived from the interpreter that is actually running this server, not from a
+# guessed repo-relative path. The old literal ("server/.venv/bin/python …")
+# named a directory that exists in no install: the dev tree uses `server/venv`
+# and a real install uses `~/.code-bridge/venv`, so the diagnostic told the
+# operator to run a command that could not work.
+PLAYWRIGHT_CHROMIUM_INSTALL_COMMAND = f"{sys.executable} -m playwright install chromium"
+
+# `_probe_browser_runtime_readiness` starts the Playwright driver process on
+# every call, so anything that asks per request (commit gate, dashboard rail,
+# capability catalog) would pay for a subprocess launch each time. The answer
+# only changes when someone installs or removes Playwright, so a short TTL is
+# enough to stop the repeat cost without going stale in a way that matters.
+BROWSER_READINESS_CACHE_TTL_SECONDS = 60.0
+
+_readiness_cache: dict[str, Any] | None = None
+_readiness_cached_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -294,8 +312,50 @@ def get_browser_action_adapter() -> BrowserActionAdapter:
     return PlaywrightBrowserActionAdapter()
 
 
-async def get_browser_runtime_readiness() -> dict[str, Any]:
-    """Return explicit Playwright/Chromium readiness diagnostics."""
+async def get_browser_runtime_readiness(*, force_refresh: bool = False) -> dict[str, Any]:
+    """Return explicit Playwright/Chromium readiness diagnostics.
+
+    Cached for ``BROWSER_READINESS_CACHE_TTL_SECONDS``. Pass
+    ``force_refresh=True`` right after an install to re-probe immediately.
+    The cache never invents readiness: an unavailable runtime stays reported
+    as unavailable until a probe says otherwise.
+    """
+    global _readiness_cache, _readiness_cached_at
+
+    if not force_refresh:
+        cached = get_cached_browser_readiness_sync()
+        if cached is not None:
+            return cached
+
+    readiness = await _probe_browser_runtime_readiness()
+    _readiness_cache = deepcopy(readiness)
+    _readiness_cached_at = time.monotonic()
+    return readiness
+
+
+def get_cached_browser_readiness_sync() -> dict[str, Any] | None:
+    """Return the cached readiness snapshot, or None when there is no fresh one.
+
+    Synchronous on purpose: callers that must not start a driver process (or
+    cannot await) get either a real recent answer or ``None``. ``None`` means
+    "unknown" — never treat it as ready.
+    """
+    if _readiness_cache is None:
+        return None
+    if (time.monotonic() - _readiness_cached_at) >= BROWSER_READINESS_CACHE_TTL_SECONDS:
+        return None
+    return deepcopy(_readiness_cache)
+
+
+def reset_browser_readiness_cache() -> None:
+    """Drop the cached snapshot (tests, and after an install completes)."""
+    global _readiness_cache, _readiness_cached_at
+    _readiness_cache = None
+    _readiness_cached_at = 0.0
+
+
+async def _probe_browser_runtime_readiness() -> dict[str, Any]:
+    """Actually start Playwright and look for the Chromium executable."""
     readiness: dict[str, Any] = {
         "ready": False,
         "playwright_python": False,

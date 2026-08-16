@@ -129,6 +129,13 @@ _SECRET_FILENAMES = (
     "google-services.json",
     "GoogleService-Info.plist",
     "firebase_config.json",
+    # Firebase Admin SDK key: push-send authority, and per this repo's own
+    # do-not-commit list, not reissuable. It was slipping through — the name
+    # matches neither `firebase_config.json` above nor any fragment below
+    # ("service_account" is not "secret") — which mattered little while every
+    # tool read needed confirmation and matters a great deal now that an
+    # in-workspace read is allowed by default.
+    "firebase_service_account.json",
     "server_info.json",
     "AuthKey",  # prefix match
 )
@@ -143,6 +150,12 @@ _SECRET_NAME_FRAGMENTS = (
     ".jks",
     "secret",
     "private_key",
+    # Dotenv files are the one credential store that normally lives *inside*
+    # the workspace, so unlike an SSH key they are not caught by the
+    # home-sensitive rules above and would otherwise classify as
+    # `workspace_internal` (allow). Matching the fragment covers `.env`,
+    # `.env.local`, `.env.production` and `.envrc` alike.
+    ".env",
 )
 
 

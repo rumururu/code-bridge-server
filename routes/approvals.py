@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
+from agent.approval_resume import maybe_resume_run_for_decision
 from approvals.approval_models import ApprovalDecisionCreate, ApprovalRequestCreate
 from approvals.approval_service import (
     decide_approval,
@@ -60,6 +61,16 @@ async def create_approval_decision(
         raise HTTPException(status_code=404, detail=f"Approval '{approval_id}' not found")
     if result.get("error"):
         return JSONResponse(status_code=403, content=result)
+
+    # Recording the decision is not the point of pressing approve — the run
+    # carrying on is. If this approval is the one a run is parked on, hand the
+    # decision to the orchestrator and let it continue in the background; the
+    # response comes back immediately either way.
+    resumed = await maybe_resume_run_for_decision(
+        result.get("approval"), decision=body.decision
+    )
+    if resumed is not None:
+        result = {**result, "resume": resumed}
     return result
 
 

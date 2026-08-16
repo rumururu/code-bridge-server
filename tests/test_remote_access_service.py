@@ -43,7 +43,16 @@ class RemoteAccessServiceTest(unittest.IsolatedAsyncioTestCase):
             "server_id": "server-1",
         }
 
+        # `FIREBASE_AVAILABLE` is decided at import by whether a
+        # `firebase_config.json` exists on this machine
+        # (`system/optional_services.py:31`), and `_extract_firebase_status`
+        # short-circuits to "not authenticated" when it is False — so without
+        # this patch the test passes only on a machine that happens to have a
+        # configured server, and stubbing `get_firebase_auth` is never even
+        # reached. It read as a green test of the mock; it was a test of the
+        # developer's own install.
         with (
+            patch.object(remote_access_service, "FIREBASE_AVAILABLE", True),
             patch.object(remote_access_service, "get_tunnel_service", return_value=None),
             patch.object(remote_access_service, "get_firebase_auth", return_value=fake_firebase_auth),
         ):

@@ -9,11 +9,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from approvals.approval_service import expire_approval
+from approvals.approval_store import get_approval_store, is_request_expired
 from audit.route_audit import record_api_action
 from chat.chat_session_service import ChatProviderSelection, create_chat_session, get_chat_provider_selection
 from chat.chat_stream_service import stream_claude_turn
 from core.config import get_config
 from core.runtime_paths import runtime_dir
+from llm.claude_session import get_session_manager
 from policy.policy_gate import evaluate_direct_action_gate
 from terminal_action_service import (
     execute_terminal_command_streaming_for_current_server,
@@ -28,7 +31,11 @@ from .browser_action_executor import execute_browser_actions
 from .browser_runtime_manager import get_browser_runtime_manager
 from .browser_session_store import get_browser_session_store
 from .capability_adapters import describe_capability_adapter
-from .capability_registry import refresh_capability_registry
+from .capability_registry import (
+    detected_mcp_server_configs,
+    refresh_capability_registry,
+    verify_declared_mcp_ids,
+)
 from .prompt_composer import compose_system_prompt
 from .cli_agent_runtime import find_cli_agent_source_path, resolve_cli_agent_definition
 from .cli_agent_sources import cli_agent_reference_prompt
@@ -81,6 +88,12 @@ class AgentTaskRunSink:
     def __init__(self, *, run_id: str) -> None:
         self.agent_run_id = run_id
         self.permission_required = False
+        # What the turn parked on, when it parked on an approval: the approval
+        # row the user will decide, the tool that asked, and the concrete thing
+        # it wants to touch. Without this the checkpoint can only say "approval
+        # required", and the phone shows a card with nothing on it that says
+        # which run or which file it belongs to.
+        self.permission_denial: dict[str, Any] | None = None
         self.error_message: str | None = None
         # What the model actually said. Without it a completed LLM step reads
         # "Workflow step completed." and the answer — the diagnosis you asked
@@ -96,6 +109,7 @@ class AgentTaskRunSink:
         event_type = str(data.get("type") or "background")
         if event_type == "permission_required":
             self.permission_required = True
+            self.permission_denial = self._extract_permission_denial(data)
         if event_type == "error":
             message = data.get("message")
             self.error_message = str(message) if message is not None else "Unknown error"
@@ -202,6 +216,32 @@ class AgentTaskRunSink:
     # ------------------------------------------------------------------
     # Decision-marker helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_permission_denial(data: dict[str, Any]) -> dict[str, Any] | None:
+        """Pull the approval identity out of a ``permission_required`` event.
+
+        ``chat_stream_service`` sends one denial per parked tool call
+        (``denials[0]``) and repeats the approval id at the top level. Read the
+        denial first and fall back to the envelope, so an older or partial
+        payload still yields whatever identity it does carry rather than
+        nothing at all.
+        """
+        denials = data.get("denials")
+        first = (
+            denials[0]
+            if isinstance(denials, list) and denials and isinstance(denials[0], dict)
+            else {}
+        )
+        approval_id = first.get("approval_id") or data.get("approval_id")
+        tool_name = first.get("tool_name")
+        tool_input = first.get("input")
+        denial: dict[str, Any] = {
+            "approval_id": approval_id if isinstance(approval_id, str) else None,
+            "tool_name": tool_name if isinstance(tool_name, str) else None,
+            "input": tool_input if isinstance(tool_input, dict) else {},
+        }
+        return denial
 
     @staticmethod
     def _extract_assistant_text(data: dict[str, Any]) -> str:
@@ -432,8 +472,20 @@ def prepare_task_orchestration(
     }
 
 
-def resume_task_orchestration(task_id: str) -> dict[str, Any] | None:
-    """Build execution payload for resuming a task from its active checkpoint."""
+def resume_task_orchestration(
+    task_id: str,
+    *,
+    permission_decision: str | None = None,
+) -> dict[str, Any] | None:
+    """Build execution payload for resuming a task from its active checkpoint.
+
+    ``permission_decision`` is what the user just pressed on an approval card
+    ("approve_once", "deny", …). It rides along in the execution payload so the
+    parked llm step can answer the provider's still-open permission callback
+    with it instead of guessing, or re-reading a row that may not have landed
+    yet. Left unset (a plain "resume" tap) the step reads the approval record
+    itself and stays parked if nothing has been decided.
+    """
     store = get_agent_store()
     checkpoint = store.get_task_checkpoint(task_id)
     if checkpoint is None:
@@ -463,21 +515,24 @@ def resume_task_orchestration(task_id: str) -> dict[str, Any] | None:
             "checkpoint": checkpoint.get("checkpoint"),
         },
     )
+    execution: dict[str, Any] = {
+        "auto_start": True,
+        "resume": True,
+        "run_id": run_id,
+        "task_id": task_id,
+        "project_name": project_name,
+        "project_path": project_path,
+        "provider_id": provider_id,
+        "model": run.get("model"),
+        "launch_message": launch_message,
+    }
+    if isinstance(permission_decision, str) and permission_decision.strip():
+        execution["permission_decision"] = permission_decision.strip()
     return {
         "task": task,
         "run": run,
         "checkpoint": checkpoint,
-        "execution": {
-            "auto_start": True,
-            "resume": True,
-            "run_id": run_id,
-            "task_id": task_id,
-            "project_name": project_name,
-            "project_path": project_path,
-            "provider_id": provider_id,
-            "model": run.get("model"),
-            "launch_message": launch_message,
-        },
+        "execution": execution,
     }
 
 
@@ -806,6 +861,13 @@ async def _execute_single_workflow_task_step(
             current_step=step,
         ),
     )
+    if completed is None:
+        # Parked on an approval, same as the browser/app branches above.
+        return {
+            "task": store.get_task(task_id),
+            "step": store.get_task_step(step_id),
+            "status": "waiting_for_user",
+        }
     return {
         "task": store.get_task(task_id),
         "step": store.get_task_step(step_id),
@@ -827,6 +889,10 @@ async def execute_task_orchestration(execution: dict[str, Any]) -> None:
     project_name = str(execution.get("project_name") or GLOBAL_TASK_PROJECT_NAME)
     project_path = str(execution.get("project_path") or _global_task_path())
     launch_message = str(execution.get("launch_message") or "")
+    permission_decision_raw = execution.get("permission_decision")
+    permission_decision = (
+        permission_decision_raw if isinstance(permission_decision_raw, str) else None
+    )
 
     steps = _steps_for_run(store, task_id, run_id)
     if _has_workflow_backed_steps(steps):
@@ -839,6 +905,7 @@ async def execute_task_orchestration(execution: dict[str, Any]) -> None:
             project_path=project_path,
             launch_message=launch_message,
             steps=steps,
+            permission_decision=permission_decision,
         )
         return
 
@@ -868,6 +935,17 @@ async def execute_task_orchestration(execution: dict[str, Any]) -> None:
             project_path=project_path,
             selection=selection,
         )
+        # The workflow-less path runs the agent's tools too, so it gets the
+        # same injection and the same report. Leaving it out would mean an
+        # agent's declared servers reached the runtime only when it happened
+        # to have a workflow.
+        await _apply_declared_mcp_servers(
+            session,
+            agent_id=_step_agent_id(store.get_task(task_id) or {}),
+            run_id=run_id,
+            task_id=task_id,
+            provider_id=provider_id,
+        )
         completed = await stream_claude_turn(
             sink,
             session,
@@ -887,13 +965,29 @@ async def execute_task_orchestration(execution: dict[str, Any]) -> None:
         return
 
     if sink.permission_required:
+        # Same identity *and the same words* the workflow path records on its
+        # checkpoint. The run status stays `blocked` (that is what a non-
+        # workflow run's step and every reader of it already call this), but
+        # the reason, the sentence, and the required user action are the ones
+        # the workflow path writes, so the two paths stop describing one
+        # situation two ways.
+        denial = sink.permission_denial or {}
+        tool_name = denial.get("tool_name")
+        tool_target = _approval_tool_target(denial.get("input"))
         _finish_execution(
             task_id=task_id,
             run_id=run_id,
             execute_step=execute_step,
             summary_step=summary_step,
             status="blocked",
-            error={"message": "Waiting for approval."},
+            error={
+                "message": _approval_wait_prompt(tool_name, tool_target),
+                "reason": APPROVAL_WAIT_REASON,
+                "required_user_action": _required_user_action(APPROVAL_WAIT_REASON),
+                "approval_id": denial.get("approval_id"),
+                "tool_name": tool_name,
+                "tool_target": tool_target,
+            },
         )
         return
     if sink.error_message or not completed:
@@ -974,6 +1068,7 @@ async def _execute_workflow_orchestration(
     project_path: str,
     launch_message: str,
     steps: list[dict[str, Any]],
+    permission_decision: str | None = None,
 ) -> None:
     """Drive a workflow run and make sure it ends.
 
@@ -1008,6 +1103,7 @@ async def _execute_workflow_orchestration(
             project_path=project_path,
             launch_message=launch_message,
             steps=steps,
+            permission_decision=permission_decision,
         )
     except Exception as exc:
         logger.exception(
@@ -1071,6 +1167,7 @@ async def _drive_workflow_steps(
     project_path: str,
     launch_message: str,
     steps: list[dict[str, Any]],
+    permission_decision: str | None = None,
 ) -> None:
     store = get_agent_store()
     step_index = 0
@@ -1095,7 +1192,15 @@ async def _drive_workflow_steps(
         if not isinstance(step_input, dict) or not step_input.get("workflow_step_id"):
             step_index += 1
             continue
-        if step.get("status") == "waiting_for_user" and _step_has_user_response(step):
+        # A user *message* completes a step that was waiting for a message. An
+        # approval park is waiting for a decision on a specific tool call, and
+        # marking it completed here would skip the tool call the run stopped
+        # for and report the step as done without it ever having run.
+        if (
+            step.get("status") == "waiting_for_user"
+            and _step_has_user_response(step)
+            and _approval_checkpoint_for_step(step) is None
+        ):
             _complete_step(
                 task=store.get_task(task_id) or {"id": task_id},
                 step_id=step["id"],
@@ -1284,7 +1389,17 @@ async def _drive_workflow_steps(
                 steps,
                 current_step=step,
             ),
+            permission_decision=permission_decision,
         )
+        # One decision answers one parked prompt. If the same turn parks again
+        # on a different tool, that is a new question for the user, not a
+        # second use of the answer they already gave.
+        permission_decision = None
+        # Parked on a person (None) is not a failed step: running the failure
+        # policy here is what used to overwrite the approval checkpoint with an
+        # `ask_user` one a second later.
+        if completed is None:
+            return
         if not completed:
             next_index = _apply_workflow_failure_policy(
                 task_id=task_id,
@@ -1311,6 +1426,304 @@ async def _drive_workflow_steps(
     _finish_workflow_from_steps(task_id=task_id, run_id=run_id)
 
 
+#: What the model is told when the user refused the tool call it parked on.
+#: It goes back through the SDK's `can_use_tool` result, so the turn keeps
+#: running and the model gets to wrap up (or fail) knowing why.
+_APPROVAL_DENIED_MESSAGE = (
+    "The user denied this tool call. Do not retry it; finish with what you "
+    "have and say plainly what you could not do."
+)
+
+#: Decision strings that mean "go ahead". `approvals/approval_models.py`
+#: constrains the API to approve_once / approve_for_session / approve_rule /
+#: deny / deny_with_instruction; the plain "approve"/"allow"/"deny" spellings
+#: are accepted too so an internal caller does not have to know the API's
+#: vocabulary to answer a parked turn.
+_APPROVAL_ALLOW_DECISIONS = frozenset(
+    {"allow", "approve", "approved", "approve_once", "approve_for_session", "approve_rule"}
+)
+_APPROVAL_DENY_DECISIONS = frozenset(
+    {"deny", "denied", "deny_with_instruction", "reject", "rejected", "expired"}
+)
+
+
+#: What a run parked on a tool approval is called, everywhere. The workflow
+#: path writes it as a checkpoint reason and the non-workflow path as an error
+#: reason; both describe one situation and must say so with one word, because
+#: the app groups and labels these by reason string.
+APPROVAL_WAIT_REASON = "approval_required"
+
+
+def _approval_checkpoint_for_step(step: dict[str, Any]) -> dict[str, Any] | None:
+    """The step's own approval checkpoint, if it is parked on one right now."""
+    if step.get("status") != "waiting_for_user":
+        return None
+    output = step.get("output")
+    checkpoint = output.get("checkpoint") if isinstance(output, dict) else None
+    if not isinstance(checkpoint, dict):
+        return None
+    if checkpoint.get("reason") != APPROVAL_WAIT_REASON:
+        return None
+    return checkpoint
+
+
+def _approval_checkpoint_extra(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    """The approval identity to carry over when a checkpoint is re-written."""
+    return {
+        "approval_id": checkpoint.get("approval_id"),
+        "tool_name": checkpoint.get("tool_name"),
+        "tool_target": checkpoint.get("tool_target"),
+    }
+
+
+def _approval_tool_target(tool_input: Any) -> str | None:
+    """The one concrete thing a parked tool call wants to touch.
+
+    A checkpoint that says only "approval required" is not answerable from a
+    phone. Tool inputs differ per tool, so read the handful of keys that name a
+    target and take the first that is there; anything unrecognised gets no
+    target rather than a guess.
+    """
+    if not isinstance(tool_input, dict):
+        return None
+    for key in ("file_path", "path", "command", "url", "pattern", "notebook_path", "query"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+_GENERIC_APPROVAL_PROMPT = "Approval is required before this workflow step can continue."
+
+
+def _approval_wait_prompt(tool_name: Any, tool_target: Any) -> str:
+    """The sentence a phone shows for a run parked on a tool approval.
+
+    "A task is waiting for you" is not answerable from a lock screen — the
+    question is always *which tool wants to touch what*, and both are already
+    on the checkpoint. Falls back to the generic line only when the tool call
+    named neither (an unrecognised tool input, see `_approval_tool_target`),
+    because a half-built sentence reads worse than a plain one.
+    """
+    name = tool_name.strip() if isinstance(tool_name, str) else ""
+    target = tool_target.strip() if isinstance(tool_target, str) else ""
+    if name and target:
+        return f"{name} needs your approval: {target}"
+    if name:
+        return f"{name} needs your approval before this step can continue."
+    return _GENERIC_APPROVAL_PROMPT
+
+
+def _resolve_permission_decision(
+    checkpoint: dict[str, Any],
+    permission_decision: str | None,
+) -> str | None:
+    """``"allow"``, ``"deny"``, or ``None`` when nobody has decided yet.
+
+    An explicit decision (the approval endpoint handing over what the user just
+    pressed) wins. Otherwise the approval row itself is the record of truth —
+    a manual resume from the app carries no decision, and the run must not
+    invent one.
+    """
+    explicit = str(permission_decision or "").strip().lower()
+    if explicit in _APPROVAL_ALLOW_DECISIONS:
+        return "allow"
+    if explicit in _APPROVAL_DENY_DECISIONS:
+        return "deny"
+
+    approval_id = checkpoint.get("approval_id")
+    if not isinstance(approval_id, str) or not approval_id:
+        return None
+    try:
+        approval = get_approval_store().get_request(approval_id)
+    except Exception:
+        logger.exception("could not read approval %s while resuming", approval_id)
+        return None
+    if not isinstance(approval, dict):
+        return None
+    status = str(approval.get("status") or "").strip().lower()
+    if status == "approved":
+        return "allow"
+    if status in {"denied", "expired"}:
+        return "deny"
+    if status == "pending" and is_request_expired(approval):
+        # Past its deadline but the sweep has not reached it yet. Treat it as
+        # the refusal it is — and write that down first, so the row agrees with
+        # what the run is about to do instead of the run quietly denying an
+        # approval the queue still shows as answerable.
+        try:
+            expire_approval(approval_id, trigger="resume")
+        except Exception:
+            logger.exception("could not expire approval %s while resuming", approval_id)
+        return "deny"
+    return None
+
+
+def _parked_permission_session(session_scope: str) -> Any | None:
+    """The cached provider session parked on an unanswered permission prompt.
+
+    ``None`` means there is nothing to continue — either the server restarted
+    and the session is gone, or the provider does not park turns at all (only
+    Claude does) — and the caller falls back to re-executing the step.
+    """
+    try:
+        session = get_session_manager().get_session_if_exists(session_scope)
+    except Exception:
+        logger.exception("could not look up parked session %s", session_scope)
+        return None
+    if session is None:
+        return None
+    return session if getattr(session, "has_pending_permission", False) else None
+
+
+#: The only provider whose sessions can be handed MCP server configs. The
+#: Claude Agent SDK is where the option lives (`ClaudeAgentOptions.mcp_servers`,
+#: claude-agent-sdk 0.2.128); codex, gemini and antigravity sessions have
+#: nowhere to put one, so a declared server on those providers is reported as
+#: not injected rather than assumed to work.
+MCP_INJECTION_PROVIDER_ID = "anthropic"
+
+#: Event type carrying what happened to an agent's declared MCP tools on one
+#: turn. Emitted whenever an agent declares any, so the run log answers "was
+#: the tool this agent promises actually there?" without a second lookup.
+MCP_TOOLS_EVENT_TYPE = "task.step.mcp_tools"
+
+
+def _declared_mcp_ids(agent: dict[str, Any] | None) -> list[str]:
+    """The ``mcp_id`` values in an agent's ``tools_json``, in order."""
+    tools = (agent or {}).get("tools_json")
+    if not isinstance(tools, list):
+        return []
+    declared: list[str] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        mcp_id = tool.get("mcp_id")
+        if isinstance(mcp_id, str) and mcp_id.strip():
+            declared.append(mcp_id.strip())
+    return declared
+
+
+async def _apply_declared_mcp_servers(
+    session: Any,
+    *,
+    agent_id: str | None,
+    run_id: str,
+    task_id: str,
+    provider_id: str,
+    step_id: str | None = None,
+) -> None:
+    """Give the session the MCP servers this agent declared, and say what it could not.
+
+    Until this existed an agent's ``tools_json`` had no run-time consumer at
+    all: a declared server was a row in the database, the turn ran on whatever
+    the user's CLI was configured with, and nothing anywhere reported the
+    difference. The two halves here are equally load-bearing — servers that do
+    exist are passed through to :meth:`ClaudeSession.set_mcp_servers`, and
+    every declaration that could *not* be passed through is written to the run
+    as :data:`MCP_TOOLS_EVENT_TYPE`. Dropping the second half would restore the
+    exact silence this replaces.
+
+    Never raises for the missing case: a declared-but-absent server is
+    reported, not fatal, because the turn may well not need it, and failing
+    the step would take a working run down over a tool it never calls.
+    """
+    store = get_agent_store()
+    agent = store.get_agent(agent_id) if agent_id else None
+    declared = _declared_mcp_ids(agent)
+    if not declared:
+        return
+
+    verdicts = verify_declared_mcp_ids(declared)
+    configs = detected_mcp_server_configs()
+
+    builtin: list[str] = []
+    missing: list[dict[str, str]] = []
+    unlaunchable: list[dict[str, str]] = []
+    injectable: dict[str, Any] = {}
+    for verdict in verdicts:
+        if verdict.source == "builtin_runtime":
+            builtin.append(verdict.mcp_id)
+            continue
+        if not verdict.verified:
+            missing.append({"mcp_id": verdict.mcp_id, "detail": verdict.detail})
+            continue
+        config = configs.get(verdict.mcp_id)
+        if config is None:
+            unlaunchable.append(
+                {
+                    "mcp_id": verdict.mcp_id,
+                    "detail": (
+                        f'MCP server "{verdict.mcp_id}" is configured but its entry does '
+                        "not describe how to launch it (no command for a stdio server, "
+                        "no url for an http/sse server), so it was not passed to the run."
+                    ),
+                }
+            )
+            continue
+        # Only the name is kept for the event; the config itself carries env
+        # and headers, which can hold credentials.
+        injectable[verdict.mcp_id] = config
+
+    if provider_id != MCP_INJECTION_PROVIDER_ID:
+        blocked_by = (
+            f"the '{provider_id}' session type has no MCP server option "
+            f"(only '{MCP_INJECTION_PROVIDER_ID}' does)"
+        )
+    elif not hasattr(session, "set_mcp_servers"):
+        blocked_by = f"this {type(session).__name__} session cannot be given MCP servers"
+    else:
+        blocked_by = ""
+
+    supported = not blocked_by
+    injected: list[str] = []
+    if supported:
+        if injectable:
+            await session.set_mcp_servers(injectable)
+            injected = sorted(injectable)
+    elif injectable:
+        # The servers are here, the session cannot take them. Say so rather
+        # than letting the turn look as though it had them.
+        unlaunchable.extend(
+            {
+                "mcp_id": name,
+                "detail": (
+                    f'MCP server "{name}" is configured on this machine, but '
+                    f"{blocked_by}, so this run does not have it."
+                ),
+            }
+            for name in sorted(injectable)
+        )
+
+    notes: list[str] = []
+    if injected:
+        notes.append(f"Passed to this run: {', '.join(injected)}.")
+    if builtin:
+        notes.append(
+            f"Runs on this server's own runtime, not an MCP server: {', '.join(builtin)}."
+        )
+    for entry in (*missing, *unlaunchable):
+        notes.append(entry["detail"])
+
+    store.append_event(
+        run_id=run_id,
+        event_type=MCP_TOOLS_EVENT_TYPE,
+        provider_id=provider_id,
+        app_event={
+            "task_id": task_id,
+            "step_id": step_id,
+            "agent_id": agent_id,
+            "declared": declared,
+            "injected": injected,
+            "builtin_runtime": builtin,
+            "missing": missing,
+            "not_injected": unlaunchable,
+            "provider_supports_mcp_injection": supported,
+            "message": " ".join(notes),
+        },
+    )
+
+
 async def _execute_llm_workflow_step(
     *,
     task_id: str,
@@ -1322,11 +1735,103 @@ async def _execute_llm_workflow_step(
     launch_message: str,
     step: dict[str, Any],
     previous_steps: list[dict[str, Any]] | None = None,
-) -> bool:
+    permission_decision: str | None = None,
+) -> bool | None:
+    """Run one llm workflow step.
+
+    Tri-state, exactly like the browser and app-action executors: ``True`` the
+    step finished, ``False`` it failed and the caller should apply the step's
+    failure policy, and ``None`` the run is *parked on a person* and nothing
+    failed. Returning ``False`` for an approval pause — which is what this did
+    until 2026-08-16 — made the driver run ``on_failure``, whose ``ask_user``
+    branch immediately overwrote the approval checkpoint with its own; the
+    phone then showed two ``waiting_for_user`` events a second apart and the
+    approval the user was asked for was no longer the one the run was waiting
+    on.
+    """
     store = get_agent_store()
     step_id = str(step["id"])
     step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
     agent_id = _step_agent_id(store.get_task(task_id) or {})
+    session_scope = f"task:{task_id}"
+
+    # --- Resuming a step that is parked on an approval --------------------
+    # The provider session that asked for permission is still alive with the
+    # SDK's `can_use_tool` callback parked on a future, so the honest resume is
+    # to answer *that* callback and let the same turn carry on. Re-sending the
+    # step message instead would hit "Another Claude turn is already in
+    # progress" (llm/claude_session.py send_message), which is what every
+    # resume did before this branch existed.
+    approval_checkpoint = _approval_checkpoint_for_step(step)
+    parked_session: Any | None = None
+    resume_decision: str | None = None
+    if approval_checkpoint is not None:
+        resume_decision = _resolve_permission_decision(
+            approval_checkpoint, permission_decision
+        )
+        if resume_decision is None:
+            # Nobody has decided yet. Re-park rather than run anything: the
+            # caller already flipped the run to `running`, and leaving it there
+            # would have `_close_out_unfinished_run` fail a run that is simply
+            # waiting for its owner. Same run/step/reason means
+            # `_wait_for_user_step` recognises the repeat and does not notify
+            # again.
+            _wait_for_user_step(
+                task_id=task_id,
+                run_id=run_id,
+                step=step,
+                reason=APPROVAL_WAIT_REASON,
+                prompt=(
+                    approval_checkpoint.get("prompt")
+                    if isinstance(approval_checkpoint.get("prompt"), str)
+                    else None
+                ),
+                checkpoint_extra=_approval_checkpoint_extra(approval_checkpoint),
+            )
+            store.append_event(
+                run_id=run_id,
+                event_type="task.step.approval_still_pending",
+                provider_id=provider_id,
+                app_event={
+                    "task_id": task_id,
+                    "step_id": step_id,
+                    "approval_id": approval_checkpoint.get("approval_id"),
+                },
+            )
+            return None
+        parked_session = _parked_permission_session(session_scope)
+        if parked_session is None and resume_decision == "deny":
+            # Re-running the step would ask the model to do the very thing the
+            # user just refused. Fail it instead and let the step's failure
+            # policy decide, rather than quietly doing the denied work.
+            _fail_step(
+                task=store.get_task(task_id) or {"id": task_id},
+                step_id=step_id,
+                run_id=run_id,
+                error={
+                    "message": (
+                        "Approval was denied and the provider session that asked "
+                        "for it is gone, so the step was not re-run."
+                    ),
+                    "approval_id": approval_checkpoint.get("approval_id"),
+                },
+            )
+            return False
+        store.append_event(
+            run_id=run_id,
+            event_type="task.step.approval_resumed",
+            provider_id=provider_id,
+            app_event={
+                "task_id": task_id,
+                "step_id": step_id,
+                "approval_id": approval_checkpoint.get("approval_id"),
+                "decision": resume_decision,
+                # Which of the two resume paths ran, so a run log says whether
+                # the original turn continued or the step was started over.
+                "mode": "same_turn" if parked_session is not None else "re_execute",
+            },
+        )
+
     matched_memories = _memories_for_step(store, agent_id, step_input)
     store.update_task_step(step_id, {"status": "running"})
     store.append_event(
@@ -1336,36 +1841,62 @@ async def _execute_llm_workflow_step(
         app_event={"task_id": task_id, "step_id": step_id, "mode": "workflow"},
     )
     sink = AgentTaskRunSink(run_id=run_id)
-    session_scope = f"task:{task_id}"
     try:
-        # Read the agent-definition file, if this agent is backed by one,
-        # before the session exists: a missing or broken source must fail the
-        # step naming the file, not start a turn that runs something else. Both
-        # this and the wrong-provider refusal below raise, and the handler
-        # underneath records the message on the step.
-        cli_agent = resolve_cli_agent_definition(agent_id)
-        session = await create_chat_session(
-            project_name=session_scope,
-            project_path=project_path,
-            selection=ChatProviderSelection(
+        if parked_session is not None:
+            if resume_decision == "deny":
+                completed = await stream_claude_turn(
+                    sink,
+                    parked_session,
+                    project_name=project_name,
+                    deny_from_permission_message=_APPROVAL_DENIED_MESSAGE,
+                )
+            else:
+                completed = await stream_claude_turn(
+                    sink,
+                    parked_session,
+                    project_name=project_name,
+                    retry_from_permission=True,
+                )
+        else:
+            # Read the agent-definition file, if this agent is backed by one,
+            # before the session exists: a missing or broken source must fail the
+            # step naming the file, not start a turn that runs something else. Both
+            # this and the wrong-provider refusal below raise, and the handler
+            # underneath records the message on the step.
+            cli_agent = resolve_cli_agent_definition(agent_id)
+            session = await create_chat_session(
+                project_name=session_scope,
+                project_path=project_path,
+                selection=ChatProviderSelection(
+                    provider_id=provider_id,
+                    provider_name=_provider_name(provider_id),
+                    model=model,
+                ),
+                cli_agent=cli_agent,
+            )
+            # Before the turn, so the servers are in the options this session
+            # connects with. A change here closes an already-connected session,
+            # which is why it cannot wait until after the first message.
+            await _apply_declared_mcp_servers(
+                session,
+                agent_id=agent_id,
+                run_id=run_id,
+                task_id=task_id,
                 provider_id=provider_id,
-                provider_name=_provider_name(provider_id),
-                model=model,
-            ),
-            cli_agent=cli_agent,
-        )
-        completed = await stream_claude_turn(
-            sink,
-            session,
-            project_name=project_name,
-            user_message=_workflow_step_message(
-                step,
-                launch_message,
-                previous_steps=previous_steps or [],
-                matched_memories=matched_memories,
-                cli_agent_source_path=cli_agent.source_path if cli_agent else None,
-            ),
-        )
+                step_id=step_id,
+            )
+            completed = await stream_claude_turn(
+                sink,
+                session,
+                project_name=project_name,
+                user_message=_workflow_step_message(
+                    step,
+                    launch_message,
+                    previous_steps=previous_steps or [],
+                    matched_memories=matched_memories,
+                    cli_agent_source_path=cli_agent.source_path if cli_agent else None,
+                ),
+            )
     except Exception as exc:
         logger.exception("workflow step failed task_id=%s run_id=%s step_id=%s", task_id, run_id, step_id)
         _fail_step(
@@ -1377,14 +1908,25 @@ async def _execute_llm_workflow_step(
         return False
 
     if sink.permission_required:
+        denial = sink.permission_denial or {}
+        tool_name = denial.get("tool_name")
+        tool_target = _approval_tool_target(denial.get("input"))
         _wait_for_user_step(
             task_id=task_id,
             run_id=run_id,
             step=step,
-            reason="approval_required",
-            prompt="Approval is required before this workflow step can continue.",
+            reason=APPROVAL_WAIT_REASON,
+            # Names the tool and its target, so the push says "Read needs your
+            # approval: /etc/hosts" instead of a line that could be about any
+            # step of any run.
+            prompt=_approval_wait_prompt(tool_name, tool_target),
+            checkpoint_extra={
+                "approval_id": denial.get("approval_id"),
+                "tool_name": tool_name,
+                "tool_target": tool_target,
+            },
         )
-        return False
+        return None
     if sink.error_message or not completed:
         _fail_step(
             task=store.get_task(task_id) or {"id": task_id},
@@ -2344,6 +2886,19 @@ def _wait_for_user_step(
     on_failure = step_input.get("on_failure")
     if not isinstance(on_failure, dict):
         on_failure = {}
+    if (
+        not prompt
+        and reason == APPROVAL_WAIT_REASON
+        and isinstance(checkpoint_extra, dict)
+        and checkpoint_extra.get("tool_name")
+    ):
+        # Any caller that parks on an approval with the tool identity in hand
+        # gets the tool-specific sentence, whether or not it remembered to pass
+        # one. `_checkpoint_prompt`'s fallback names the step, which is what
+        # every approval notification used to say.
+        prompt = _approval_wait_prompt(
+            checkpoint_extra.get("tool_name"), checkpoint_extra.get("tool_target")
+        )
     checkpoint = {
         "status": "waiting_for_user",
         "reason": reason,
@@ -3807,6 +4362,22 @@ def _resolve_workspace_id(task: dict[str, Any], project_path: str) -> str | None
     return workspace.get("id") if isinstance(workspace.get("id"), str) else None
 
 
+def _is_detected_mcp_capability(capability: dict[str, Any], name: str) -> bool:
+    """An mcp_server catalog row for ``name`` that this machine really has.
+
+    `_demote_stale_mcp_rows` leaves rows for servers that no longer exist in
+    the catalog on purpose (existing task links must keep resolving), marked
+    `status='unverified'` and `metadata.detected=False`. Those rows must not be
+    picked up as if they were live.
+    """
+    if capability.get("type") != "mcp_server" or capability.get("name") != name:
+        return False
+    if str(capability.get("status") or "") != "available":
+        return False
+    metadata = capability.get("metadata")
+    return not isinstance(metadata, dict) or metadata.get("detected") is not False
+
+
 def _select_capabilities(
     task: dict[str, Any],
     *,
@@ -3847,10 +4418,17 @@ def _select_capabilities(
     if kind == "research" or any(token in text for token in ("research", "web", "browser", "search")):
         for name in ("browser", "documents"):
             add_by(lambda cap, name=name: cap.get("type") == "skill" and cap.get("name") == name)
+    # These two used to match the hardcoded github/gmail catalog rows, which
+    # existed on every machine and on none: C5 stopped writing them and
+    # downgraded the ones already in the database to `unverified`. The branches
+    # stay, because a user who really does configure a github MCP server should
+    # get it — but they now require a row the detection pass actually found, so
+    # a leftover row can no longer put "this task will use gmail" on a task
+    # whose machine has no gmail server.
     if any(token in text for token in ("github", "issue", "pr", "pull request")):
-        add_by(lambda cap: cap.get("type") == "mcp_server" and cap.get("name") == "github")
+        add_by(lambda cap: _is_detected_mcp_capability(cap, "github"))
     if any(token in text for token in ("gmail", "email", "mail")):
-        add_by(lambda cap: cap.get("type") == "mcp_server" and cap.get("name") == "gmail")
+        add_by(lambda cap: _is_detected_mcp_capability(cap, "gmail"))
     for workflow_step in workflow_steps or []:
         _select_workflow_step_capabilities(workflow_step, add_by)
     return selected

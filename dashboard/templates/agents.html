@@ -1265,6 +1265,16 @@
 
                 r_gate: 'Manual step',
                 fix_gate: 'A scheduled run stops here every time for a human response — no permission setting can skip it',
+                r_browser: 'Browser runtime',
+                fix_browser: 'This server has no working browser runtime, so every browser step stops and waits for a person',
+                fix_browser_unknown: 'The server did not answer whether it has a browser runtime — treat browser steps as unproven until it does',
+                modal_browser_title: 'Browser runtime',
+                modal_browser_hint: 'Browser steps run on the server, not in this page. Until the server has Playwright and Chromium, each browser step pauses and waits for someone to take over.',
+                modal_browser_unknown: 'The readiness check did not answer. Reload the page; if it keeps failing, the server may be down or mid-restart.',
+                modal_browser_command: 'Run this on the machine hosting the server',
+                modal_browser_copy: 'Copy command',
+                copied: 'Copied',
+                copy_failed: 'Could not copy',
                 step_parks_note: 'This step pauses the run and waits for you to respond, every time — no permission setting can skip it.',
 
                 cli_agent_import_summary: 'Import an agent you made with a CLI',
@@ -1499,6 +1509,16 @@
 
                 r_gate: '수동 대기',
                 fix_gate: '예약된 실행이 매번 이 단계에서 멈춰 사람의 응답을 기다립니다 — 어떤 권한 설정도 이를 건너뛰게 하지 못합니다',
+                r_browser: '브라우저 런타임',
+                fix_browser: '이 서버에는 동작하는 브라우저 런타임이 없어, 브라우저 단계마다 멈춰 사람을 기다립니다',
+                fix_browser_unknown: '브라우저 런타임 상태를 서버가 알려주지 않았습니다 — 확인되기 전까지 브라우저 단계는 검증되지 않은 것으로 보세요',
+                modal_browser_title: '브라우저 런타임',
+                modal_browser_hint: '브라우저 단계는 이 화면이 아니라 서버에서 실행됩니다. 서버에 Playwright와 Chromium이 준비되기 전까지 각 브라우저 단계는 멈춰서 사람이 대신하기를 기다립니다.',
+                modal_browser_unknown: '준비 상태 확인이 응답하지 않았습니다. 페이지를 새로 고쳐 보고, 계속 실패하면 서버가 내려갔거나 재시작 중일 수 있습니다.',
+                modal_browser_command: '서버가 실행 중인 컴퓨터에서 이 명령을 실행하세요',
+                modal_browser_copy: '명령 복사',
+                copied: '복사했습니다',
+                copy_failed: '복사하지 못했습니다',
                 step_parks_note: '이 단계는 실행마다 멈춰서 응답을 기다립니다 — 어떤 권한 설정도 이를 건너뛰게 하지 못합니다.',
 
                 cli_agent_import_summary: 'CLI로 만든 에이전트 가져오기',
@@ -1707,6 +1727,12 @@
         // a step actually needs a device-sourced select), not on page load.
         let deviceOptions = null;
         let deviceOptionsLoading = false;
+        // Server-side Playwright readiness, from GET /browser-runtime/readiness.
+        // `null` = not fetched (or the fetch failed) = unknown. Unknown is not
+        // ready: a browser_action step on an unprepared server stops and waits
+        // for a human, and a chip that guessed green would have promised the
+        // opposite of what the run does.
+        let browserRuntime = null;
 
         async function api(path, options = {}) {
             try {
@@ -2159,6 +2185,18 @@
                     fix: t('fix_gate'), go: () => { selectAgent(agent.id).then(() => editSelectedAgent()); },
                 });
             }
+            // Only for agents that actually drive a browser. The runtime lives
+            // on the server, not in this agent's definition, so nothing here
+            // can "fix" it from the UI — the chip's job is to name the reason
+            // the run will stop and hand over the install command.
+            if (flow.some((step) => step.type === 'browser_action')) {
+                items.push({
+                    key: 'browser', label: t('r_browser'),
+                    ok: !!(browserRuntime && browserRuntime.ready === true),
+                    fix: browserRuntime ? t('fix_browser') : t('fix_browser_unknown'),
+                    go: () => openBrowserRuntimeFixModal(),
+                });
+            }
             return items;
         }
 
@@ -2227,6 +2265,57 @@
             fixModalAgentId = null;
             fixModalMissingOps = [];
             fixModalStepIndices = [];
+        }
+
+        async function copyText(text) {
+            try {
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch (error) {
+                // Clipboard API needs a secure context; the dashboard is
+                // plain http on localhost in some setups, so fall back
+                // instead of silently doing nothing.
+                const scratch = document.createElement('textarea');
+                scratch.value = text;
+                scratch.style.position = 'fixed';
+                scratch.style.opacity = '0';
+                document.body.appendChild(scratch);
+                scratch.select();
+                let ok = false;
+                try { ok = document.execCommand('copy'); } catch (fallbackError) { ok = false; }
+                document.body.removeChild(scratch);
+                return ok;
+            }
+        }
+
+        function copyBrowserInstallCommand() {
+            const command = (browserRuntime && browserRuntime.install_command) || '';
+            if (!command) return;
+            copyText(command).then((ok) => toast(ok ? t('copied') : t('copy_failed')));
+        }
+
+        // Nothing to submit here: the fix is a command the operator runs on
+        // the machine hosting the server. The modal states what is missing and
+        // hands over the exact command rather than implying the UI can do it.
+        function openBrowserRuntimeFixModal() {
+            const known = !!browserRuntime;
+            const command = (browserRuntime && browserRuntime.install_command) || '';
+            const detail = known
+                ? (browserRuntime.message || '')
+                : t('modal_browser_unknown');
+            const commandBlock = command ? `
+                <div class="field">
+                    <label>${escapeHtml(t('modal_browser_command'))}</label>
+                    <code style="display:block;padding:10px;border-radius:6px;background:rgba(127,127,127,0.12);word-break:break-all;">${escapeHtml(command)}</code>
+                </div>
+                <div class="actions">
+                    <button class="btn" onclick="copyBrowserInstallCommand()">${escapeHtml(t('modal_browser_copy'))}</button>
+                </div>` : '';
+            const body = `
+                <p class="hint">${escapeHtml(t('modal_browser_hint'))}</p>
+                ${detail ? `<p class="hint">${escapeHtml(detail)}</p>` : ''}
+                ${commandBlock}`;
+            openFixModal(t('modal_browser_title'), body);
         }
 
         function syncFixScheduleKind() {
@@ -4414,7 +4503,7 @@
         // --- Bootstrap ------------------------------------------------------
 
         async function reloadAll() {
-            const [agentResult, scheduleResult, taskResult, ruleResult, operationResult, stepOperationResult, approvalResult, scriptResult, runResult, stepSchemaResult, cliSweepResult] = await Promise.all([
+            const [agentResult, scheduleResult, taskResult, ruleResult, operationResult, stepOperationResult, approvalResult, scriptResult, runResult, stepSchemaResult, cliSweepResult, browserRuntimeResult] = await Promise.all([
                 api('/agents?limit=200'),
                 api('/schedules'),
                 api('/tasks?limit=200'),
@@ -4426,6 +4515,7 @@
                 api('/runs?limit=60'),
                 api('/workflow/step-schema'),
                 api('/cli-agents/sweep'),
+                api('/browser-runtime/readiness'),
             ]);
             agents = (agentResult && agentResult.agents) || [];
             schedules = (scheduleResult && scheduleResult.schedules) || [];
@@ -4466,6 +4556,13 @@
             } else if (!cliAgentSweepStatus) {
                 cliAgentSweepFetchError = (cliSweepResult && cliSweepResult.error) || t('cli_sweep_fetch_failed');
             }
+            // Unlike the guards above, a failed readiness fetch drops back to
+            // `null` on purpose. The other caches degrade to "last known
+            // good"; readiness must degrade to "unknown", because a stale
+            // green here would tell someone their browser step will run.
+            browserRuntime = (browserRuntimeResult && !browserRuntimeResult.error)
+                ? browserRuntimeResult
+                : null;
             renderPolicyOperationOptions();
             renderAgentList();
             renderAgentPicker();

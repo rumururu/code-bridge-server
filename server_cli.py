@@ -12,6 +12,7 @@ from pathlib import Path
 import uvicorn
 
 from core.config import get_config
+from core.env_bootstrap import bootstrap_path
 from core.runtime_paths import SERVER_DIR, runtime_path
 
 logger = logging.getLogger(__name__)
@@ -340,6 +341,11 @@ def tunnel_status() -> None:
 
 def main() -> None:
     """Parse CLI flags and run the uvicorn server."""
+    # Must run before anything that calls shutil.which() (CLI detection,
+    # cloudflared, adb, mmdc): launchd/login-item processes start with a
+    # bare PATH that hides every Homebrew/npm/Android SDK install.
+    bootstrap_path()
+
     parser = argparse.ArgumentParser(description="Code Bridge Server")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 

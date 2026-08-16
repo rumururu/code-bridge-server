@@ -20,6 +20,14 @@ claude-agent-sdk>=0.2.128
 starlette>=0.35.0,<0.36.0
 sse-starlette>=1.6.1,<2.2
 
+# Browser automation for `browser_action` workflow steps
+# (agent/browser_action_adapter.py). Without it every browser step parks the
+# run waiting for a human, which is honest but useless. The wheel + driver is
+# ~40MB; the Chromium browser itself is NOT installed by pip — install/install.sh
+# and install/install.ps1 run `python -m playwright install chromium` after this
+# file is applied (opt out with CODE_BRIDGE_BROWSER=0).
+playwright>=1.58
+
 # QR code generation for pairing
 qrcode[pil]>=7.4
 
