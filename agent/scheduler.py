@@ -57,22 +57,48 @@ _WAITING_RUN_STATUSES = {
 
 _ACTIVE_RUN_STATUSES = _PROGRESSING_RUN_STATUSES | _WAITING_RUN_STATUSES
 
-# How long a run may sit waiting on a human before the scheduler gives up on
-# it and lets the schedule move on. Long enough that someone glancing at their
-# phone within the hour still gets to answer; short enough that a schedule
-# recovers on its own overnight.
+# Last-resort grace, used only when there is no approval deadline to inherit
+# (expiry switched off). Long enough that someone glancing at their phone
+# within the hour still gets to answer; short enough that a schedule recovers
+# on its own overnight.
 _STALL_GRACE_SECONDS = 3600
 
 
 def _stall_grace_seconds() -> int:
+    """How long a park may hold a schedule before the scheduler gives up.
+
+    There used to be two independent answers to "nobody answered this": this
+    grace (1h) and the approval deadline (``CODEBRIDGE_APPROVAL_EXPIRY_SECONDS``,
+    24h). Since the shorter one always wins, the 1h default silently overrode
+    every approval deadline for scheduled runs, and the expiry sweep — the one
+    path that settles the parked provider turn — almost never got to act.
+
+    So there is one number by default: unset, this *is* the approval deadline.
+    Setting ``CODEBRIDGE_SCHEDULE_STALL_GRACE_SECONDS`` is an explicit "hold my
+    schedule for no longer than this, whatever the approval says", which is a
+    real thing to want for a schedule that has to keep cadence — and it is now
+    a decision someone made rather than a default nobody knew about. Either
+    way, what happens *when* the grace runs out is identical: the run is
+    abandoned through :func:`agent.approval_resume.abandon_waiting_run`, which
+    is the same door the expiry sweep uses.
+    """
     raw = os.environ.get("CODEBRIDGE_SCHEDULE_STALL_GRACE_SECONDS")
-    if raw is None:
-        return _STALL_GRACE_SECONDS
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
     try:
-        value = int(raw)
-    except ValueError:
-        return _STALL_GRACE_SECONDS
-    return max(0, value)
+        from approvals.approval_service import approval_expiry_seconds
+
+        inherited = approval_expiry_seconds()
+    except Exception:
+        logger.exception("scheduler: could not read the approval expiry window")
+        inherited = 0
+    # ``0`` means approvals never expire, so nothing would ever settle a parked
+    # run and the schedule would be wedged for good. Fall back to the standing
+    # grace: a schedule that can never recover is the worse failure.
+    return inherited if inherited > 0 else _STALL_GRACE_SECONDS
 
 
 def _runs_for_task(task_id: str) -> list[dict[str, Any]]:
@@ -111,36 +137,37 @@ def _waiting_seconds(run: dict[str, Any]) -> float | None:
     return (datetime.now(timezone.utc) - stamp).total_seconds()
 
 
-def _abandon_stalled_run(run: dict[str, Any]) -> None:
-    """Fail a run nobody answered, and expire the approvals holding it.
+async def _abandon_stalled_run(run: dict[str, Any]) -> dict[str, Any] | None:
+    """Give up on a run nobody answered — through the one shared path.
 
-    Without this the run stays "active" forever. Expiring its approvals also
-    keeps the pending queue honest — those prompts are about a run that is no
-    longer going anywhere.
+    Everything this used to do itself (expire the approvals, write ``failed``
+    onto the run row) now lives in :func:`agent.approval_resume.abandon_waiting_run`,
+    which is also what an approval timing out on its own goes through. The
+    scheduler still decides *whether* to give up; it no longer decides what
+    giving up looks like, because its own version skipped the deny path and
+    left the provider session holding an unanswered permission callback.
     """
-    run_id = run.get("id")
-    if not isinstance(run_id, str) or not run_id:
-        return
     try:
-        from approvals.approval_store import get_approval_store
+        from agent.approval_resume import abandon_waiting_run
 
-        approvals = get_approval_store()
-        for approval in approvals.list_pending(run_id=run_id):
-            approvals.mark_expired(approval["id"])
+        return await abandon_waiting_run(run, waited_seconds=_waiting_seconds(run))
     except Exception:
-        logger.exception("scheduler: failed to expire approvals for run %s", run_id)
-    try:
-        get_agent_store().update_run_status(run_id, "failed")
-    except Exception:
-        logger.exception("scheduler: failed to abandon stalled run %s", run_id)
+        logger.exception("scheduler: failed to abandon stalled run %s", run.get("id"))
+        return None
 
 
-def _blocking_run_for_task(task_id: str) -> tuple[dict[str, Any] | None, str]:
+async def _blocking_run_for_task(task_id: str) -> tuple[dict[str, Any] | None, str]:
     """The run that should stop this firing, and why.
 
     Returns ``(None, "")`` when the schedule is free to fire. A run waiting on
-    a human past the grace period is abandoned here rather than reported as
-    blocking, which is what lets a schedule recover by itself.
+    a human that nothing else will settle is abandoned here rather than
+    reported as blocking, which is what lets a schedule recover by itself.
+
+    Abandonment through the deny path is asynchronous — it hands the parked
+    provider turn a denial and lets the step's failure policy run — so a run
+    settled that way keeps blocking for *this* firing and the schedule fires on
+    the next tick, once the run has actually landed somewhere. Firing straight
+    away would stack a second run on top of one still being wound down.
     """
     runs = _runs_for_task(task_id)
     waiting: list[dict[str, Any]] = []
@@ -151,19 +178,33 @@ def _blocking_run_for_task(task_id: str) -> tuple[dict[str, Any] | None, str]:
         if status in _WAITING_RUN_STATUSES:
             waiting.append(run)
 
+    from agent.approval_resume import is_settling_run
+
     grace = _stall_grace_seconds()
+    stalled: list[dict[str, Any]] = []
     for run in waiting:
+        run_id = run.get("id")
+        if is_settling_run(run_id):
+            # The expiry sweep (same tick) or a decision from the app is already
+            # ending this run. Neither abandon it again nor fire over the top.
+            return run, "previous run is being settled"
         elapsed = _waiting_seconds(run)
         if elapsed is not None and elapsed < grace:
-            return run, "previous run is waiting for approval"
+            return run, "previous run is waiting for a person"
+        stalled.append(run)
 
-    for run in waiting:
+    settling: dict[str, Any] | None = None
+    for run in stalled:
         logger.warning(
             "scheduler: abandoning run %s — waiting on a human for longer than %ss",
             run.get("id"),
             grace,
         )
-        _abandon_stalled_run(run)
+        record = await _abandon_stalled_run(run)
+        if isinstance(record, dict) and record.get("path") == "deny":
+            settling = run
+    if settling is not None:
+        return settling, "previous run is being settled"
     return None, ""
 
 
@@ -178,7 +219,7 @@ async def _fire_schedule(schedule: dict[str, Any]) -> None:
     store = get_schedule_store()
 
     if schedule.get("skip_if_active"):
-        blocking, reason = _blocking_run_for_task(task_id)
+        blocking, reason = await _blocking_run_for_task(task_id)
         if blocking is not None:
             logger.info(
                 "scheduler: skipping schedule %s — task %s: %s",
@@ -310,9 +351,18 @@ class TaskScheduler:
     async def _tick_once(self) -> int:
         store = get_schedule_store()
         due = await asyncio.to_thread(store.list_due)
+        # Sweep *before* firing, not after. Both halves of this tick can decide
+        # to end the same parked run — the sweep because its approval deadline
+        # passed, the schedule check because its stall grace ran out — and by
+        # default those two deadlines are now the same number, so they land on
+        # the same tick. Sweeping first means the sweep has already claimed the
+        # run (see `agent.approval_resume.is_settling_run`) by the time
+        # `_blocking_run_for_task` looks at it, so the run is settled once and
+        # the schedule fires on the next tick instead of over the top of a run
+        # still being wound down.
+        await self._sweep_expired_approvals()
         for schedule in due:
             await _fire_schedule(schedule)
-        await self._sweep_expired_approvals()
         await self._sweep_cli_agents_if_due()
         return len(due)
 
@@ -321,12 +371,13 @@ class TaskScheduler:
 
         An approval nobody answers parks its run in ``waiting_for_user``
         indefinitely, and — because that counts as active above — takes the
-        task's schedule down with it. ``_blocking_run_for_task`` already
-        abandons such a run after the stall grace period, but only when the
-        schedule next fires: a run started by hand, or one whose schedule is
-        disabled, has nobody to notice it. This sweep is the one that notices,
-        and unlike abandonment it settles the parked provider turn (deny) and
-        the step's failure policy rather than just failing the run row.
+        task's schedule down with it. ``_blocking_run_for_task`` also abandons
+        such a run once the stall grace runs out, but only when the schedule
+        next fires: a run started by hand, or one whose schedule is disabled,
+        has nobody to notice it. This sweep is the one that notices. Both now
+        end the run the same way — through
+        :func:`agent.approval_resume.abandon_waiting_run` / the deny path — so
+        which one gets there first changes only the timing, not the outcome.
 
         Every tick rather than on its own cadence: it is one indexed query
         against a table that is nearly always empty of expired rows, and the

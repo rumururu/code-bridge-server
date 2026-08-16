@@ -1200,6 +1200,121 @@ def _close_out_unfinished_run(*, task_id: str, run_id: str) -> None:
     )
 
 
+#: A run parked on a person, in the statuses that park writes.
+#:
+#: The mirror of :data:`_UNFINISHED_RUN_STATUSES`: those are runs still being
+#: driven, these are runs that stopped and are waiting. Only these can be
+#: abandoned — a run that is working is never "unanswered".
+_WAITING_RUN_STATUSES = {"blocked", "waiting_for_user", "waiting_user"}
+
+
+#: Why a run ended when nobody ever answered the park it was sitting on.
+#:
+#: Deliberately *not* ``tool_call_denied``: there was nothing to deny. The run
+#: stopped for a person — an ``ask_user`` failure policy, a manual handoff — and
+#: no person came within the window the scheduler allows. Written on the step,
+#: on the task's error and as its own run event, because "failed" on its own
+#: tells the user nothing about why a run they never saw is red.
+ABANDONED_WAIT_REASON = "abandoned_waiting_for_user"
+
+_ABANDONED_WAIT_MESSAGE = (
+    "Nobody answered this run, so it was ended and its schedule released."
+)
+
+
+def abandon_run_waiting_for_a_person(
+    run_id: str,
+    *,
+    waited_seconds: float | None = None,
+    wait_reason: str | None = None,
+) -> dict[str, Any] | None:
+    """End a run that parked for a person nobody ever sent.
+
+    This is the *non-approval* half of abandonment. A run parked on an approval
+    has something to answer and is settled through the deny path instead (see
+    :func:`agent.approval_resume.abandon_waiting_run`); a run parked on
+    ``ask_user`` or a manual handoff has no approval to deny, so there is
+    nothing to hand the provider and the honest ending is to fail it *saying
+    so*.
+
+    Returns ``None`` when the run is no longer parked — the caller raced a
+    resume, and a run that has started moving again must not be killed.
+    """
+    store = get_agent_store()
+    try:
+        run = store.get_run(run_id)
+    except Exception:
+        logger.exception("could not re-read run %s before abandoning it", run_id)
+        return None
+    if not isinstance(run, dict):
+        return None
+    status = run.get("status")
+    if status not in _WAITING_RUN_STATUSES:
+        # Somebody answered, or the run was already ended, between the decision
+        # to abandon and this call.
+        return None
+    task_id = run.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        return None
+
+    checkpoint_context = store.get_task_checkpoint(task_id)
+    step = (
+        checkpoint_context.get("step") if isinstance(checkpoint_context, dict) else None
+    )
+    checkpoint = (
+        checkpoint_context.get("checkpoint")
+        if isinstance(checkpoint_context, dict)
+        else None
+    )
+    if not wait_reason and isinstance(checkpoint, dict):
+        raw_reason = checkpoint.get("reason")
+        wait_reason = raw_reason if isinstance(raw_reason, str) else None
+
+    error: dict[str, Any] = {
+        "message": _ABANDONED_WAIT_MESSAGE,
+        "reason": ABANDONED_WAIT_REASON,
+    }
+    if waited_seconds is not None:
+        error["waited_seconds"] = int(waited_seconds)
+    if wait_reason:
+        # *What* went unanswered — `ask_user`, `manual_handoff`, … — so the
+        # panel can say which question died rather than just that one did.
+        error["waiting_for"] = wait_reason
+
+    # A step can reach here having already been refused: a denied tool call
+    # fails the step, `on_failure: ask_user` parks it again, and nobody answers
+    # that park either. Writing this outcome over the step's output would drop
+    # `denied_tool_calls`, and with it the only record of *what* was refused —
+    # measured live on 2026-08-16, where a run ended saying nobody answered and
+    # no longer said that Read had been denied on a named path. The refusal is
+    # the more useful half of the story, so it is carried forward.
+    previous_denials = _recorded_tool_denials(step) if isinstance(step, dict) else []
+    if previous_denials:
+        error[STEP_DENIED_TOOL_CALLS_KEY] = previous_denials
+
+    store.append_event(
+        run_id=run_id,
+        event_type="task.run.abandoned",
+        app_event={"task_id": task_id, "error": error},
+    )
+
+    if isinstance(step, dict) and step.get("run_id") in (None, run_id):
+        _fail_step(
+            task=store.get_task(task_id) or {"id": task_id},
+            step_id=str(step["id"]),
+            run_id=run_id,
+            error=error,
+        )
+
+    _finish_workflow_execution(
+        task_id=task_id,
+        run_id=run_id,
+        status="failed",
+        error=error,
+    )
+    return {"run_id": run_id, "task_id": task_id, "error": error}
+
+
 async def _drive_workflow_steps(
     *,
     task_id: str,

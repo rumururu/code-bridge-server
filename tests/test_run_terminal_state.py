@@ -213,8 +213,24 @@ class ShellFailureEndsTheRunTest(_RunTerminalStateTestBase):
         self.assertEqual(self._shell_starts(run["id"]), 1)
 
         with mock.patch.object(scheduler, "_stall_grace_seconds", return_value=0):
-            blocking, reason = scheduler._blocking_run_for_task(task["id"])
+            blocking, reason = asyncio.run(
+                scheduler._blocking_run_for_task(task["id"])
+            )
         self.assertIsNone(blocking, f"schedule still blocked: {reason}")
+        # ...and the abandonment says what happened rather than leaving a bare
+        # `failed` row with a step still claiming to be waiting. There is no
+        # approval in an `ask_user` park, so this is the non-approval half of
+        # `agent.approval_resume.abandon_waiting_run`.
+        run = self.store.get_run(run["id"])
+        assert run is not None
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(
+            [
+                event["event_type"]
+                for event in self.store.list_events(run["id"])
+            ].count("task.run.abandoned"),
+            1,
+        )
 
     def test_an_on_failure_goto_still_routes_to_the_diagnosis_step(self):
         # The escalation the shell step type exists for: script fails, an LLM
@@ -333,14 +349,14 @@ class StaleStepsFromEarlierRunsTest(_RunTerminalStateTestBase):
         )
         run_id = self._fire(task["id"])["id"]
 
-        blocking, reason = scheduler._blocking_run_for_task(task["id"])
+        blocking, reason = asyncio.run(scheduler._blocking_run_for_task(task["id"]))
         self.assertIsNone(blocking, f"schedule still blocked: {reason}")
 
         # And the contrast that says why the fix is not a timeout: while a run
         # really is progressing, it still blocks, at any age. See
         # test_scheduler_stalled_run.py::test_running_run_blocks_regardless_of_age.
         self.store.update_run_status(run_id, "running")
-        blocking, reason = scheduler._blocking_run_for_task(task["id"])
+        blocking, reason = asyncio.run(scheduler._blocking_run_for_task(task["id"]))
         assert blocking is not None
         self.assertEqual(blocking["id"], run_id)
         self.assertEqual(reason, "previous run still active")

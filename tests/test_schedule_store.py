@@ -499,5 +499,7 @@ class TestSchedulerTick:
         assert after["skip_count"] == 1
         assert after["last_status"] == "skipped"
         # A run parked on a human is reported as such, and only blocks until
-        # the stall grace period — see test_scheduler_stalled_run.py.
-        assert after["last_error"] == "previous run is waiting for approval"
+        # the stall grace period — see test_scheduler_stalled_run.py. The
+        # wording says "a person" rather than "approval" because this same
+        # branch covers an `ask_user` park, which has no approval in it at all.
+        assert after["last_error"] == "previous run is waiting for a person"
