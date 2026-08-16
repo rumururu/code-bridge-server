@@ -37,12 +37,14 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from core.runtime_paths import runtime_path
+
 logger = logging.getLogger(__name__)
 
 # Overridable so tests (and unusual deployments) don't have to touch the
 # operator's real key on disk.
 SERVICE_ACCOUNT_ENV = "CODEBRIDGE_FCM_SERVICE_ACCOUNT"
-DEFAULT_SERVICE_ACCOUNT_PATH = Path.home() / ".code-bridge" / "firebase_service_account.json"
+_SERVICE_ACCOUNT_FILENAME = "firebase_service_account.json"
 
 _APP_NAME = "codebridge-push"
 
@@ -52,9 +54,24 @@ _init_attempted = False
 _warned: set[str] = set()
 
 
+def default_service_account_path() -> Path:
+    """Where the key lives when no env override is set.
+
+    Resolved lazily through :func:`core.runtime_paths.runtime_path` — never a
+    module constant — because ``CODEBRIDGE_APP_SUPPORT_DIR`` (set by the
+    packaged desktop launcher, and by the test suite's conftest) decides
+    whether this is the operator's real ``~/.code-bridge`` key or an isolated
+    copy, and that decision must be made per call, not frozen at import time.
+    """
+    return runtime_path(
+        _SERVICE_ACCOUNT_FILENAME,
+        Path.home() / ".code-bridge" / _SERVICE_ACCOUNT_FILENAME,
+    )
+
+
 def _service_account_path() -> Path:
     raw = os.environ.get(SERVICE_ACCOUNT_ENV)
-    return Path(raw).expanduser() if raw else DEFAULT_SERVICE_ACCOUNT_PATH
+    return Path(raw).expanduser() if raw else default_service_account_path()
 
 
 def _warn_once(key: str, message: str) -> None:
@@ -191,8 +208,8 @@ def send_to_tokens(
 
 
 __all__ = [
-    "DEFAULT_SERVICE_ACCOUNT_PATH",
     "SERVICE_ACCOUNT_ENV",
+    "default_service_account_path",
     "is_configured",
     "reset_for_tests",
     "send_to_tokens",

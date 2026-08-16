@@ -13,9 +13,11 @@ only" rather than raising or blocking startup.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -221,6 +223,114 @@ class BootstrapPathTest(unittest.TestCase):
 
         # Untouched, since the failure happened before any mutation.
         self.assertEqual(env["PATH"], "/usr/bin:/bin")
+
+
+class _ListHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+class BootstrapLogReplayTest(unittest.TestCase):
+    """bootstrap_path() is silent; its summary replays after logging exists.
+
+    The bootstrap runs at server_cli.main() top, before
+    configure_server_logging() attaches any handler, so an immediate log line
+    used to vanish. These tests pin down the replacement contract: bootstrap
+    records, emit_recorded_bootstrap_log() emits exactly once through
+    handlers attached *after* the bootstrap ran.
+    """
+
+    def setUp(self) -> None:
+        import core.env_bootstrap as env_bootstrap
+
+        self.env_bootstrap = env_bootstrap
+        self._saved = (env_bootstrap._recorded_summary, env_bootstrap._summary_emitted)
+        env_bootstrap._recorded_summary = None
+        env_bootstrap._summary_emitted = False
+        self.logger = logging.getLogger("core.env_bootstrap")
+        self._saved_level = self.logger.level
+        self.handler = _ListHandler()
+
+    def tearDown(self) -> None:
+        self.logger.removeHandler(self.handler)
+        self.logger.setLevel(self._saved_level)
+        (
+            self.env_bootstrap._recorded_summary,
+            self.env_bootstrap._summary_emitted,
+        ) = self._saved
+
+    def _bootstrap(self) -> None:
+        with patch(
+            "core.env_bootstrap._static_candidates", return_value=["/opt/homebrew/bin"]
+        ), patch("core.env_bootstrap._login_shell_path", return_value=[]):
+            self.env_bootstrap.bootstrap_path({"PATH": "/usr/bin:/bin"})
+
+    def test_bootstrap_emits_nothing_itself(self):
+        self.logger.addHandler(self.handler)
+        self.logger.setLevel(logging.DEBUG)
+
+        self._bootstrap()
+
+        self.assertEqual(self.handler.records, [])
+
+    def test_summary_reaches_handler_attached_after_bootstrap(self):
+        self._bootstrap()
+
+        # Handler attached only now — the situation configure_server_logging
+        # creates on a normal start.
+        self.logger.addHandler(self.handler)
+
+        self.env_bootstrap.emit_recorded_bootstrap_log()
+
+        self.assertEqual(len(self.handler.records), 1)
+        message = self.handler.records[0].getMessage()
+        self.assertIn("PATH bootstrapped", message)
+        self.assertIn("/opt/homebrew/bin", message)
+
+    def test_summary_emitted_at_most_once(self):
+        self._bootstrap()
+        self.logger.addHandler(self.handler)
+
+        self.env_bootstrap.emit_recorded_bootstrap_log()
+        self.env_bootstrap.emit_recorded_bootstrap_log()  # dual-server: called twice
+
+        self.assertEqual(len(self.handler.records), 1)
+
+    def test_emit_without_bootstrap_is_a_noop(self):
+        self.logger.addHandler(self.handler)
+        self.logger.setLevel(logging.DEBUG)
+
+        self.env_bootstrap.emit_recorded_bootstrap_log()
+
+        self.assertEqual(self.handler.records, [])
+
+    def test_configure_server_logging_replays_summary_into_server_log(self):
+        """End to end: the line lands in the actual server.log file."""
+        from core.server_logging import configure_server_logging
+
+        self._bootstrap()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "server.log"
+            root_logger = logging.getLogger("")
+            with patch.dict(
+                os.environ, {"CODE_BRIDGE_SERVER_LOG_PATH": str(log_path)}
+            ):
+                configure_server_logging("info")
+            try:
+                content = log_path.read_text(encoding="utf-8")
+            finally:
+                for handler in list(root_logger.handlers):
+                    if getattr(handler, "baseFilename", None) == str(log_path):
+                        root_logger.removeHandler(handler)
+                        handler.close()
+
+        self.assertIn("PATH bootstrapped", content)
+        self.assertIn("/opt/homebrew/bin", content)
 
 
 if __name__ == "__main__":

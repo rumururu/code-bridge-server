@@ -5,11 +5,14 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
+import agent.configurator as configurator  # noqa: E402
+from agent.agent_models import WorkflowStep  # noqa: E402
 from agent.configurator import (  # noqa: E402
     build_configurator_system_prompt,
     create_builder_session,
@@ -90,20 +93,26 @@ READY_TO_COMMIT
         )
 
     def test_sparse_android_review_exchange_request_gets_no_invented_prose(self) -> None:
-        """A blank description/system_prompt stays blank.
+        """A blank description/system_prompt stays blank -- and so does the flow.
 
-        This used to assert the opposite -- that the sparse draft came back
-        "saveable", with a description and a full system prompt written for it
-        by `_fallback_agent_description` / `_fallback_system_prompt`. The
-        system prompt is the agent's runtime instruction set: writing one from
-        a keyword match means the agent runs on rules the user never read and
-        the model never wrote. `provider_id` still defaults, because that
-        selects a configured backend rather than authoring text.
+        This used to assert the opposite twice over: that the sparse draft came
+        back "saveable", with a description and a full system prompt written
+        for it by `_fallback_agent_description` / `_fallback_system_prompt`,
+        and with a nine-step review-exchange workflow (collect / select /
+        approve / submit / install / verify / record, approval gates included)
+        written for it by `_ensure_android_review_exchange_template`. The
+        system prompt is the agent's runtime instruction set and the flow is
+        what the agent will actually do: writing either from a keyword match
+        means the agent runs on rules the user never read and the model never
+        wrote. `provider_id` still defaults, because that selects a configured
+        backend rather than authoring text. The `app_action` tool is still
+        declared -- a capability declaration, not workflow authorship, same as
+        `_ensure_playwright_tool` on the web side.
         """
 
         session = create_builder_session(system_prompt="test")
 
-        session.apply_llm_response(
+        parsed = session.apply_llm_response(
             """
 I'll create a simple agent draft.
 
@@ -128,17 +137,17 @@ I'll create a simple agent draft.
         self.assertEqual(draft.description, "")
         self.assertEqual(draft.name, "Android Review Exchange")
         self.assertTrue(any(tool.mcp_id == "app_action" for tool in draft.tools))
-        step_ids = [step.id for step in draft.flow]
-        self.assertIn("collect_review_exchange_requests", step_ids)
-        self.assertIn("select_review_exchange_candidate", step_ids)
-        self.assertIn("approve_join_request_submission", step_ids)
-        self.assertIn("submit_join_request", step_ids)
-        self.assertIn("open_app_store_listing", step_ids)
-        self.assertIn("approve_app_install", step_ids)
-        self.assertIn("install_app", step_ids)
-        self.assertIn("verify_app_launch", step_ids)
-        self.assertIn("record_execution_result", step_ids)
-        self.assertTrue(all(step.type != "browser_action" for step in draft.flow))
+        self.assertEqual(
+            draft.flow,
+            [],
+            "the model returned no steps; the server must not write them",
+        )
+        # Told in the reply the user actually reads, not at save time.
+        self.assertIn("워크플로 단계가 하나도 없습니다", parsed.assistant_message)
+        self.assertIn("서버가 대신 단계를 만들어 넣지도 않습니다", parsed.assistant_message)
+        # Nothing from the deleted review-exchange template may reappear.
+        self.assertNotIn("approve_app_install", parsed.assistant_message)
+        self.assertNotIn("submit_join_request", parsed.assistant_message)
 
     def test_missing_provider_reuses_existing_provider(self) -> None:
         session = create_builder_session(system_prompt="test")
@@ -200,10 +209,20 @@ Updated the description.
         self.assertEqual(session.current_draft.provider_id, "google")
         self.assertTrue(session.current_draft.system_prompt.strip())
 
-    def test_short_korean_android_review_exchange_request_becomes_saveable_app_draft(self) -> None:
+    def test_short_korean_android_review_exchange_request_gets_no_invented_workflow(self) -> None:
+        """The Korean review-exchange phrasing used to summon the full ladder.
+
+        "리뷰 품앗이 ... 앱 설치/실행 확인" turned an empty flow into
+        prepare/approve/submit/install/verify steps the model never wrote --
+        the app-side twin of `_naver_cafe_flow`, deleted for the same reason.
+        The empty flow now stays empty and the reply says so; the schedule and
+        the `app_action` tool declaration (a capability, not authorship) are
+        all that survive of the enrichment.
+        """
+
         session = create_builder_session(system_prompt="test")
 
-        session.apply_llm_response(
+        parsed = session.apply_llm_response(
             """
 초안입니다.
 
@@ -228,30 +247,13 @@ Updated the description.
         draft = session.current_draft
         self.assertTrue((draft.system_prompt or "").strip())
         self.assertEqual(draft.provider_id, "openai")
-        self.assertTrue(draft.flow)
         self.assertTrue(any(tool.mcp_id == "app_action" for tool in draft.tools))
-        self.assertTrue(all(step.type != "browser_action" for step in draft.flow))
-
-        step_ids = [step.id for step in draft.flow]
-        self.assertIn("prepare_join_request_context", step_ids)
-        self.assertIn("submit_join_request", step_ids)
-        self.assertIn("install_app", step_ids)
-        self.assertIn("verify_app_launch", step_ids)
-
-        submit_step = _step_by_id(draft.flow, "submit_join_request")
-        self.assertEqual(submit_step.type, "app_action")
-        self.assertEqual(submit_step.tool_hint, "android_adb")
-        self.assertEqual(submit_step.actions[0]["type"], "tap_text")
-
-        install_step = _step_by_id(draft.flow, "install_app")
-        self.assertEqual(install_step.type, "app_action")
-        self.assertEqual(install_step.tool_hint, "android_adb")
-        self.assertEqual(install_step.actions[0]["type"], "install_app")
-
-        verify_step = _step_by_id(draft.flow, "verify_app_launch")
-        self.assertEqual(verify_step.type, "app_action")
-        self.assertEqual(verify_step.tool_hint, "android_adb")
-        self.assertEqual(verify_step.actions[0]["type"], "verify_launch")
+        self.assertEqual(
+            draft.flow,
+            [],
+            "the model returned no steps; the server must not write them",
+        )
+        self.assertIn("워크플로 단계가 하나도 없습니다", parsed.assistant_message)
 
         self.assertIsNotNone(session.task_draft)
         self.assertEqual(session.task_draft.schedule, "every 1h")
@@ -322,10 +324,21 @@ Updated the description.
         self.assertTrue(runtime_steps)
         self.assertTrue(all(step.actions for step in runtime_steps))
 
-    def test_generic_install_capability_request_gets_guarded_workflow_steps(self) -> None:
+    def test_generic_install_capability_request_gets_no_invented_workflow(self) -> None:
+        """Capability keywords used to be a workflow generator.
+
+        "remembers the request id, opens the Play Store, installs the app,
+        verifies launch, and saves the result" was parsed into capability
+        flags by `_requested_generic_capabilities` and each flag emitted a
+        finished step -- actions, on_failure, approval gates, success criteria
+        -- into the empty flow. Those steps read as careful model work and
+        were nothing of the kind. The flow now stays as the model left it and
+        the turn says so.
+        """
+
         session = create_builder_session(system_prompt="test")
 
-        session.apply_llm_response(
+        parsed = session.apply_llm_response(
             """
 I'll keep this generic and fill in the workflow.
 
@@ -348,25 +361,15 @@ I'll keep this generic and fill in the workflow.
         )
 
         draft = session.current_draft
-        step_ids = [step.id for step in draft.flow]
-        self.assertIn("remember_request_id", step_ids)
-        self.assertIn("open_app_store_listing", step_ids)
-        self.assertIn("approve_app_install", step_ids)
-        self.assertIn("install_app", step_ids)
-        self.assertIn("verify_app_launch", step_ids)
-        self.assertIn("record_execution_result", step_ids)
-        self.assertEqual(_step_by_id(draft.flow, "approve_app_install").type, "approval_gate")
-        install_step = _step_by_id(draft.flow, "install_app")
-        self.assertEqual(install_step.type, "app_action")
-        self.assertEqual(install_step.actions[0]["type"], "install_app")
-        self.assertEqual(install_step.on_failure["type"], "manual_handoff")
-        verify_step = _step_by_id(draft.flow, "verify_app_launch")
-        self.assertEqual(verify_step.type, "app_action")
-        self.assertEqual(verify_step.actions[0]["type"], "verify_launch")
-        open_store_step = _step_by_id(draft.flow, "open_app_store_listing")
-        self.assertEqual(open_store_step.type, "app_action")
-        self.assertEqual(open_store_step.tool_hint, "android_adb")
-        self.assertEqual(open_store_step.actions[0]["type"], "open_play_store")
+        self.assertEqual(
+            draft.flow,
+            [],
+            "the model returned no steps; the server must not write them",
+        )
+        self.assertIn("워크플로 단계가 하나도 없습니다", parsed.assistant_message)
+        # None of the deleted capability template's step ids may reappear.
+        self.assertNotIn("open_app_store_listing", parsed.assistant_message)
+        self.assertNotIn("approve_app_install", parsed.assistant_message)
         self.assertTrue(any(tool.mcp_id == "app_action" for tool in draft.tools))
 
     def test_empty_app_mcp_steps_are_normalized_to_app_actions(self) -> None:
@@ -458,7 +461,18 @@ I'll model this after the existing runner.
         self.assertEqual(save_step.actions, [])
         self.assertTrue(all(step.type != "browser_action" for step in flow))
 
-    def test_concrete_android_package_launch_request_gets_executable_actions(self) -> None:
+    def test_concrete_android_package_launch_request_gets_no_invented_step(self) -> None:
+        """A launch request with no model-written steps stays stepless.
+
+        This used to assert that "설정 앱 com.android.settings 을 열고"
+        produced a complete `verify_app_launch` step -- package, wait,
+        read_screen, screenshot -- out of an empty flow, via
+        `_ensure_requested_generic_capabilities`. The package-name extraction
+        that made it *look* executable still exists, but only inside
+        normalization of steps the model actually wrote (see the
+        `test_empty_launch_check_step_*` tests). An empty flow stays empty.
+        """
+
         session = create_builder_session(system_prompt="test")
 
         session.apply_llm_response(
@@ -483,17 +497,15 @@ I'll model this after the existing runner.
 
         draft = session.current_draft
         self.assertTrue(any(tool.mcp_id == "app_action" for tool in draft.tools))
-        verify_step = _step_by_id(draft.flow, "verify_app_launch")
-        self.assertEqual(verify_step.type, "app_action")
-        self.assertEqual(verify_step.actions[0]["type"], "verify_launch")
-        self.assertEqual(verify_step.actions[0]["package"], "com.android.settings")
-        self.assertEqual(verify_step.actions[1]["type"], "wait")
-        self.assertEqual(verify_step.actions[2]["type"], "read_screen")
-        self.assertEqual(verify_step.actions[3]["type"], "screenshot")
+        self.assertEqual(
+            draft.flow,
+            [],
+            "the model returned no steps; the server must not write them",
+        )
         self.assertIsNotNone(session.task_draft)
         self.assertEqual(session.task_draft.schedule, "every 30m")
 
-    def test_english_android_settings_launch_request_gets_app_action_flow(self) -> None:
+    def test_english_android_settings_launch_request_gets_tool_but_no_flow(self) -> None:
         session = create_builder_session(system_prompt="test")
 
         session.apply_llm_response(
@@ -528,17 +540,18 @@ I'll model this after the existing runner.
         # the model never successfully produced was presented to the user as
         # a named, described, fully-instructed agent, assembled entirely from
         # keyword matches on their own sentence. Commit now refuses (422)
-        # naming the missing fields.
+        # naming the missing fields. The workflow half of that same
+        # fabrication -- a `verify_app_launch` step written from the words
+        # "open Android Settings" -- is gone too: no model steps, no steps.
         self.assertIsNone(draft.name)
         self.assertIsNone(draft.description)
         self.assertEqual(draft.system_prompt, "")
         self.assertTrue(any(tool.mcp_id == "app_action" for tool in draft.tools))
-        self.assertTrue(all(step.type != "browser_action" for step in draft.flow))
-        verify_step = _step_by_id(draft.flow, "verify_app_launch")
-        self.assertEqual(verify_step.type, "app_action")
-        self.assertEqual(verify_step.actions[0]["type"], "verify_launch")
-        self.assertEqual(verify_step.actions[0]["package"], "com.android.settings")
-        self.assertEqual([action["type"] for action in verify_step.actions[1:]], ["wait", "read_screen", "screenshot"])
+        self.assertEqual(
+            draft.flow,
+            [],
+            "the model returned no steps; the server must not write them",
+        )
         self.assertIsNotNone(session.task_draft)
         self.assertEqual(session.task_draft.schedule, "every 30m")
 
@@ -850,6 +863,117 @@ I'll model this after the existing runner.
         self.assertEqual(step.type, "app_action")
         self.assertEqual(step.actions[1]["label"], "verify_state_screenshot_2")
 
+    # These two tests walk the "실행 확인" branch of
+    # `_repair_empty_runtime_action_step`. That branch read a
+    # `split_launch_actions` flag that no caller ever defined -- a NameError
+    # (ruff F821) present since the branch was written, invisible because no
+    # test reached it: the deleted capability templates used to inject an
+    # "앱 실행 확인" step whose name flipped `_prefers_app_automation`, so the
+    # empty step was always normalized (where the flag exists) before repair
+    # ever saw it. A neutral user message keeps the intent classifier out of
+    # the way and drives the repair path directly.
+
+    def test_empty_launch_check_step_gets_repaired_with_evidence(self) -> None:
+        session = create_builder_session(system_prompt="test")
+
+        session.apply_llm_response(
+            """
+초안입니다.
+
+```draft
+{
+  "name": "Process Checker",
+  "description": "대상 패키지 상태를 점검한다.",
+  "system_prompt": "지정된 대상만 점검한다.",
+  "provider_id": "openai",
+  "tools": [],
+  "flow": [
+    {
+      "id": "check_running",
+      "type": "app_action",
+      "name": "실행 확인",
+      "description": "com.example.checker 프로세스가 잘 뜨는지 실행 확인한다.",
+      "tool_hint": "android_adb",
+      "actions": [],
+      "success_criteria": "대상이 포그라운드에 있음"
+    }
+  ],
+  "memory_seeds": []
+}
+```
+""",
+            user_message="com.example.checker 가 잘 뜨는지 점검하는 에이전트로 만들어줘.",
+        )
+
+        step = _step_by_id(session.current_draft.flow, "check_running")
+        self.assertEqual(step.type, "app_action")
+        # Alone in the flow, the repaired step carries its own evidence
+        # actions (include_evidence=True).
+        self.assertEqual(
+            [action["type"] for action in step.actions],
+            ["verify_launch", "wait", "read_screen", "screenshot"],
+        )
+        self.assertEqual(step.actions[0]["package"], "com.example.checker")
+
+    def test_empty_launch_check_step_stays_bare_when_followup_steps_exist(self) -> None:
+        session = create_builder_session(system_prompt="test")
+
+        session.apply_llm_response(
+            """
+초안입니다.
+
+```draft
+{
+  "name": "Process Checker",
+  "description": "대상 패키지 상태를 점검하고 증거를 남긴다.",
+  "system_prompt": "지정된 대상만 점검한다.",
+  "provider_id": "openai",
+  "tools": [],
+  "flow": [
+    {
+      "id": "check_running",
+      "type": "app_action",
+      "name": "실행 확인",
+      "description": "com.example.checker 프로세스가 잘 뜨는지 실행 확인한다.",
+      "tool_hint": "android_adb",
+      "actions": [],
+      "success_criteria": "대상이 포그라운드에 있음"
+    },
+    {
+      "id": "dump_state",
+      "type": "app_action",
+      "name": "상태 덤프",
+      "description": "현재 화면의 UI 계층을 덤프한다.",
+      "tool_hint": "android_adb",
+      "actions": [{"type": "read_screen", "target": "current_screen"}],
+      "success_criteria": "덤프가 비어 있지 않음"
+    },
+    {
+      "id": "capture_proof",
+      "type": "app_action",
+      "name": "증거 캡처",
+      "description": "결과 화면을 파일로 저장한다.",
+      "tool_hint": "android_adb",
+      "actions": [{"type": "screenshot", "label": "proof"}],
+      "success_criteria": "PNG 저장됨"
+    }
+  ],
+  "memory_seeds": []
+}
+```
+""",
+            user_message="com.example.checker 가 잘 뜨는지 점검하는 에이전트로 만들어줘.",
+        )
+
+        step = _step_by_id(session.current_draft.flow, "check_running")
+        # The model kept the wait/read/screenshot follow-ups as dedicated
+        # steps, so the repaired launch step must not duplicate them
+        # (split_launch_actions=True -> include_evidence=False).
+        self.assertEqual(
+            step.actions,
+            [{"type": "verify_launch", "package": "com.example.checker"}],
+        )
+
     def test_install_step_with_play_store_text_still_installs(self) -> None:
         session = create_builder_session(system_prompt="test")
 
@@ -1001,11 +1125,14 @@ Draft with model-generated app action steps.
             ),
         )
 
+        # The model wrote four steps; exactly those four survive. Before F2
+        # this only guarded against *duplicate* template steps -- the template
+        # machinery could still extend the flow. Now nothing may.
         step_ids = [step.id for step in session.current_draft.flow]
-        self.assertIn("open_play_store", step_ids)
-        self.assertNotIn("open_app_store_listing", step_ids)
-        self.assertIn("verify_launch", step_ids)
-        self.assertNotIn("verify_app_launch", step_ids)
+        self.assertEqual(
+            step_ids,
+            ["collect_requests", "open_play_store", "install_app", "verify_launch"],
+        )
 
     def test_add_install_step_preserves_existing_workflow(self) -> None:
         session = create_builder_session(system_prompt="test")
@@ -1075,16 +1202,26 @@ Added the install step.
             user_message="Add an install app step that opens the Play Store before installing.",
         )
 
+        # The additive request merges the model's new install step after the
+        # established workflow. The template escort that used to ride along
+        # (`open_app_store_listing`, `approve_app_install` -- steps the model
+        # never wrote) is gone with `_ensure_requested_generic_capabilities`.
         step_ids = [step.id for step in session.current_draft.flow]
-        self.assertLess(
-            step_ids.index("collect_release_context"),
-            step_ids.index("install_app"),
+        self.assertEqual(
+            step_ids,
+            ["collect_release_context", "report_release_status", "install_app"],
         )
-        self.assertIn("report_release_status", step_ids)
-        self.assertIn("open_app_store_listing", step_ids)
-        self.assertIn("approve_app_install", step_ids)
 
-    def test_generic_capability_detection_does_not_require_named_template(self) -> None:
+    def test_generic_capability_keywords_write_no_steps(self) -> None:
+        """The capability vocabulary no longer authors workflow.
+
+        This test's old name was "does not require named template": it proved
+        the generic capability detector fabricated steps even *without* the
+        review-exchange trigger phrase. That machinery is deleted, so the
+        stronger property holds -- capability-sounding words add nothing to
+        the flow at all. The model's own single step is all there is.
+        """
+
         session = create_builder_session(system_prompt="test")
 
         session.apply_llm_response(
@@ -1119,12 +1256,10 @@ Generic mobile QA workflow.
         )
 
         step_ids = [step.id for step in session.current_draft.flow]
-        self.assertIn("qa_context", step_ids)
-        self.assertIn("remember_request_id", step_ids)
-        self.assertIn("open_app_store_listing", step_ids)
-        self.assertIn("install_app", step_ids)
-        self.assertIn("verify_app_launch", step_ids)
-        self.assertIn("record_execution_result", step_ids)
+        self.assertEqual(step_ids, ["qa_context"])
+        self.assertTrue(
+            any(tool.mcp_id == "app_action" for tool in session.current_draft.tools)
+        )
 
     def test_naver_hourly_web_agent_gets_tools_and_schedule_but_no_invented_flow(
         self,
@@ -1276,20 +1411,46 @@ Generic mobile QA workflow.
         # value in a step nobody wrote.
         self.assertNotIn("rumururu@naver.com", parsed.assistant_message)
 
-    # The gate these two tests need must be one *this file* inserts, not one
-    # the model wrote. `_deterministic_gate_disclosure` compares the flow
-    # before enrichment with the flow after it, and a gate that arrived inside
-    # the model's own ```draft``` block is present in both -- so it produces no
-    # disclosure, by design (the model saw its own gate and rule 7 tells it to
-    # mention the cost itself). Measured, not assumed: an `approval_gate` in
-    # the draft block plus a "매일 09:00" schedule yields an assistant message
-    # with no notice in it at all.
+    # The gate these two tests need must be one the *server* inserts after the
+    # model's turn, not one the model wrote. `_deterministic_gate_disclosure`
+    # compares the flow before enrichment with the flow after it, and a gate
+    # that arrived inside the model's own ```draft``` block is present in both
+    # -- so it produces no disclosure, by design (the model saw its own gate
+    # and rule 7 tells it to mention the cost itself). Measured, not assumed:
+    # an `approval_gate` in the draft block plus a "매일 09:00" schedule
+    # yields an assistant message with no notice in it at all.
     #
-    # These tests used to get their gate from `_naver_note_flow`, which A6
-    # deleted. `_install_app_steps` still inserts `approve_app_install`
-    # deterministically -- correctly, per rules 13/14 -- so it is the same
-    # situation the disclosure exists for: a park-for-human step the model
-    # never wrote, landing in a flow that is being scheduled.
+    # These tests got their gate from `_naver_note_flow` (deleted by A6), then
+    # from `_install_app_steps` (deleted by F2). Nothing in configurator.py
+    # inserts gate steps deterministically any more -- that was the
+    # fabrication -- but the disclosure stays wired as the guard on the
+    # enrichment seam. So the tests stand in for the next code that inserts a
+    # gate there: a runtime wrapper around `enrich_draft_from_user_intent`
+    # appends an `approval_gate` the model never saw, exactly the shape of
+    # insertion the disclosure exists to expose. Silencing the machinery
+    # (`_deterministic_gate_disclosure` returning None, or its call dropped
+    # from `apply_llm_response`) makes the scheduled test fail.
+    def _enrichment_that_also_inserts_a_gate(self):
+        real_enrich = configurator.enrich_draft_from_user_intent
+
+        def enrich_and_insert_gate(draft, **kwargs):
+            next_draft, next_task_draft = real_enrich(draft, **kwargs)
+            gate = WorkflowStep(
+                id="approve_app_install",
+                type="approval_gate",
+                name="앱 설치 전 승인",
+                description="기기에 앱을 설치하기 전에 대상 앱과 설치 범위를 사용자에게 확인받는다.",
+                success_criteria="사용자가 대상 앱 설치를 승인함",
+            )
+            return (
+                next_draft.model_copy(update={"flow": [*next_draft.flow, gate]}),
+                next_task_draft,
+            )
+
+        return mock.patch.object(
+            configurator, "enrich_draft_from_user_intent", enrich_and_insert_gate
+        )
+
     _INSTALL_AGENT_RESPONSE = """
 설치 확인 에이전트 초안입니다.
 
@@ -1309,26 +1470,28 @@ Generic mobile QA workflow.
     def test_scheduled_flow_that_gains_approval_gate_discloses_stall_risk(self) -> None:
         """A deterministically-added gate must warn the user in the same turn.
 
-        `_install_app_steps` inserts an `approval_gate` step
-        (`approve_app_install`) ahead of the install per rules 13/14 --
-        correctly. But that step parks every single run for a human
+        An `approval_gate` parks every single run for a human
         (task_orchestrator._wait_for_user_step dispatches it unconditionally),
-        and here the schedule is set in the very same turn the gate is added.
-        If nothing discloses that, the user walks away believing they built an
-        unattended daily agent when they actually built a chore that stalls the
-        first morning nobody answers it -- the defect this initiative exists to
-        close.
+        and here the schedule is set in the very same turn the gate is added
+        behind the model's back. If nothing discloses that, the user walks
+        away believing they built an unattended daily agent when they actually
+        built a chore that stalls the first morning nobody answers it -- the
+        defect this initiative exists to close. The gate is injected by a
+        runtime wrapper because no production code writes gates any more (see
+        the comment above `_enrichment_that_also_inserts_a_gate`); the wiring
+        under test is real end to end.
         """
 
         session = create_builder_session(system_prompt="test")
 
-        parsed = session.apply_llm_response(
-            self._INSTALL_AGENT_RESPONSE,
-            user_message=(
-                "Create an agent that opens the Play Store, installs the app and "
-                "verifies launch. 매일 09:00에 자동으로 실행해줘."
-            ),
-        )
+        with self._enrichment_that_also_inserts_a_gate():
+            parsed = session.apply_llm_response(
+                self._INSTALL_AGENT_RESPONSE,
+                user_message=(
+                    "Create an agent that opens the Play Store, installs the app and "
+                    "verifies launch. 매일 09:00에 자동으로 실행해줘."
+                ),
+            )
 
         self.assertIsNotNone(session.task_draft)
         self.assertEqual(session.task_draft.schedule, "daily 09:00")
@@ -1338,7 +1501,8 @@ Generic mobile QA workflow.
         self.assertIn(
             "approve_app_install",
             gate_ids,
-            "the gate under test must be one the server inserted, not one the model wrote",
+            "the gate under test must be one inserted after the model's turn, "
+            "not one the model wrote",
         )
 
         # The disclosure must be in the reply actually handed back to the
@@ -1364,13 +1528,14 @@ Generic mobile QA workflow.
 
         session = create_builder_session(system_prompt="test")
 
-        parsed = session.apply_llm_response(
-            self._INSTALL_AGENT_RESPONSE,
-            user_message=(
-                "Create an agent that opens the Play Store, installs the app and "
-                "verifies launch."
-            ),
-        )
+        with self._enrichment_that_also_inserts_a_gate():
+            parsed = session.apply_llm_response(
+                self._INSTALL_AGENT_RESPONSE,
+                user_message=(
+                    "Create an agent that opens the Play Store, installs the app and "
+                    "verifies launch."
+                ),
+            )
 
         self.assertIsNone(session.task_draft)
         self.assertTrue(

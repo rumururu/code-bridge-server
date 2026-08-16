@@ -7,10 +7,29 @@ import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-DEFAULT_SERVER_LOG_PATH = Path("~/.code-bridge/logs/server.log").expanduser()
+from core.env_bootstrap import emit_recorded_bootstrap_log
+from core.runtime_paths import runtime_path
+
 LOG_PATH_ENV_KEYS = ("CODE_BRIDGE_SERVER_LOG_PATH", "CODEBRIDGE_SERVER_LOG_PATH")
 MAX_LOG_BYTES = 2_000_000
 LOG_BACKUP_COUNT = 3
+
+_SERVER_LOG_RELATIVE = "logs/server.log"
+
+
+def default_server_log_path() -> Path:
+    """Where the log lands when no env override is set.
+
+    Resolved lazily through :func:`core.runtime_paths.runtime_path` — never a
+    module constant — so ``CODEBRIDGE_APP_SUPPORT_DIR`` (packaged desktop
+    launches, and the test suite's conftest) redirects the log per call
+    instead of freezing the operator's real ``~/.code-bridge`` path at import
+    time.
+    """
+    return runtime_path(
+        _SERVER_LOG_RELATIVE,
+        Path("~/.code-bridge").expanduser() / _SERVER_LOG_RELATIVE,
+    )
 
 
 def resolve_server_log_path() -> Path:
@@ -19,7 +38,7 @@ def resolve_server_log_path() -> Path:
         value = os.getenv(key)
         if value:
             return Path(value).expanduser()
-    return DEFAULT_SERVER_LOG_PATH
+    return default_server_log_path()
 
 
 def _has_file_handler(logger: logging.Logger, log_path: Path) -> bool:
@@ -79,5 +98,12 @@ def configure_server_logging(log_level: str = "info") -> Path:
         logger.propagate = True
         if logger.level == logging.NOTSET:
             logger.setLevel(level)
+
+    # The PATH bootstrap runs at server_cli.main() top — before any handler
+    # exists — so its summary would otherwise vanish. Now that a file handler
+    # is attached, replay the recorded one-liner (a no-op if bootstrap never
+    # ran, and emitted at most once even though the dual-server entry point
+    # configures logging twice).
+    emit_recorded_bootstrap_log()
 
     return log_path

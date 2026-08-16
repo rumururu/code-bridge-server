@@ -27,6 +27,14 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
+# What the last bootstrap_path() run did, kept for replay: the bootstrap runs
+# at server_cli.main() top — before configure_server_logging() has attached
+# any handler — so an immediate logger.info would land nowhere on a normal
+# start. bootstrap_path() records its one-line summary here and
+# emit_recorded_bootstrap_log() emits it once logging is configured.
+_recorded_summary: str | None = None
+_summary_emitted = False
+
 # Checked for existence before being added — never trusted blindly.
 _STATIC_PATH_CANDIDATES: tuple[str, ...] = (
     "/opt/homebrew/bin",
@@ -97,7 +105,12 @@ def bootstrap_path(env: dict[str, str] | None = None) -> None:
     Never raises: any failure degrades to "PATH left unchanged" so a broken
     shell probe, an unreadable filesystem, or anything else unexpected can
     never block server startup.
+
+    Deliberately silent: it runs before logging is configured, so instead of
+    logging (into the void) it records a one-line summary that
+    :func:`emit_recorded_bootstrap_log` replays once handlers exist.
     """
+    global _recorded_summary, _summary_emitted
     target = os.environ if env is None else env
 
     try:
@@ -118,10 +131,32 @@ def bootstrap_path(env: dict[str, str] | None = None) -> None:
         if added:
             target["PATH"] = os.pathsep.join([*added, *existing_entries])
 
-        logger.info(
-            "PATH bootstrapped: added=%s existing_count=%d",
-            added,
-            len(existing_entries),
+        _recorded_summary = (
+            f"PATH bootstrapped: added={added} existing_count={len(existing_entries)}"
         )
+        _summary_emitted = False
     except Exception:  # noqa: BLE001 - PATH bootstrap must never block startup
+        _recorded_summary = "PATH bootstrap failed; continuing with existing PATH"
+        _summary_emitted = False
         logger.exception("PATH bootstrap failed; continuing with existing PATH")
+
+
+def emit_recorded_bootstrap_log() -> None:
+    """Emit the recorded bootstrap summary, once, through live handlers.
+
+    Called after ``configure_server_logging()`` has attached the file handler
+    so the summary actually lands in server.log. No-op when bootstrap never
+    ran (e.g. tests building an app directly) or when already emitted (the
+    dual-server entry point configures logging twice).
+    """
+    global _summary_emitted
+    if _recorded_summary is None or _summary_emitted:
+        return
+    _summary_emitted = True
+    # The root logger's default level is WARNING and configure_server_logging
+    # only raises it when NOTSET, so an INFO record would be filtered at the
+    # logger before ever reaching the file handler. Same per-logger level
+    # treatment the uvicorn loggers get there.
+    if not logger.isEnabledFor(logging.INFO):
+        logger.setLevel(logging.INFO)
+    logger.info(_recorded_summary)

@@ -752,16 +752,20 @@ def _deterministic_gate_disclosure(
 ) -> str | None:
     """Warn the user the turn a park-for-human step lands in a scheduled flow.
 
-    `_join_request_steps` and `_install_app_steps` add an `approval_gate` step
-    ahead of a sensitive external action -- correctly,
-    per rules 13/14 below. But that step type is dispatched unconditionally
-    every run (see `_GATE_STEP_TYPES` above), and it was inserted here rather
-    than written by the model, so the model never saw it and never had a
-    chance to mention its cost in its own reply. Without this check the
-    disclosure in rule 7 only ever fires for gates the model wrote itself;
-    a gate this file adds behind the scenes would stay silent and the exact
-    defect this initiative exists to close -- a user who asked for something
-    unattended getting a daily chore with no warning -- would reappear.
+    Nothing in this file inserts gate steps deterministically any more: the
+    last writers (`_join_request_steps` / `_install_app_steps`, which put an
+    `approval_gate` ahead of sensitive external actions) were deleted with the
+    rest of the app-automation templates. This check stays because it guards
+    the *seam*, not those writers: it compares the flow before and after the
+    deterministic enrichment pass, so any future code that slips a
+    park-for-human step into the flow behind the model's back is disclosed the
+    turn it lands. That step type is dispatched unconditionally every run (see
+    `_GATE_STEP_TYPES` above), and a gate the model never saw is one the model
+    never had a chance to mention the cost of in its own reply -- without this
+    check the disclosure in rule 7 only ever fires for gates the model wrote
+    itself, and the exact defect this initiative exists to close -- a user who
+    asked for something unattended getting a daily chore with no warning --
+    would reappear silently.
 
     Returns ``None`` (raises nothing, warns nothing) when there is no
     schedule: a gate in a manually-run agent is expected, and warning about
@@ -797,7 +801,9 @@ def _empty_flow_disclosure(flow: list[WorkflowStep]) -> str | None:
 
     This file used to answer an empty flow by writing one: a keyword classifier
     decided the agent "looked like" Naver cafe / Naver note / generic web
-    automation and `enrich_draft_from_user_intent` dropped a six-step template
+    automation -- or, on the app side, an Android review exchange / install /
+    launch-verification workflow complete with approval gates -- and
+    `enrich_draft_from_user_intent` dropped a multi-step template
     into the draft. The user then read a workflow they had never asked for,
     described in confident detail, and had no way to tell it apart from the
     model's own work. The global rule this project runs on is that when the
@@ -932,13 +938,18 @@ def enrich_draft_from_user_intent(
     preserving the user's responsibility to install MCPs in their CLI.
 
     What it does **not** do any more is write the workflow. An empty ``flow``
-    used to be answered with a keyword-selected six-step template
-    (`_naver_cafe_flow` / `_naver_note_flow` / `_generic_web_automation_flow`,
-    all deleted): the user was handed a detailed workflow they never asked for
-    and could not distinguish from the model's own output. An empty flow now
-    stays empty and `_empty_flow_disclosure` tells the user so in the same
-    turn. `_add_playwright_hints` remains because it only tags steps the model
-    actually wrote -- that is normalisation, not authorship.
+    used to be answered with a keyword-selected template -- six web steps
+    (`_naver_cafe_flow` / `_naver_note_flow` / `_generic_web_automation_flow`)
+    or a full app-automation ladder (`_ensure_requested_generic_capabilities` /
+    `_ensure_android_review_exchange_template`, which turned "설치해줘" into a
+    join/approve/install/verify workflow with approval gates the model never
+    wrote), all deleted: the user was handed a detailed workflow they never
+    asked for and could not distinguish from the model's own output. An empty
+    flow now stays empty and `_empty_flow_disclosure` tells the user so in the
+    same turn. `_add_playwright_hints`, `_normalize_app_automation_steps` and
+    `_repair_empty_workflow_actions` remain because they only retag or fill in
+    the runtime shape of steps the model actually wrote -- that is
+    normalisation, not authorship.
     """
 
     raw_text = _raw_intent_text(user_message, draft)
@@ -961,9 +972,11 @@ def enrich_draft_from_user_intent(
             update={"flow": _add_playwright_hints(next_draft.flow)}
         )
 
-    if not is_web:
-        next_draft = _ensure_requested_generic_capabilities(next_draft, user_message)
-    next_draft = _ensure_android_review_exchange_template(next_draft, text)
+    if prefers_app_automation:
+        # The app-side twin of `_ensure_playwright_tool` above: declaring the
+        # tool the request plainly needs is a capability declaration, not
+        # workflow authorship.
+        next_draft = _ensure_app_action_tool(next_draft)
     next_draft = _normalize_app_automation_steps(next_draft, user_message)
     next_draft = _repair_empty_workflow_actions(next_draft, text)
 
@@ -1266,33 +1279,6 @@ def _prefers_app_automation(text: str) -> bool:
     )
 
 
-def _looks_like_android_review_exchange(text: str) -> bool:
-    normalized = text.casefold()
-    return (
-        _has_any(
-            normalized,
-            (
-                "android review exchange",
-                "app review exchange",
-                "mobile review exchange",
-                "review exchange agent",
-                "review exchange bot",
-                "review swap",
-                "review request exchange",
-                "리뷰 품앗이",
-                "리뷰 교환",
-                "리뷰 맞교환",
-                "리뷰 답방",
-            ),
-        )
-        or (
-            _has_any(normalized, ("android", "mobile", "app", "앱", "안드로이드"))
-            and _has_any(normalized, ("review", "리뷰"))
-            and _has_any(normalized, ("exchange", "swap", "품앗이", "교환", "답방"))
-        )
-    )
-
-
 _EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+", re.IGNORECASE)
 _ANDROID_PACKAGE_RE = re.compile(
@@ -1324,190 +1310,8 @@ def _extract_android_package_name(text: str) -> str | None:
     return None
 
 
-def _ensure_requested_generic_capabilities(
-    draft: AgentDraft,
-    user_message: str,
-) -> AgentDraft:
-    capabilities = _requested_generic_capabilities(user_message)
-    if not capabilities:
-        return draft
-
-    next_draft = draft
-    if capabilities & {"join_request", "open_app_store", "install_app", "verify_launch"}:
-        next_draft = _ensure_app_action_tool(next_draft)
-
-    package_name = _extract_android_package_name(user_message)
-    additions: list[WorkflowStep] = []
-    if "remember_request_id" in capabilities:
-        additions.append(_remember_request_id_step())
-    if "join_request" in capabilities:
-        additions.extend(_join_request_steps())
-    if "open_app_store" in capabilities:
-        additions.append(_open_app_store_step())
-    if "install_app" in capabilities:
-        additions.extend(_install_app_steps())
-    if "verify_launch" in capabilities:
-        additions.append(_verify_app_launch_step(package_name=package_name))
-    if "save_result" in capabilities:
-        additions.append(_save_result_step())
-
-    if not additions:
-        return next_draft
-    return next_draft.model_copy(
-        update={"flow": _append_missing_capability_steps(next_draft.flow, additions)}
-    )
-
-
-def _ensure_android_review_exchange_template(
-    draft: AgentDraft,
-    text: str,
-) -> AgentDraft:
-    if not _looks_like_android_review_exchange(text):
-        return draft
-
-    next_draft = _ensure_app_action_tool(draft)
-    additions = [
-        _collect_review_exchange_requests_step(),
-        _select_review_exchange_candidate_step(),
-        *_join_request_steps(),
-        _open_app_store_step(),
-        *_install_app_steps(),
-        _verify_app_launch_step(),
-        _save_result_step(),
-    ]
-    return next_draft.model_copy(
-        update={"flow": _append_missing_capability_steps(next_draft.flow, additions)}
-    )
-
-
-def _requested_generic_capabilities(user_message: str) -> set[str]:
-    text = user_message.casefold()
-    capabilities: set[str] = set()
-
-    if _has_any(
-        text,
-        (
-            "request id",
-            "request_id",
-            "request-id",
-            "remember id",
-            "요청 id",
-            "요청 아이디",
-            "요청번호",
-            "요청 번호",
-        ),
-    ):
-        capabilities.add("remember_request_id")
-    if _has_any(
-        text,
-        (
-            "join request",
-            "request to join",
-            "submit request",
-            "participation request",
-            "참여 신청",
-            "참여신청",
-            "참여하고",
-            "참여하기",
-            "가입 신청",
-            "가입신청",
-            "신청 요청",
-        ),
-    ):
-        capabilities.add("join_request")
-    if _has_any(
-        text,
-        (
-            "play store",
-            "google play",
-            "app store",
-            "store listing",
-            "플레이스토어",
-            "플레이 스토어",
-            "앱 스토어",
-            "스토어 페이지",
-        ),
-    ):
-        capabilities.add("open_app_store")
-    if _has_any(
-        text,
-        (
-            "install app",
-            "install the app",
-            "installs app",
-            "installs the app",
-            "installing app",
-            "installing the app",
-            "app install",
-            "install from store",
-            "앱 설치",
-            "설치하기",
-        ),
-    ):
-        capabilities.update({"open_app_store", "install_app"})
-    if _has_any(
-        text,
-        (
-            "verify launch",
-            "verifies launch",
-            "verify app launch",
-            "launch verification",
-            "launch app",
-            "open android",
-            "open the android",
-            "open settings",
-            "open settings app",
-            "open android settings",
-            "open app",
-            "app launches",
-            "앱 실행",
-            "앱 열기",
-            "앱 열고",
-            "앱을 열",
-            "을 열",
-            "를 열",
-            "실행 확인",
-            "실행 검증",
-        ),
-    ):
-        capabilities.add("verify_launch")
-    if _has_any(
-        text,
-        (
-            "save result",
-            "saves result",
-            "saves the result",
-            "record result",
-            "records result",
-            "records the result",
-            "result recording",
-            "store result",
-            "persist result",
-            "결과 저장",
-            "결과 기록",
-            "결과를 저장",
-            "결과를 기록",
-        ),
-    ):
-        capabilities.add("save_result")
-
-    return capabilities
-
-
 def _has_any(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in text for marker in markers)
-
-
-def _append_missing_capability_steps(
-    flow: list[WorkflowStep],
-    additions: list[WorkflowStep],
-) -> list[WorkflowStep]:
-    out = list(flow)
-    for step in additions:
-        if _flow_has_equivalent_capability(out, step):
-            continue
-        out.append(step)
-    return out
 
 
 def _normalize_app_automation_steps(draft: AgentDraft, user_message: str) -> AgentDraft:
@@ -1804,10 +1608,22 @@ def _normalize_app_automation_step(
 def _repair_empty_workflow_actions(draft: AgentDraft, text: str) -> AgentDraft:
     repaired: list[WorkflowStep] = []
     changed = False
+    # Same rule `_normalize_app_automation_steps` applies: when the flow keeps
+    # its wait/read_screen/screenshot follow-ups as dedicated steps, a repaired
+    # launch step gets the bare verify_launch action instead of bundling the
+    # evidence actions those steps already own. This flag used to be read
+    # inside `_repair_empty_runtime_action_step` without ever being computed
+    # here -- a NameError (ruff F821) on every draft whose empty launch step
+    # reached that branch.
+    split_launch_actions = _has_dedicated_launch_followup_steps(draft.flow)
     for step in draft.flow:
         next_step = step
         if not step.actions and _step_requires_runtime_actions(step):
-            next_step = _repair_empty_runtime_action_step(step, text)
+            next_step = _repair_empty_runtime_action_step(
+                step,
+                text,
+                split_launch_actions=split_launch_actions,
+            )
         repaired.append(next_step)
         changed = changed or next_step != step
     if not changed:
@@ -1833,7 +1649,12 @@ def _step_requires_runtime_actions(step: WorkflowStep) -> bool:
     }
 
 
-def _repair_empty_runtime_action_step(step: WorkflowStep, text: str) -> WorkflowStep:
+def _repair_empty_runtime_action_step(
+    step: WorkflowStep,
+    text: str,
+    *,
+    split_launch_actions: bool = False,
+) -> WorkflowStep:
     haystack = f"{_step_search_text(step)}\n{text.casefold()}"
     if _has_any(
         haystack,
@@ -2020,119 +1841,6 @@ def _with_app_actions(
     )
 
 
-def _flow_has_equivalent_capability(
-    flow: list[WorkflowStep],
-    requested_step: WorkflowStep,
-) -> bool:
-    requested_id = (requested_step.id or "").strip().casefold()
-    for step in flow:
-        if requested_id and (step.id or "").strip().casefold() == requested_id:
-            return True
-        haystack = _step_search_text(step)
-        if requested_id == "collect_review_exchange_requests" and _has_any(
-            haystack,
-            (
-                "collect request",
-                "collect and select a request",
-                "current review exchange request",
-                "review exchange request list",
-                "read request",
-                "요청 수집",
-                "요청 목록",
-                "리뷰 교환 요청",
-                "리뷰 품앗이 요청",
-            ),
-        ):
-            return True
-        if requested_id == "select_review_exchange_candidate" and _has_any(
-            haystack,
-            (
-                "select candidate",
-                "select request",
-                "collect and select a request",
-                "duplicate",
-                "dedupe",
-                "중복",
-                "요청 선택",
-                "후보 선택",
-            ),
-        ):
-            return True
-        if requested_id == "remember_request_id" and _has_any(
-            haystack,
-            ("request id", "request_id", "request-id", "요청 id", "요청번호"),
-        ):
-            return True
-        if requested_id == "prepare_join_request_context" and _has_any(
-            haystack,
-            ("join request", "join exchange", "request to join", "participation request", "참여 신청", "가입 신청"),
-        ):
-            return True
-        if requested_id == "approve_join_request_submission" and step.type == "approval_gate" and _has_any(
-            haystack,
-            ("join request", "join exchange", "request to join", "participation request", "참여 신청", "가입 신청"),
-        ):
-            return True
-        if requested_id == "submit_join_request" and _has_concrete_app_action(step, "tap_text") and _has_any(
-            haystack,
-            ("join request", "join exchange", "request to join", "participation request", "참여 신청", "가입 신청"),
-        ):
-            return True
-        if requested_id == "open_app_store_listing" and _has_concrete_app_action(step, "open_play_store") and _has_any(
-            haystack,
-            (
-                "play store",
-                "google play",
-                "app store",
-                "store listing",
-                "open_play_store",
-                "open_app_store",
-                "플레이스토어",
-                "스토어 페이지",
-            ),
-        ):
-            return True
-        if requested_id == "approve_app_install" and step.type == "approval_gate" and _has_any(
-            haystack,
-            ("install app", "app install", "install the app", "installs the app", "앱 설치"),
-        ):
-            return True
-        if requested_id == "install_app" and _has_concrete_app_action(step, "install_app") and _has_any(
-            haystack,
-            ("install app", "app install", "install the app", "installs the app", "앱 설치"),
-        ):
-            return True
-        if requested_id == "verify_app_launch" and _has_concrete_app_action(step, "verify_launch") and _has_any(
-            haystack,
-            ("verify launch", "verify_launch", "launch app", "app launches", "앱 실행", "실행 확인"),
-        ):
-            return True
-        if requested_id == "record_execution_result":
-            step_id = (step.id or "").strip().casefold()
-            if step_id in {"remember_request_id", "verify_and_report_result"}:
-                continue
-            if _has_any(
-                haystack,
-                (
-                    "save result",
-                    "record result",
-                    "result recording",
-                    "store result",
-                    "persist result",
-                    "결과 저장",
-                    "결과 기록",
-                ),
-            ):
-                return True
-    return False
-
-
-def _has_concrete_app_action(step: WorkflowStep, action_type: str) -> bool:
-    if step.type not in {"app_action", "android_action", "mobile_action", "device_action"}:
-        return False
-    return any(isinstance(action, dict) and action.get("type") == action_type for action in step.actions)
-
-
 def _step_search_text(step: WorkflowStep) -> str:
     parts = [
         step.id or "",
@@ -2147,161 +1855,6 @@ def _step_search_text(step: WorkflowStep) -> str:
         if isinstance(value, str):
             parts.append(value)
     return "\n".join(parts).casefold()
-
-
-def _collect_review_exchange_requests_step() -> WorkflowStep:
-    return WorkflowStep(
-        id="collect_review_exchange_requests",
-        type="app_action",
-        name="리뷰 교환 요청 수집",
-        description="연결된 Android 앱 화면에서 현재 처리 가능한 리뷰 교환 요청 목록과 대상 앱 정보를 읽는다.",
-        instruction="Read the visible review exchange request list. Do not join, install, or submit anything in this step.",
-        tool_hint="android_adb",
-        actions=[
-            {"type": "read_screen", "target": "current_review_exchange_request_list"},
-            {"type": "screenshot", "label": "review_exchange_request_list"},
-        ],
-        success_criteria="처리 가능한 요청, 대상 앱, 요청 ID 또는 식별자가 확인됨",
-        on_failure={
-            "type": "manual_handoff",
-            "resume": "same_step",
-            "prompt": "리뷰 교환 요청 목록 화면을 열어 둔 뒤 재개하세요.",
-        },
-    )
-
-
-def _select_review_exchange_candidate_step() -> WorkflowStep:
-    return WorkflowStep(
-        id="select_review_exchange_candidate",
-        type="llm",
-        name="중복 없는 요청 선택",
-        description="수집한 요청 중 이미 처리한 요청, 동일 앱/동일 요청 ID, 정책상 위험한 요청을 제외하고 하나를 선택한다.",
-        instruction="Select one safe review exchange request. Skip duplicates and anything requiring policy, captcha, or account bypass.",
-        memory_read="최근 리뷰 교환 요청 ID, 대상 앱, 설치/실행/신청 결과 이력을 확인한다.",
-        success_criteria="중복이 아니고 처리 가능한 리뷰 교환 요청 하나가 선택됨",
-        on_failure={
-            "type": "ask_user",
-            "resume": "same_step",
-            "prompt": "처리할 리뷰 교환 요청을 선택할 수 없습니다. 기준이나 대상 요청을 알려주세요.",
-        },
-    )
-
-
-def _remember_request_id_step() -> WorkflowStep:
-    return WorkflowStep(
-        id="remember_request_id",
-        type="llm",
-        name="요청 ID 기억",
-        description="사용자가 제공한 요청 ID를 이번 실행의 추적 키로 확인하고 이후 단계와 결과 기록에 연결한다.",
-        instruction="Extract the request identifier from the user request or ask for it before continuing.",
-        memory_write="요청 ID, 관련 대상, 실행 결과를 다음 실행에서 조회할 수 있게 저장한다.",
-        success_criteria="요청 ID가 확인되고 결과 기록에 사용할 추적 키가 준비됨",
-        on_failure={
-            "type": "ask_user",
-            "resume": "same_step",
-            "prompt": "이 실행에 연결할 요청 ID를 알려주세요.",
-        },
-    )
-
-
-def _join_request_steps() -> list[WorkflowStep]:
-    return [
-        WorkflowStep(
-            id="prepare_join_request_context",
-            type="llm",
-            name="신청 요청 정보 확인",
-            description="신청 대상, 신청 조건, 요청 ID, 제출할 내용, 중복 신청 여부를 확인한다.",
-            instruction="Confirm the target, payload, constraints, and duplicate-prevention context for the join/request action.",
-            memory_read="동일 대상 또는 동일 요청 ID로 이미 처리한 신청 이력이 있는지 확인한다.",
-            success_criteria="신청 대상과 제출 조건이 명확하고 중복 신청이 아님",
-            on_failure={"type": "ask_user", "resume": "same_step"},
-        ),
-        WorkflowStep(
-            id="approve_join_request_submission",
-            type="approval_gate",
-            name="신청 제출 전 승인",
-            description="외부 서비스에 신청 요청을 제출하기 전에 대상과 내용을 사용자에게 확인받는다.",
-            instruction="Ask for explicit approval before submitting the join/request action.",
-            success_criteria="사용자가 신청 대상과 제출 내용을 승인함",
-            on_failure={"type": "abort", "reason": "join_request_not_approved"},
-        ),
-        WorkflowStep(
-            id="submit_join_request",
-            type="app_action",
-            name="신청 요청 제출",
-            description="승인된 대상에 한해 연결된 앱 화면에서 신청 요청을 제출하고 결과 화면을 확인한다.",
-            instruction="Only submit after the approval gate succeeds. Stop for handoff if login, captcha, account challenge, or native permission prompt appears.",
-            tool_hint="android_adb",
-            actions=[
-                {"type": "tap_text", "text": "join_or_apply_control_from_current_screen"},
-                {"type": "wait", "target": "join_request_result"},
-                {"type": "screenshot", "label": "join_request_result"},
-            ],
-            success_criteria="신청 요청의 성공 또는 명확한 실패 사유가 기록됨",
-            on_failure={
-                "type": "manual_handoff",
-                "resume": "same_step",
-                "prompt": "로그인, 인증, 캡차, 권한 확인 또는 예기치 않은 제출 화면을 직접 처리한 뒤 재개하세요.",
-            },
-        ),
-    ]
-
-
-def _open_app_store_step() -> WorkflowStep:
-    return WorkflowStep(
-        id="open_app_store_listing",
-        type="app_action",
-        name="앱 스토어 페이지 열기",
-        description="연결된 Android 환경에서 사용자가 지정한 Play Store 페이지를 열고 설치 가능 상태를 확인한다.",
-        instruction="Open the configured Play Store listing. Do not install or submit account actions in this step.",
-        tool_hint="android_adb",
-        actions=[
-            {"type": "open_play_store", "source": "user_provided_store_or_package"},
-            {"type": "wait", "target": "app_listing_visible"},
-            {"type": "screenshot", "label": "app_store_listing"},
-        ],
-        success_criteria="앱 스토어 페이지가 열리고 대상 앱을 식별할 수 있음",
-        on_failure={
-            "type": "manual_handoff",
-            "resume": "same_step",
-            "prompt": "스토어 로그인, 지역 제한, 인증 또는 접근 권한 확인을 직접 처리한 뒤 재개하세요.",
-        },
-    )
-
-
-def _install_app_steps() -> list[WorkflowStep]:
-    return [
-        WorkflowStep(
-            id="approve_app_install",
-            type="approval_gate",
-            name="앱 설치 전 승인",
-            description="기기 또는 계정에 앱을 설치하기 전에 대상 앱과 설치 범위를 사용자에게 확인받는다.",
-            instruction="Require explicit approval before initiating or asking the user to complete an app install.",
-            success_criteria="사용자가 대상 앱 설치를 승인함",
-            on_failure={"type": "abort", "reason": "app_install_not_approved"},
-        ),
-        WorkflowStep(
-            id="install_app",
-            type="app_action",
-            name="앱 설치",
-            description="승인 후 대상 앱 설치를 진행하고 설치 완료 또는 실패 사유를 확인한다.",
-            instruction=(
-                "Install the approved target app when a concrete package, store URL, "
-                "or user-provided source is available. Do not bypass account, billing, "
-                "device confirmation, or OS permission prompts."
-            ),
-            tool_hint="android_adb",
-            actions=[
-                {"type": "install_app", "source": "user_provided_store_or_package"},
-            ],
-            success_criteria="앱 설치 완료 또는 설치 불가 사유가 확인됨",
-            on_failure={
-                "type": "manual_handoff",
-                "resume": "same_step",
-                "prompt": "스토어 로그인, 기기 확인, 결제/권한 프롬프트 또는 OS 설치 확인을 직접 처리한 뒤 재개하세요.",
-            },
-        ),
-    ]
 
 
 def _verify_launch_actions(
@@ -2322,37 +1875,6 @@ def _verify_launch_actions(
         {"type": "read_screen", "target": "launched_app_screen"},
         {"type": "screenshot", "label": "app_launch_result"},
     ]
-
-
-def _verify_app_launch_step(package_name: str | None = None) -> WorkflowStep:
-    return WorkflowStep(
-        id="verify_app_launch",
-        type="app_action",
-        name="앱 실행 확인",
-        description="설치된 앱을 실행해 첫 화면, 로그인/권한 요청, 오류 여부를 확인하고 증거를 남긴다.",
-        instruction="Launch or ask the connected device workflow to launch the installed app and report the visible result.",
-        tool_hint="android_adb",
-        actions=_verify_launch_actions(package_name),
-        success_criteria="앱이 실행되었는지 또는 실행 실패 사유가 확인됨",
-        on_failure={
-            "type": "manual_handoff",
-            "resume": "same_step",
-            "prompt": "앱 실행, 로그인, 초기 권한 또는 첫 화면 확인을 직접 처리한 뒤 재개하세요.",
-        },
-    )
-
-
-def _save_result_step() -> WorkflowStep:
-    return WorkflowStep(
-        id="record_execution_result",
-        type="llm",
-        name="결과 저장",
-        description="요청 ID, 수행 단계, 성공/실패 상태, 수동 개입 내용, 다음 조치를 요약해 저장한다.",
-        instruction="Persist the run result in memory and summarize it for the user.",
-        memory_write="요청 ID, 대상 앱/서비스, 설치/실행/신청 결과, 오류 사유, 후속 조치를 저장한다.",
-        success_criteria="결과가 사용자에게 보고되고 다음 실행에서 참고할 수 있게 저장됨",
-        on_failure={"type": "ask_user", "resume": "same_step"},
-    )
 
 
 def _extract_schedule(text: str) -> str | None:

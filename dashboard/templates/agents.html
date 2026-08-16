@@ -590,6 +590,22 @@
             color: var(--text-muted);
             padding: 8px 12px 0;
         }
+        /* task.step.mcp_tools: what an agent declared in tools_json vs what
+           its llm turn was actually given (_apply_declared_mcp_servers in
+           agent/task_orchestrator.py). The warn rows are the point — a
+           declared server that does not exist on this machine has to be
+           readable here, not silently absent from the run. */
+        .mcp-tools { padding: 6px 12px 8px; }
+        .step-result .mcp-tools { border-top: 1px solid var(--border-color); }
+        .mcp-tools.run-level {
+            border: 1px solid var(--border-color); border-radius: 6px;
+            margin-bottom: 8px;
+        }
+        .mcp-line {
+            display: flex; align-items: baseline; gap: 6px;
+            font-size: 12.5px; color: var(--text-secondary); margin: 3px 0;
+        }
+        .mcp-line.warn { color: var(--warning-color); }
 
         #toast {
             position: fixed;
@@ -1121,6 +1137,9 @@
 
                 hint_runs: 'What each run actually did. A script step keeps its exit code and the tail of everything it printed, so a failure is readable here instead of on a terminal you are not sitting at.',
                 pick_run: 'Pick a run.',
+                mcp_injected: 'passed to this run: {list}',
+                mcp_builtin: "this server's own runtime: {list}",
+                mcp_missing: 'Declared MCP server "{id}" does not exist on this PC, so it was not passed to this run.',
 
                 scripts: 'Scripts',
                 hint_scripts: 'A shell step runs one of these — no model, no tokens, no approval prompt. Steps reference a script by name, never by command line, so registering is the moment the script is vetted. The path is checked now, not at 3am inside a scheduled run.',
@@ -1365,6 +1384,9 @@
 
                 hint_runs: '각 실행이 실제로 한 일입니다. 스크립트 단계는 exit code와 출력 끝부분을 남기므로, 앉아 있지 않은 터미널 대신 여기서 실패를 읽을 수 있습니다.',
                 pick_run: '실행을 고르세요.',
+                mcp_injected: '이 실행에 전달됨: {list}',
+                mcp_builtin: '서버 내장 실행기로 동작: {list}',
+                mcp_missing: '선언된 MCP 서버 "{id}"이(가) 이 PC에 없어 주입되지 않았습니다.',
 
                 scripts: '스크립트',
                 hint_scripts: 'shell 단계는 여기 등록된 것을 실행합니다 — 모델도, 토큰도, 승인 창도 없습니다. 단계는 명령줄이 아니라 이름으로 스크립트를 가리키므로, 등록하는 순간이 검증하는 순간입니다. 경로는 새벽 3시 예약 실행 중이 아니라 지금 확인합니다.',
@@ -3996,21 +4018,99 @@
             // look identical, since both render through the same step list.
             const dryRunBanner = run && run.dry_run
                 ? `<div class="note">${escapeHtml(t('run_dry_banner'))}</div>` : '';
-            if (!run || !run.task_id) {
+            if (!run) {
                 detail.innerHTML = `${dryRunBanner}<div class="empty">This run has no recorded steps.</div>`;
                 return;
             }
             detail.innerHTML = '<div class="empty">Loading…</div>';
-            const result = await api(`/tasks/${encodeURIComponent(run.task_id)}/steps`);
-            const steps = (result && result.steps) || [];
+            // The MCP report is a run *event*, not a step output — fetching
+            // only the steps is exactly what kept task.step.mcp_tools
+            // invisible after the orchestrator started writing it.
+            const [stepResult, eventResult] = await Promise.all([
+                run.task_id
+                    ? api(`/tasks/${encodeURIComponent(run.task_id)}/steps`)
+                    : Promise.resolve(null),
+                api(`/runs/${encodeURIComponent(run.id)}/events?limit=500`),
+            ]);
+            const steps = (stepResult && stepResult.steps) || [];
+            const mcpEvents = ((eventResult && eventResult.events) || []).filter(
+                (event) => event && event.event_type === 'task.step.mcp_tools'
+            );
+            const stepIds = new Set(steps.map((step) => step.id));
+            const byStep = {};
+            const runLevel = [];
+            mcpEvents.forEach((event) => {
+                const stepId = event.app_event && event.app_event.step_id;
+                if (stepId && stepIds.has(stepId)) {
+                    (byStep[stepId] = byStep[stepId] || []).push(event);
+                } else {
+                    // A workflow-less run writes the event with no step_id;
+                    // a step the server no longer returns leaves one
+                    // orphaned. Both still render, at run level — dropping
+                    // them here would restore the silent vanishing this
+                    // event exists to prevent.
+                    runLevel.push(event);
+                }
+            });
+            const runLevelHtml = runLevel
+                .map((event) => renderMcpToolsEvent(event, true)).join('');
             if (!steps.length) {
-                detail.innerHTML = `${dryRunBanner}<div class="empty">This run has no recorded steps.</div>`;
+                detail.innerHTML = `${dryRunBanner}${runLevelHtml}<div class="empty">This run has no recorded steps.</div>`;
                 return;
             }
-            detail.innerHTML = dryRunBanner + steps.map((step) => renderStepResult(step)).join('');
+            detail.innerHTML = dryRunBanner + runLevelHtml
+                + steps.map((step) => renderStepResult(step, byStep[step.id] || [])).join('');
         }
 
-        function renderStepResult(step) {
+        // One task.step.mcp_tools event → compact lines. Rendered from the
+        // stored payload as-is; a shape this does not recognise renders as
+        // nothing (or the server's own sentence), never as reassurance.
+        function renderMcpToolsEvent(event, runLevel) {
+            const payload = event && event.app_event;
+            if (!payload || typeof payload !== 'object') return '';
+            const names = (value) => (Array.isArray(value)
+                ? value.filter((item) => typeof item === 'string' && item) : []);
+            const entries = (value) => (Array.isArray(value)
+                ? value.filter((item) => item && typeof item === 'object') : []);
+            const lines = [];
+            const okBits = [];
+            const injected = names(payload.injected);
+            const builtin = names(payload.builtin_runtime);
+            if (injected.length) okBits.push(t('mcp_injected').replace('{list}', injected.join(', ')));
+            if (builtin.length) okBits.push(t('mcp_builtin').replace('{list}', builtin.join(', ')));
+            if (okBits.length) {
+                lines.push(`<div class="mcp-line"><span class="badge info">MCP</span><span>${escapeHtml(okBits.join(' · '))}</span></div>`);
+            }
+            // escapeHtml leaves double quotes alone (fine in text, fatal in an
+            // attribute: the server's details quote the mcp_id), so the hover
+            // text needs them entity-escaped too.
+            const attr = (text) => escapeHtml(text).replace(/"/g, '&quot;');
+            const warnLine = (text, hover) =>
+                `<div class="mcp-line warn"${hover ? ` title="${attr(hover)}"` : ''}><span class="badge warn">MCP</span><span>${escapeHtml(text)}</span></div>`;
+            entries(payload.missing).forEach((entry) => {
+                if (typeof entry.mcp_id === 'string' && entry.mcp_id) {
+                    lines.push(warnLine(
+                        t('mcp_missing').replace('{id}', entry.mcp_id),
+                        typeof entry.detail === 'string' ? entry.detail : ''));
+                } else if (typeof entry.detail === 'string' && entry.detail) {
+                    lines.push(warnLine(entry.detail, ''));
+                }
+            });
+            entries(payload.not_injected).forEach((entry) => {
+                // The server already wrote the reason as a sentence (an
+                // unlaunchable config, or a session type with no MCP
+                // option). Shown verbatim — composing a nicer one here
+                // could contradict it.
+                const text = (typeof entry.detail === 'string' && entry.detail)
+                    ? entry.detail
+                    : (typeof payload.message === 'string' ? payload.message : '');
+                if (text) lines.push(warnLine(text, ''));
+            });
+            if (!lines.length) return '';
+            return `<div class="mcp-tools${runLevel ? ' run-level' : ''}">${lines.join('')}</div>`;
+        }
+
+        function renderStepResult(step, mcpEvents) {
             const input = step.input || {};
             const output = step.output || {};
             const shell = output.shell;
@@ -4051,6 +4151,7 @@
                         <span class="kind">${escapeHtml(kind)} · ${escapeHtml(step.status || '')}</span>
                     </div>
                     ${body}
+                    ${(mcpEvents || []).map((event) => renderMcpToolsEvent(event, false)).join('')}
                 </div>`;
         }
 

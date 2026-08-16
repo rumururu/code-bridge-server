@@ -30,6 +30,12 @@ This runs at import time rather than in a fixture on purpose. pytest imports
 session-scoped autouse fixture runs *after* collection — and a test module
 that builds an app at import time would already have called
 ``configure_server_logging`` against the real path by then.
+
+Since the structural fix (F3), both modules resolve their *defaults* lazily
+through ``core.runtime_paths.runtime_path``, so ``CODEBRIDGE_APP_SUPPORT_DIR``
+alone already redirects them off the operator's ``~/.code-bridge``. The two
+explicit variables above stay anyway as defence in depth: they keep the suite
+isolated even if a future edit reintroduces a direct ``$HOME`` fallback.
 """
 
 from __future__ import annotations

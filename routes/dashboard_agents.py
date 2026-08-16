@@ -193,6 +193,26 @@ async def list_task_steps(task_id: str) -> dict[str, Any]:
     return await agents_routes.list_task_steps(task_id)
 
 
+@router.get("/runs/{run_id}/events", response_model=None)
+async def list_run_events(
+    run_id: str,
+    after_sequence: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> dict[str, Any]:
+    """Events for a run — where ``task.step.mcp_tools`` lives: the record of
+    which declared MCP servers a step's turn was actually given, and which
+    were missing on this machine. That report is an event, not a step output,
+    so the steps mirror above cannot surface it; without this read path the
+    dashboard would restore exactly the silent drop the event exists to
+    prevent (see ``_apply_declared_mcp_servers`` in agent/task_orchestrator.py).
+    """
+    return await agents_routes.list_run_events(
+        run_id,
+        after_sequence=after_sequence,
+        limit=limit,
+    )
+
+
 @router.get("/tasks", response_model=None)
 async def list_tasks(
     workspace_id: str | None = None,
