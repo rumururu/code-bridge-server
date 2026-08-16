@@ -8,12 +8,16 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
+from agent.app_action_executor import app_action_gap  # noqa: E402
 from agent.browser_action_adapter import _is_placeholder  # noqa: E402
 from agent.workflow_contract import (  # noqa: E402
+    CODE_APP_ACTIONS_MISSING,
     CODE_BROWSER_RUNTIME_UNAVAILABLE,
     CODE_POSSIBLE_UNKNOWN_STEP_REFERENCE,
     CODE_UNKNOWN_STEP_REFERENCE,
+    CODE_UNRESOLVED_APP_TARGET,
     CODE_UNRESOLVED_BROWSER_TARGET,
+    CODE_UNSUPPORTED_APP_ACTION,
     SEVERITY_BLOCKING,
     SEVERITY_WARNING,
     analyze_workflow,
@@ -62,13 +66,11 @@ class PlaceholderTargetTest(unittest.TestCase):
                 )
                 self.assertEqual(len(report.by_code(CODE_UNRESOLVED_BROWSER_TARGET)), 1)
 
-    def test_placeholder_in_non_browser_step_is_ignored(self):
+    def test_placeholder_in_a_step_with_no_runtime_target_is_ignored(self):
+        # A shell step has no target the adapter resolves, so a word that looks
+        # like a placeholder in it is just a word.
         flow = [
-            {
-                "id": "tap_thing",
-                "type": "app_action",
-                "actions": [{"type": "tap", "target": "configured_button"}],
-            }
+            {"id": "run_tests", "type": "shell", "script_id": "configured_script"}
         ]
 
         self.assertEqual(analyze_workflow(flow, browser_readiness=None).findings, [])
@@ -78,6 +80,152 @@ class PlaceholderTargetTest(unittest.TestCase):
         before = repr(flow)
 
         analyze_workflow(flow, browser_readiness={"ready": False})
+
+        self.assertEqual(repr(flow), before)
+
+
+class AppActionTargetTest(unittest.TestCase):
+    """The device half of the gate. Each payload here is one the builder writes."""
+
+    @staticmethod
+    def _app_step(actions, step_id="launch_app", step_type="app_action"):
+        return {
+            "id": step_id,
+            "type": step_type,
+            "name": "앱 실행",
+            "actions": actions,
+        }
+
+    def test_builder_written_verify_launch_blocks(self):
+        # `configurator._verify_launch_actions` with no package extracted.
+        flow = [
+            self._app_step([{"type": "verify_launch", "app": "installed_app_from_previous_step"}])
+        ]
+
+        report = analyze_workflow(flow, browser_readiness=None)
+
+        findings = report.by_code(CODE_UNRESOLVED_APP_TARGET)
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding.severity, SEVERITY_BLOCKING)
+        self.assertEqual(finding.step_id, "launch_app")
+        self.assertEqual(finding.detail["action_index"], 0)
+        self.assertEqual(finding.detail["action_type"], "verify_launch")
+        # The field the author actually wrote, so a UI patches that key rather
+        # than adding a second spelling of it.
+        self.assertEqual(finding.detail["field"], "app")
+        self.assertEqual(finding.detail["value"], "installed_app_from_previous_step")
+        self.assertEqual(finding.detail["reason"], "app_action_needs_package_name")
+        self.assertTrue(finding.ask)
+
+    def test_builder_written_install_and_play_store_block(self):
+        flow = [
+            self._app_step(
+                [
+                    {"type": "install_app", "source": "user_provided_store_or_package"},
+                    {"type": "open_play_store", "source": "user_provided_store_or_package"},
+                ]
+            )
+        ]
+
+        report = analyze_workflow(flow, browser_readiness=None)
+
+        reasons = [f.detail["reason"] for f in report.by_code(CODE_UNRESOLVED_APP_TARGET)]
+        self.assertEqual(
+            reasons,
+            ["app_install_needs_package_or_apk", "app_action_needs_package_name"],
+        )
+
+    def test_builder_written_join_tap_blocks(self):
+        flow = [
+            self._app_step(
+                [{"type": "tap_text", "text": "join_or_apply_control_from_current_screen"}]
+            )
+        ]
+
+        report = analyze_workflow(flow, browser_readiness=None)
+
+        self.assertEqual(len(report.by_code(CODE_UNRESOLVED_APP_TARGET)), 1)
+
+    def test_literal_app_step_commits(self):
+        # The evidence actions the builder bundles alongside a launch carry
+        # placeholder-looking targets the adapter never reads. Flagging them
+        # would refuse a workflow the device runs happily.
+        flow = [
+            self._app_step(
+                [
+                    {"type": "verify_launch", "package": "com.example.app"},
+                    {"type": "wait", "seconds": 1},
+                    {"type": "read_screen", "target": "launched_app_screen"},
+                    {"type": "screenshot", "label": "app_launch_result"},
+                    {"type": "tap_text", "text": "확인"},
+                    {"type": "install_app", "apk_path": "/tmp/app.apk"},
+                ]
+            )
+        ]
+
+        self.assertEqual(analyze_workflow(flow, browser_readiness=None).findings, [])
+
+    def test_every_app_step_type_is_inspected(self):
+        for step_type in ("app_action", "android_action", "mobile_action", "device_action"):
+            with self.subTest(step_type=step_type):
+                flow = [
+                    self._app_step(
+                        [{"type": "verify_launch", "app": "installed_app_from_previous_step"}],
+                        step_type=step_type,
+                    )
+                ]
+
+                report = analyze_workflow(flow, browser_readiness=None)
+
+                self.assertEqual(len(report.by_code(CODE_UNRESOLVED_APP_TARGET)), 1)
+
+    def test_browser_action_type_in_an_app_step_blocks(self):
+        # `workflow_v2.ALLOWED_ACTION_TYPES` is one set shared with browser
+        # steps, so `navigate` normalizes into an app step and then parks.
+        flow = [self._app_step([{"type": "navigate", "url": "https://example.com"}])]
+
+        report = analyze_workflow(flow, browser_readiness=None)
+
+        findings = report.by_code(CODE_UNSUPPORTED_APP_ACTION)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, SEVERITY_BLOCKING)
+        self.assertEqual(findings[0].detail["action_type"], "navigate")
+
+    def test_app_step_with_no_actions_blocks(self):
+        for actions in ([], None):
+            with self.subTest(actions=actions):
+                step = self._app_step(actions)
+                if actions is None:
+                    step.pop("actions")
+
+                report = analyze_workflow([step], browser_readiness=None)
+
+                findings = report.by_code(CODE_APP_ACTIONS_MISSING)
+                self.assertEqual(len(findings), 1)
+                self.assertNotIn("action_index", findings[0].detail)
+
+    def test_gate_judgement_is_the_adapter_judgement(self):
+        # No second opinion: every finding here is one `app_action_gap` made.
+        actions = [
+            {"type": "verify_launch", "app": "installed_app_from_previous_step"},
+            {"type": "read_screen", "target": "current_screen"},
+            {"type": "press_key", "key": "sudo_make_me_a_sandwich"},
+            {"type": "input_text", "text": "hello"},
+        ]
+
+        report = analyze_workflow([self._app_step(actions)], browser_readiness=None)
+
+        self.assertEqual(
+            [f.detail["reason"] for f in report.findings],
+            [gap.reason for gap in (app_action_gap(a) for a in actions) if gap],
+        )
+
+    def test_analysis_does_not_mutate_an_app_flow(self):
+        flow = [self._app_step([{"type": "verify_launch", "app": "installed_app_from_previous_step"}])]
+        before = repr(flow)
+
+        analyze_workflow(flow, browser_readiness=None)
 
         self.assertEqual(repr(flow), before)
 

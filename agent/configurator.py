@@ -183,6 +183,36 @@ Rules:
    Do NOT ask a separate follow-up about registering an internal work item.
    The schedule question above is the single decision point.
 
+6a. Settle WHERE the agent works, in the same part of the conversation.
+
+    An agent that is never given a folder runs in Code Bridge's shared work
+    folder. Every file it opens in the user's own project is then outside its
+    workspace, so it stops and asks the user for permission for each one — on
+    every run, including the unattended ones nobody is awake for. A user who
+    asked for something unattended and never got this question ends up with an
+    agent that pauses on its first file.
+
+    Ask in plain language, and offer the registered projects listed below BY
+    NAME. Never ask for a "cwd", a "directory", or a path — the user is not
+    expected to know one. For example:
+      "이 에이전트는 주로 어떤 프로젝트에서 일하나요? (A) code_bridge
+       (B) lottosignal (C) 특정 프로젝트 없이"
+
+    When the user picks one, copy that project's path from the list below
+    EXACTLY as written into `task_draft.cwd`. You may also write the project's
+    name there and the server will resolve it to the path.
+
+    If the user picks none, or names something that is not on the list, leave
+    `task_draft.cwd` empty and say so plainly — e.g. "특정 프로젝트를 정하지
+    않았으니 공용 작업 폴더에서 실행되고, 다른 폴더의 파일을 건드릴 때마다
+    실행마다 승인을 요청합니다." Do NOT guess a path, do NOT build one from the
+    project's name, and do NOT copy an example out of this prompt. A wrong
+    folder points the agent at somebody else's files; an empty one is merely
+    inconvenient, and the user was told why.
+
+    Skip this question entirely for an agent that touches no files (a
+    browser-only or notify-only flow).
+
 7. Adding an `approval_gate` or `manual_handoff` step is correct whenever
    rule 12, 13, or 14 calls for one — keep adding them there. But if the
    flow you are building ALSO carries a schedule (rule 6 populated
@@ -302,6 +332,68 @@ def _registered_scripts_block() -> str:
     return "\n".join(lines)
 
 
+def _registered_projects_block() -> str:
+    """List the folders an agent may be pointed at, by name and by path.
+
+    Rule 6a asks the user which project the agent works in. Without this block
+    the model has no names to offer and no path to copy, so it either asks a
+    non-developer for a filesystem path or -- worse -- invents one that looks
+    plausible. Registered projects are the one part of that answer the model
+    cannot derive: they live in the user's project database.
+
+    The cost of the question never being asked is concrete.
+    ``task_draft.cwd`` stays empty, ``builder_commit`` stores no ``cwd`` in the
+    task metadata, ``task_orchestrator._resolve_project_path`` falls through to
+    ``_global_task_path()``, and the run's workspace root becomes the shared
+    global chat directory. Every path in the user's actual project is then
+    outside that root, which ``policy/path_guard.py`` classifies as
+    ``confirm_each`` -- so an agent built to work unattended asks permission for
+    each routine read, on every fire.
+
+    Reads the project table directly rather than going through
+    ``ProjectManager.get_all_projects()``: that call shells out to ``lsof`` to
+    detect dev-server ports for every project, which has no bearing on a prompt
+    and would put seconds of latency on every builder turn.
+    """
+    try:
+        from core.database import get_project_db
+
+        projects = get_project_db().get_all()
+    except (ImportError, RuntimeError, OSError, sqlite3.Error):
+        # Building a prompt must not depend on the project table existing --
+        # same reasoning as `_registered_scripts_block`.
+        return ""
+
+    listed = [
+        (str(project.get("name") or "").strip(), str(project.get("path") or "").strip())
+        for project in projects
+    ]
+    listed = [(name, path) for name, path in listed if name and path]
+
+    if not listed:
+        return (
+            "\nRegistered projects: none.\n"
+            "There is no folder to offer, so do not ask rule 6a's question as a "
+            "choice. Leave `task_draft.cwd` empty, and tell the user the agent "
+            "will run in Code Bridge's shared work folder and will ask "
+            "permission every time it touches a file elsewhere. Never invent a "
+            "path.\n"
+        )
+
+    lines = [
+        "\nRegistered projects (rule 6a -- offer these BY NAME; copy the path verbatim",
+        "into `task_draft.cwd`, or write the name and the server resolves it):",
+    ]
+    for name, path in listed:
+        lines.append(f"  - {name}: {path}")
+    lines.append(
+        "Any other value is refused by the server and the user is told the agent "
+        "fell back to the shared work folder."
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _workflow_step_schema_block() -> str:
     """Generate the ``WorkflowStep { ... }`` listing from the published schema.
 
@@ -366,13 +458,16 @@ def build_configurator_system_prompt(_unused: list[Any] | None = None) -> str:
 
     Registered scripts are injected because they are the one thing the
     Configurator cannot invent: a shell step names a script by id, and an id
-    it made up fails at execution rather than in the conversation.
+    it made up fails at execution rather than in the conversation. Registered
+    projects are injected for the same reason: rule 6a asks which folder the
+    agent works in, and a path the model made up is a wrong folder rather than
+    an empty one.
     """
 
     template = _SYSTEM_PROMPT_TEMPLATE.replace(
         _WORKFLOW_STEP_SCHEMA_MARKER, _workflow_step_schema_block()
     )
-    return template + _registered_scripts_block()
+    return template + _registered_projects_block() + _registered_scripts_block()
 
 
 def _step_id_for_script(script_name: str) -> str:
@@ -544,6 +639,26 @@ class BuilderSession:
             parsed = replace(
                 parsed,
                 assistant_message=_with_disclosure(parsed.assistant_message, gate_disclosure),
+            )
+        # Where the agent works, settled before the draft can be committed.
+        # A project the user named is turned into that project's real path so
+        # the run roots there; anything that names nothing is dropped rather
+        # than carried into the task metadata, because `_resolve_project_path`
+        # uses whatever string it finds there as the run's root without
+        # checking it.
+        workdir = resolve_task_draft_workdir(self.task_draft)
+        self.task_draft = workdir.task_draft
+        workdir_note = workdir_disclosure(
+            resolution=workdir,
+            # Only on the turn the model declares the draft finished: that is
+            # the last point before a scheduled task is created, and saying it
+            # every turn would train the user to skip it.
+            announce_global_fallback=parsed.is_ready_to_commit and self.task_draft is not None,
+        )
+        if workdir_note is not None:
+            parsed = replace(
+                parsed,
+                assistant_message=_with_disclosure(parsed.assistant_message, workdir_note),
             )
         # After enrichment, so both what the model declared and what
         # `_ensure_playwright_tool` / `_ensure_app_action_tool` added are
@@ -734,6 +849,133 @@ def _task_draft_has_content(task_draft: TaskDraft) -> bool:
             task_draft.workspace_id,
         )
     )
+
+
+@dataclass(frozen=True)
+class WorkdirResolution:
+    """What became of the working folder the conversation named, if any.
+
+    ``project_name`` is set only when the value matched a project the user has
+    registered; ``refused`` carries the original text when it matched nothing
+    and was dropped rather than kept.
+    """
+
+    task_draft: TaskDraft | None
+    project_name: str | None = None
+    refused: str | None = None
+
+
+def _registered_project_rows() -> list[tuple[str, str]]:
+    """``(name, path)`` for every registered project, or ``[]`` if unavailable."""
+    try:
+        from core.database import get_project_db
+
+        projects = get_project_db().get_all()
+    except (ImportError, RuntimeError, OSError, sqlite3.Error):
+        return []
+    rows = []
+    for project in projects:
+        name = str(project.get("name") or "").strip()
+        path = str(project.get("path") or "").strip()
+        if name and path:
+            rows.append((name, path))
+    return rows
+
+
+def _normalized_path(value: str) -> str:
+    return value.rstrip("/") or "/"
+
+
+def resolve_task_draft_workdir(task_draft: TaskDraft | None) -> WorkdirResolution:
+    """Turn whatever the conversation put in ``cwd`` into a folder that exists.
+
+    Three outcomes, and the third is the point of the function:
+
+    - the value names a registered project (by name, case-insensitively, or by
+      that project's path) -- ``cwd`` becomes that project's path, so
+      ``builder_commit`` stores it in the task metadata,
+      ``task_orchestrator._resolve_project_path`` returns it, and the run's
+      workspace root is the user's project rather than the shared global chat
+      directory;
+    - the value is an absolute path -- kept as written. Somebody typed a real
+      path (the phone's working-folder field allows one), and refusing it would
+      be the builder overruling an explicit instruction;
+    - anything else -- dropped, and named back to the caller in ``refused``.
+
+    That last branch is deliberate. A relative fragment, a project the user
+    only *described*, or a folder name the model composed from the agent's
+    title would otherwise be written into the task's metadata and become the
+    run's root: `_resolve_project_path` returns whatever string it finds there
+    without checking it. An agent silently rooted at a directory nobody chose
+    is worse than one rooted at the shared folder, because the shared-folder
+    case is at least announced (see :func:`workdir_disclosure`).
+    """
+
+    if task_draft is None:
+        return WorkdirResolution(task_draft=None)
+    raw = (task_draft.cwd or "").strip()
+    if not raw:
+        return WorkdirResolution(task_draft=task_draft)
+
+    for name, path in _registered_project_rows():
+        if raw.casefold() == name.casefold() or _normalized_path(raw) == _normalized_path(path):
+            if raw == path:
+                return WorkdirResolution(task_draft=task_draft, project_name=name)
+            return WorkdirResolution(
+                task_draft=task_draft.model_copy(update={"cwd": path}),
+                project_name=name,
+            )
+
+    if raw.startswith("/"):
+        return WorkdirResolution(task_draft=task_draft)
+
+    logger.warning("builder_configurator_refused_cwd value=%r", raw)
+    return WorkdirResolution(
+        task_draft=task_draft.model_copy(update={"cwd": None}),
+        refused=raw,
+    )
+
+
+def workdir_disclosure(
+    *,
+    resolution: WorkdirResolution,
+    announce_global_fallback: bool,
+) -> str | None:
+    """Say where the agent will actually work, on the turns where it matters.
+
+    Two turns matter and no others. The turn a named folder was refused -- the
+    user believes they chose one and did not -- and the turn the draft is
+    declared ready with no folder at all, which is the last moment before a
+    scheduled task is created that will ask permission for every file it opens.
+    Repeating either on every turn would be noise, and noise is how a real
+    disclosure stops being read.
+
+    Returns ``None`` when a folder was established: there is nothing to warn
+    about, and confirming it is the model's job, not a deterministic append.
+    """
+
+    task_draft = resolution.task_draft
+    cwd = (task_draft.cwd or "").strip() if task_draft is not None else ""
+    workspace_id = (task_draft.workspace_id or "").strip() if task_draft is not None else ""
+
+    consequence = (
+        "이 경우 에이전트는 Code Bridge 공용 작업 폴더에서 실행되고, 사용자의 프로젝트 "
+        "폴더에 있는 파일은 모두 작업 범위 밖으로 분류되어 파일 하나를 열 때마다 실행마다 "
+        "승인을 요청합니다. 무인으로 도는 실행에서도 마찬가지라, 아무도 없는 시간에는 그 "
+        "자리에서 멈춰 있게 됩니다."
+    )
+
+    if resolution.refused is not None:
+        return (
+            f"참고: 작업 폴더로 적힌 '{resolution.refused}'은(는) 등록된 프로젝트도 아니고 "
+            f"실제 경로도 아니어서 저장하지 않았습니다. {consequence} 등록된 프로젝트 이름을 "
+            "알려주시거나, 작업 폴더를 직접 지정해 주세요."
+        )
+
+    if announce_global_fallback and not cwd and not workspace_id:
+        return f"참고: 이 에이전트가 일할 폴더를 정하지 않았습니다. {consequence}"
+
+    return None
 
 
 # Step types that `_wait_for_user_step` (task_orchestrator.py) dispatches
@@ -1392,7 +1634,7 @@ def _normalize_app_automation_step(
         ) and not _action_list_has_type(step.actions, "install_app"):
             actions = [
                 *step.actions,
-                {"type": "install_app", "source": "user_provided_store_or_package"},
+                {"type": "install_app", "apk_path": "configured_apk_path"},
             ]
         else:
             actions = step.actions
@@ -1478,7 +1720,7 @@ def _normalize_app_automation_step(
             tool_hint="android_adb",
             actions=[
                 *step.actions,
-                {"type": "install_app", "source": "user_provided_store_or_package"},
+                {"type": "install_app", "apk_path": "configured_apk_path"},
             ],
         )
     if step.actions:
@@ -1489,13 +1731,34 @@ def _normalize_app_automation_step(
             actions=_repair_app_action_payloads(step),
         )
 
+    if _has_any(
+        haystack,
+        (
+            "join request", "join exchange", "request to join", "participation request",
+            "collect request", "fetch request", "list request", "read request",
+            "review exchange request", "참여 신청", "가입 신청", "요청 수집", "요청 목록", "신규 요청",
+        ),
+    ):
+        # Type only. These words say the step drives the *device*, which is a
+        # judgement about the step's kind and safe to make. What they do not say
+        # is which control to press or which list to read — the server used to
+        # compose `tap_text: join_or_apply_control_from_current_screen` and
+        # `read_screen: current_review_exchange_request_list` from them, which is
+        # the fabrication `_join_request_steps` was deleted for, one layer down.
+        # An empty action list stays empty and the author fills it in.
+        return _with_app_actions(
+            step,
+            step_type="app_action",
+            tool_hint="android_adb",
+            actions=step.actions or [],
+        )
     if _has_any(haystack, ("install app", "app install", "install the app", "installs the app", "앱 설치")):
         return _with_app_actions(
             step,
             step_type="app_action",
             tool_hint="android_adb",
             actions=step.actions or [
-                {"type": "install_app", "source": "user_provided_store_or_package"},
+                {"type": "install_app", "apk_path": "configured_apk_path"},
             ],
         )
     if _has_any(haystack, ("open play store", "play store", "google play", "앱 스토어", "플레이스토어", "플레이 스토어")):
@@ -1519,41 +1782,6 @@ def _normalize_app_automation_step(
                 package_name,
                 include_evidence=not split_launch_actions,
             ),
-        )
-    if _has_any(haystack, ("join request", "join exchange", "request to join", "participation request", "참여 신청", "가입 신청")):
-        return _with_app_actions(
-            step,
-            step_type="app_action",
-            tool_hint="android_adb",
-            actions=step.actions or [
-                {"type": "tap_text", "text": "join_or_apply_control_from_current_screen"},
-                {"type": "wait", "target": "join_request_result"},
-            ],
-        )
-    if _has_any(
-        haystack,
-        (
-            "collect request",
-            "fetch request",
-            "list request",
-            "read request",
-            "review exchange request",
-            "review request",
-            "품앗이 요청",
-            "리뷰 교환 요청",
-            "리뷰 품앗이 요청",
-            "요청 수집",
-            "요청 목록",
-            "신규 요청",
-        ),
-    ):
-        return _with_app_actions(
-            step,
-            step_type="app_action",
-            tool_hint="android_adb",
-            actions=step.actions or [
-                {"type": "read_screen", "target": "current_review_exchange_request_list"},
-            ],
         )
     if _has_any(
         haystack,
@@ -1655,39 +1883,23 @@ def _repair_empty_runtime_action_step(
     *,
     split_launch_actions: bool = False,
 ) -> WorkflowStep:
-    haystack = f"{_step_search_text(step)}\n{text.casefold()}"
-    if _has_any(
-        haystack,
-        (
-            "collect request",
-            "fetch request",
-            "list request",
-            "read request",
-            "review exchange request",
-            "review request",
-            "품앗이 요청",
-            "리뷰 교환 요청",
-            "리뷰 품앗이 요청",
-            "요청 수집",
-            "요청 목록",
-            "신규 요청",
-        ),
-    ):
-        return _with_app_actions(
-            step,
-            step_type="app_action",
-            tool_hint="android_adb",
-            actions=[
-                {"type": "read_screen", "target": "current_review_exchange_request_list"},
-                {"type": "screenshot", "label": _safe_action_label(step, "request_list")},
-            ],
-        )
+    # The step's *own* words decide what it does. `text` — the whole user
+    # message — used to be folded in here, which made every empty step in a
+    # flow match the same phrase: a request that mentions "install app" once
+    # gave `collect_requests` and `join_exchange` an install action apiece,
+    # because the sentence sits in every step's haystack. It went unseen while
+    # each of those steps also matched an earlier, more specific branch (the
+    # invented `tap_text`/`read_screen` ones), so deleting those revealed this
+    # rather than caused it. `text` is kept in the signature because callers
+    # pass it positionally and it still describes what this repair is *about*,
+    # but it must not decide any single step's actions.
+    haystack = _step_search_text(step)
     if _has_any(haystack, ("install app", "app install", "install the app", "installs the app", "앱 설치")):
         return _with_app_actions(
             step,
             step_type="app_action",
             tool_hint="android_adb",
-            actions=[{"type": "install_app", "source": "user_provided_store_or_package"}],
+            actions=[{"type": "install_app", "apk_path": "configured_apk_path"}],
         )
     if _has_any(haystack, ("play store", "google play", "app store", "store listing", "플레이스토어", "플레이 스토어", "앱 스토어")):
         return _with_app_actions(
@@ -1709,17 +1921,6 @@ def _repair_empty_runtime_action_step(
                 package_name,
                 include_evidence=not split_launch_actions,
             ),
-        )
-    if _has_any(haystack, ("join request", "request to join", "participation request", "참여 신청", "가입 신청", "참여하고")):
-        return _with_app_actions(
-            step,
-            step_type="app_action",
-            tool_hint="android_adb",
-            actions=[
-                {"type": "tap_text", "text": "join_or_apply_control_from_current_screen"},
-                {"type": "wait", "target": "join_request_result"},
-                {"type": "screenshot", "label": _safe_action_label(step, "join_request_result")},
-            ],
         )
     if step.type == "browser_action":
         return step.model_copy(

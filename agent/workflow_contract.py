@@ -22,6 +22,13 @@ Single source of truth: placeholder detection is imported from
 ``browser_action_adapter._is_placeholder`` rather than re-implemented. Two
 copies would drift, and the copy that drifted would either block commits the
 runtime is happy to run or wave through the exact workflow the runtime parks.
+
+The same rule decides the device side. An app step is judged by
+``app_action_executor.app_action_gap`` — the function the adapter itself calls
+before running an action — and not by a field scan, because which field is a
+target depends on the action: ``read_screen`` never reads its ``target`` and a
+placeholder there is harmless, while ``verify_launch`` parks without a real
+package. A second opinion here would refuse commits the device would have run.
 """
 
 from __future__ import annotations
@@ -30,6 +37,12 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from .app_action_executor import (
+    REASON_ACTIONS_MISSING,
+    REASON_UNSUPPORTED_ACTION,
+    app_action_gap,
+    app_actions_missing_gap,
+)
 from .browser_action_adapter import (
     PLAYWRIGHT_CHROMIUM_INSTALL_COMMAND,
     _is_placeholder,
@@ -42,8 +55,28 @@ CODE_UNRESOLVED_BROWSER_TARGET = "unresolved_browser_target"
 CODE_BROWSER_RUNTIME_UNAVAILABLE = "browser_runtime_unavailable"
 CODE_UNKNOWN_STEP_REFERENCE = "unknown_step_reference"
 CODE_POSSIBLE_UNKNOWN_STEP_REFERENCE = "possible_unknown_step_reference"
+CODE_UNRESOLVED_APP_TARGET = "unresolved_app_target"
+CODE_UNSUPPORTED_APP_ACTION = "unsupported_app_action"
+CODE_APP_ACTIONS_MISSING = "app_actions_missing"
 
 BROWSER_STEP_TYPES: frozenset[str] = frozenset({"browser_action"})
+
+# The four types `task_orchestrator._is_app_action_workflow_type` dispatches to
+# the device adapter (`task_orchestrator.py:3064-3070`). All four park the run
+# on an unresolved target exactly as a browser step does, so all four belong to
+# a gate whose stated purpose is "do not schedule a guaranteed 3am stall".
+APP_STEP_TYPES: frozenset[str] = frozenset(
+    {"app_action", "android_action", "mobile_action", "device_action"}
+)
+
+# Which finding a runtime stop is reported as. Everything that is not "this
+# action type does not exist here" or "there are no actions" is an unresolved
+# target: a package, an APK path, a screen text or a key the author has to
+# supply.
+_APP_GAP_CODES: dict[str, str] = {
+    REASON_UNSUPPORTED_ACTION: CODE_UNSUPPORTED_APP_ACTION,
+    REASON_ACTIONS_MISSING: CODE_APP_ACTIONS_MISSING,
+}
 
 # The action fields the runtime reads as a target (see
 # `browser_action_adapter._requires_user_target`). Checked in this order so the
@@ -143,6 +176,7 @@ def analyze_workflow(
     findings: list[ContractFinding] = []
 
     findings.extend(_check_placeholder_targets(steps))
+    findings.extend(_check_app_actions(steps))
     findings.extend(_check_browser_runtime(steps, browser_readiness))
     findings.extend(_check_step_references(steps))
 
@@ -214,6 +248,71 @@ def _check_placeholder_targets(steps: list[dict[str, Any]]) -> list[ContractFind
     return findings
 
 
+def _check_app_actions(steps: list[dict[str, Any]]) -> list[ContractFinding]:
+    """Check 1b — a device action the adapter would stop on.
+
+    Blocking, for the same reason the browser check is: the adapter returns
+    ``waiting_for_user`` for every one of these, so saving it schedules a run
+    that parks. The judgement is the adapter's own ``app_action_gap``; this
+    function only decides where the finding goes and how it is phrased.
+
+    Only payload-shaped problems appear here. Whether an APK file exists or the
+    text is on screen is not knowable at authoring time, and the adapter keeps
+    those checks to itself.
+    """
+    findings: list[ContractFinding] = []
+    for step in steps:
+        if _step_type(step) not in APP_STEP_TYPES:
+            continue
+        step_id = _step_id(step)
+        actions = step.get("actions")
+        if not isinstance(actions, list) or not actions:
+            findings.append(_app_finding(step_id, None, None, app_actions_missing_gap()))
+            continue
+        for action_index, action in enumerate(actions):
+            gap = app_action_gap(action)
+            if gap is None:
+                continue
+            findings.append(_app_finding(step_id, action_index, action, gap))
+    return findings
+
+
+def _app_finding(
+    step_id: str | None,
+    action_index: int | None,
+    action: Any,
+    gap: Any,
+) -> ContractFinding:
+    action_type = (
+        str(action.get("type") or "").strip().lower()
+        if isinstance(action, dict)
+        else ""
+    )
+    where = (
+        f"'{step_id or '앱 조작 단계'}' 단계"
+        if action_index is None
+        else f"'{step_id or '앱 조작 단계'}' 단계의 {action_index + 1}번째 action"
+    )
+    detail: dict[str, Any] = {
+        "step_id": step_id,
+        "action_type": action_type,
+        "field": gap.field,
+        "value": gap.value,
+        # The `wait_reason` the run would have carried. A client that has seen
+        # the parked run recognises the same string here.
+        "reason": gap.reason,
+    }
+    if action_index is not None:
+        detail["action_index"] = action_index
+    return ContractFinding(
+        severity=SEVERITY_BLOCKING,
+        code=_APP_GAP_CODES.get(gap.reason, CODE_UNRESOLVED_APP_TARGET),
+        step_id=step_id,
+        detail=detail,
+        ask=f"{where}: {gap.message}",
+    )
+
+
 def _check_browser_runtime(
     steps: list[dict[str, Any]],
     browser_readiness: dict[str, Any] | None,
@@ -241,6 +340,25 @@ def _check_browser_runtime(
     )
     message = str(browser_readiness.get("message") or "").strip()
 
+    # Not every unready server is one download away. Since the browser can now
+    # be an installed Chrome, "not ready" also covers a setting this machine
+    # cannot honour (Chrome-only on a machine with no Chrome, a shared profile
+    # that has moved). Telling that operator to run `playwright install
+    # chromium` would be a fix for a problem they do not have, so the probe's
+    # own message leads and the command is only offered when a download is
+    # genuinely what is missing.
+    needs_download = browser_readiness.get("install_required") is not False
+    if needs_download:
+        ask = (
+            "이 서버에는 브라우저 런타임이 없습니다. 준비되기 전까지 브라우저 단계는 "
+            f"실행 시 사용자 개입 대기로 멈춥니다. 설치 명령: {install_command}"
+        )
+    else:
+        ask = (
+            "이 서버의 브라우저 설정으로는 브라우저 단계를 실행할 수 없습니다. "
+            f"{message} 대시보드의 브라우저 런타임 설정에서 바꾸세요."
+        ).strip()
+
     return [
         ContractFinding(
             severity=SEVERITY_WARNING,
@@ -252,11 +370,9 @@ def _check_browser_runtime(
                 "step_ids": [sid for sid in browser_step_ids if sid],
                 "playwright_python": bool(browser_readiness.get("playwright_python")),
                 "chromium_executable": bool(browser_readiness.get("chromium_executable")),
+                "install_required": needs_download,
             },
-            ask=(
-                "이 서버에는 Playwright 브라우저 런타임이 없습니다. 설치 전까지 브라우저 단계는 "
-                f"실행 시 사용자 개입 대기로 멈춥니다. 설치 명령: {install_command}"
-            ),
+            ask=ask,
         )
     ]
 

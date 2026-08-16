@@ -15,6 +15,10 @@ from agent.browser_action_adapter import PlaywrightBrowserActionAdapter  # noqa:
 
 def test_playwright_browser_action_adapter_smoke(monkeypatch, tmp_path):
     monkeypatch.setattr(browser_action_adapter, "ARTIFACT_ROOT", tmp_path)
+    # Keep the run out of the dev tree's real agent profile. `runtime_dir`
+    # honours this, so the persistent profile lands under tmp_path — which also
+    # pins that the profile really is where `dedicated_profile_dir` says.
+    monkeypatch.setenv("CODEBRIDGE_APP_SUPPORT_DIR", str(tmp_path / "support"))
     html = """
     <!doctype html>
     <html>
@@ -69,3 +73,10 @@ def test_playwright_browser_action_adapter_smoke(monkeypatch, tmp_path):
     storage_state = Path(result.storage_state_path)
     assert storage_state.exists()
     assert storage_state.name == "storage_state.json"
+
+    # The profile the run used is a real one on disk, and it is the agent's own
+    # — not the operator's Chrome. A browser with no profile is why a daily
+    # "check the board" agent could never be logged in.
+    profile_dir = tmp_path / "support" / "browser_profile"
+    assert profile_dir.is_dir()
+    assert any(profile_dir.iterdir()), "the browser wrote nothing into its profile"

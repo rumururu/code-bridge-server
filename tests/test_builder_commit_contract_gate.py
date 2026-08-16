@@ -98,6 +98,42 @@ CLEAN_FLOW = [
     }
 ]
 
+def _app_step(actions: list[dict]) -> dict:
+    return {
+        "id": "launch_app",
+        "name": "앱 실행",
+        "type": "app_action",
+        "description": "기기에서 앱을 실행한다.",
+        "actions": actions,
+    }
+
+
+# What `configurator._verify_launch_actions` writes when it could not extract a
+# package name. The adapter parks on it every single time.
+APP_PLACEHOLDER_DRAFT = _draft(
+    [
+        _app_step(
+            [
+                {"type": "verify_launch", "app": "installed_app_from_previous_step"},
+                {"type": "wait", "seconds": 1},
+                {"type": "screenshot", "label": "app_launch_result"},
+            ]
+        )
+    ]
+)
+
+APP_RESOLVED_DRAFT = _draft(
+    [
+        _app_step(
+            [
+                {"type": "verify_launch", "package": "com.example.app"},
+                {"type": "wait", "seconds": 1},
+                {"type": "screenshot", "label": "app_launch_result"},
+            ]
+        )
+    ]
+)
+
 PLACEHOLDER_DRAFT = _draft([_browser_step("configured_cafe_url")])
 RESOLVED_DRAFT = _draft([_browser_step("https://cafe.example.com/write")])
 CLEAN_DRAFT = _draft(CLEAN_FLOW)
@@ -201,6 +237,40 @@ class CommitContractGateTest(unittest.TestCase):
             json={"session_id": session.session_id, "draft": RESOLVED_DRAFT},
         )
         self.assertEqual(retried.status_code, 200, retried.text)
+
+    def test_an_app_action_the_device_cannot_run_is_refused(self):
+        # The gate used to look only at browser steps, so this draft — written
+        # by the server's own normalizer — committed as a clean 200 and then
+        # parked on its first fire.
+        with self._readiness(READY_RUNTIME):
+            response = self._commit(APP_PLACEHOLDER_DRAFT)
+
+        self.assertEqual(response.status_code, 400, response.text)
+        payload = response.json()
+        blocking = payload["blocking"]
+        self.assertEqual(len(blocking), 1, blocking)
+        finding = blocking[0]
+        self.assertEqual(finding["code"], "unresolved_app_target")
+        self.assertEqual(finding["step_id"], "launch_app")
+        self.assertEqual(finding["detail"]["action_index"], 0)
+        self.assertEqual(finding["detail"]["field"], "app")
+        # The `wait_reason` a parked run would have carried, so the refusal and
+        # the stall name the same problem.
+        self.assertEqual(finding["detail"]["reason"], "app_action_needs_package_name")
+        self.assertIn(finding["ask"], payload["detail"])
+        self.assertTrue(payload["can_save_incomplete"])
+        self.assertEqual(self._agent_count(), 0)
+
+    def test_a_literal_app_action_still_commits(self):
+        # A real package, and evidence actions whose `label`/`seconds` the
+        # adapter never treats as a target: nothing here stalls, so nothing
+        # here may be refused.
+        with self._readiness(READY_RUNTIME):
+            response = self._commit(APP_RESOLVED_DRAFT)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self._agent_count(), 1)
+        self.assertTrue(response.json()["commit_result"]["readiness"]["ok"])
 
     def test_a_template_reference_to_a_missing_step_is_refused(self):
         draft = _draft(

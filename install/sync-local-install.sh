@@ -34,11 +34,22 @@
 # Removing them is a human decision.
 # ---------------------------------------------------------------------------
 #
+# Browser runtime:
+#   install.sh downloads the Chromium build that browser_action steps run on;
+#   this script never did, and this is the deploy path actually in daily use.
+#   The result was a machine with the `playwright` Python package importable
+#   and no browser behind it, so every browser step failed on the spot. The
+#   dependency block below now ends with the same --ensure the installers run:
+#   it probes first and downloads nothing when Chromium is already there.
+#
 # Usage:
 #   ./install/sync-local-install.sh                 # dry run (default)
 #   ./install/sync-local-install.sh --apply         # actually copy
 #   ./install/sync-local-install.sh --apply --with-scrcpy
 #   ./install/sync-local-install.sh --install-dir /tmp/rehearsal --apply
+#   ./install/sync-local-install.sh --browser-only  # report browser runtime only
+#   ./install/sync-local-install.sh --browser-only --apply   # ...and install it
+#   ./install/sync-local-install.sh --apply --no-browser     # skip the check
 #
 set -euo pipefail
 
@@ -49,6 +60,8 @@ VERIFY_PY="$REPO_ROOT/install/verify_install.py"
 APPLY=0
 WITH_SCRCPY=0
 SKIP_PIP=0
+SKIP_BROWSER=0
+BROWSER_ONLY=0
 
 if [ -t 1 ]; then
     RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
@@ -58,7 +71,7 @@ else
 fi
 
 usage() {
-    sed -n '3,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,53p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -84,6 +97,8 @@ while [ $# -gt 0 ]; do
         --dry-run)      APPLY=0 ;;
         --with-scrcpy)  WITH_SCRCPY=1 ;;
         --no-pip)       SKIP_PIP=1 ;;
+        --no-browser)   SKIP_BROWSER=1 ;;
+        --browser-only) BROWSER_ONLY=1 ;;
         --install-dir)  INSTALL_DIR="${2:?--install-dir needs a path}"; shift ;;
         -h|--help)      usage 0 ;;
         *)              echo "${RED}unknown option: $1${NC}" >&2; usage 2 ;;
@@ -122,12 +137,58 @@ if [ "$APPLY" -eq 1 ]; then
     MODE_LABEL="${GREEN}APPLY${NC}"
 fi
 
+# --- browser runtime --------------------------------------------------------
+# pip installs the `playwright` package; it never installs the Chromium build
+# that package drives. install.sh has downloaded Chromium since C4, but this
+# script is the deploy path in daily use and it did not, so a machine could run
+# with the import present and no browser behind it — every `browser_action`
+# step then failed within seconds of starting.
+#
+# The decision is NOT made here. It is made once, in the install directory's
+# own copy of system/browser_runtime_setup.py (rsynced by the server pass), so
+# this script, install.sh, install.ps1 and the dashboard's one-click install
+# cannot disagree about what "present" means. --ensure probes first and
+# downloads nothing when Chromium is already on disk, so re-running this script
+# never re-fetches 450MB.
+sync_browser_runtime() {
+    local python="$INSTALL_DIR/venv/bin/python"
+    local helper="$INSTALL_DIR/system/browser_runtime_setup.py"
+
+    if [ ! -x "$python" ]; then
+        echo "${YELLOW}venv python not found at $python — skipping browser runtime check${NC}"
+        return 0
+    fi
+    if [ ! -f "$helper" ]; then
+        echo "${YELLOW}$helper is not deployed yet — run this script with --apply first${NC}"
+        return 0
+    fi
+
+    # A dry run reports; only --apply is allowed to download anything.
+    if [ "$APPLY" -eq 1 ]; then
+        # Never fail the deploy over a browser: a server without one starts
+        # fine and says what it is missing.
+        "$python" "$helper" --ensure || true
+    else
+        "$python" "$helper" --ensure --dry-run || true
+    fi
+}
+
 echo "${CYAN}Code Bridge local install sync${NC}"
 echo "  repo    : $REPO_ROOT"
 echo "  install : $INSTALL_DIR"
 echo "  scrcpy  : $([ "$WITH_SCRCPY" -eq 1 ] && echo included || echo 'excluded (--with-scrcpy to include)')"
 echo "  mode    : $MODE_LABEL"
 echo ""
+
+# --browser-only exists for the machine that is already deployed and merely
+# missing Chromium — the common case after this gap was found. It runs the
+# browser check and nothing else: no rsync, no pip, no integrity report.
+if [ "$BROWSER_ONLY" -eq 1 ]; then
+    echo "${CYAN}--- browser runtime${NC}"
+    sync_browser_runtime
+    echo ""
+    exit 0
+fi
 
 # Flags, and why each one is (or is not) here:
 #   -r  recurse            -l  copy symlinks as symlinks
@@ -206,6 +267,16 @@ if [ "$SKIP_PIP" -eq 1 ]; then
     echo "skipped (--no-pip)"
 else
     sync_requirements
+fi
+echo ""
+
+# The step this script was missing. See sync_browser_runtime above for why a
+# server can have the `playwright` import and no browser behind it.
+echo "${CYAN}--- browser runtime${NC}"
+if [ "$SKIP_BROWSER" -eq 1 ]; then
+    echo "skipped (--no-browser)"
+else
+    sync_browser_runtime
 fi
 echo ""
 

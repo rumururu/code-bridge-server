@@ -289,41 +289,70 @@ function Setup-Venv {
 # browser step waiting for a human. This is the one step in the installer that
 # downloads hundreds of megabytes, so it says so before it starts: an installer
 # that goes silent for four minutes reads as hung, and the user kills it.
+#
+# The decision (already here? opted out? did the download actually leave an
+# executable behind?) lives in ONE place - $INSTALL_DIR\system\
+# browser_runtime_setup.py - shared with install.sh, sync-local-install.sh and
+# the dashboard's one-click install, so re-running this on a machine that
+# already has Chromium costs nothing and no two surfaces can disagree about
+# what "present" means.
 function Setup-BrowserRuntime {
     $python = "$INSTALL_DIR\venv\Scripts\python.exe"
+    $helper = "$INSTALL_DIR\system\browser_runtime_setup.py"
 
-    if ($env:CODE_BRIDGE_BROWSER -eq "0") {
-        Write-Host ""
-        Write-Host "[SKIP] Browser runtime skipped (CODE_BRIDGE_BROWSER=0)" -ForegroundColor Yellow
-        Write-Host "  Browser workflow steps will wait for manual handling until you run:"
-        Write-Host "  $python -m playwright install chromium"
+    Write-Host ""
+
+    # An older pinned CODE_BRIDGE_REF has no helper. Fall back to the plain
+    # command rather than skipping the browser runtime altogether.
+    if (-not (Test-Path -LiteralPath $helper)) {
+        if ($env:CODE_BRIDGE_BROWSER -eq "0") {
+            Write-Host "[SKIP] Browser runtime skipped (CODE_BRIDGE_BROWSER=0)" -ForegroundColor Yellow
+            Write-Host "  Browser workflow steps will wait for manual handling until you run:"
+            Write-Host "  $python -m playwright install chromium"
+            return
+        }
+        Write-Host "Installing browser runtime (Chromium for browser workflow steps)..." -ForegroundColor Cyan
+        Write-Host "  Download: about 200MB. On disk: about 450MB. Takes 1-5 minutes."
+        Write-Host "  Skip with `$env:CODE_BRIDGE_BROWSER = `"0`" (browser steps then wait for a human)."
+        $succeeded = $false
+        try {
+            $ErrorActionPreference = "Continue"
+            & $python -m playwright install chromium
+            $succeeded = ($LASTEXITCODE -eq 0)
+        } catch {
+            $succeeded = $false
+        }
+        if ($succeeded) {
+            Write-Host "[OK] Browser runtime ready" -ForegroundColor Green
+        } else {
+            Write-Host "[WARN] Chromium download failed - the server still starts." -ForegroundColor Yellow
+            Write-Host "  Browser workflow steps will wait for manual handling until you run:"
+            Write-Host "  $python -m playwright install chromium"
+        }
         return
     }
 
-    Write-Host ""
-    Write-Host "Installing browser runtime (Chromium for browser workflow steps)..." -ForegroundColor Cyan
-    Write-Host "  Download: about 200MB. On disk: about 450MB. Takes 1-5 minutes."
-    Write-Host "  Skip with `$env:CODE_BRIDGE_BROWSER = `"0`" (browser steps then wait for a human)."
+    Write-Host "Checking browser runtime (Chromium for browser workflow steps)..." -ForegroundColor Cyan
 
     # Never fail the install over this: the server runs fine without a browser,
     # and it reports the missing runtime honestly rather than pretending.
     $succeeded = $false
     try {
         $ErrorActionPreference = "Continue"
-        & $python -m playwright install chromium
+        & $python $helper --ensure
         $succeeded = ($LASTEXITCODE -eq 0)
     } catch {
         $succeeded = $false
     }
 
     if ($succeeded) {
-        Write-Host "[OK] Browser runtime ready" -ForegroundColor Green
+        Write-Host "[OK] Browser runtime ready (or deliberately skipped)" -ForegroundColor Green
         return
     }
 
-    Write-Host "[WARN] Chromium download failed - the server still starts." -ForegroundColor Yellow
-    Write-Host "  Browser workflow steps will wait for manual handling until you run:"
-    Write-Host "  $python -m playwright install chromium"
+    Write-Host "[WARN] No browser runtime - the server still starts." -ForegroundColor Yellow
+    Write-Host "  Browser workflow steps will wait for manual handling, and the"
+    Write-Host "  dashboard offers a one-click install on the agents page."
 }
 
 function Create-StartScript {

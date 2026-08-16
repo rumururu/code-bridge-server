@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.browser_session_store import get_browser_session_store
+from system.browser_preferences import resolve_browser_launch_plan
 
 logger = logging.getLogger(__name__)
 
@@ -302,8 +303,12 @@ class LiveBrowserRuntime:
             await self.sync_state(save_storage=True)
         with suppress(Exception):
             await self.context.close()
-        with suppress(Exception):
-            await self.browser.close()
+        if self.browser is not None:
+            # None for a persistent profile: `launch_persistent_context` owns
+            # the process and exposes no Browser, so closing the context above
+            # already ended it.
+            with suppress(Exception):
+                await self.browser.close()
         with suppress(Exception):
             await self.playwright.stop()
 
@@ -461,32 +466,60 @@ class BrowserRuntimeManager:
         except Exception as exc:  # pragma: no cover - environment dependent
             raise RuntimeError(f"Playwright is not available: {exc}") from exc
 
+        # Same three answers the workflow adapter resolves — which browser,
+        # headed or headless, whose profile. The handoff must use them too:
+        # this is the browser a person signs into, and a login only carries
+        # into tomorrow's scheduled run if both open the same profile.
+        plan = resolve_browser_launch_plan()
+        if not plan.usable:
+            raise RuntimeError(str(plan.blocked_message or plan.blocked_reason))
+
         playwright = await async_playwright().start()
         try:
-            headless = _headless()
-            browser = await playwright.chromium.launch(
-                headless=headless,
-                args=_browser_launch_args(
+            headless = plan.headless if _headless_override() is None else bool(_headless_override())
+            launch_options: dict[str, Any] = {
+                "headless": headless,
+                "args": _browser_launch_args(
                     headless=headless,
                     viewport_width=viewport_width,
                     viewport_height=viewport_height,
                 ),
-            )
+            }
+            if plan.channel:
+                launch_options["channel"] = plan.channel
             context_options: dict[str, Any] = {
                 "viewport": {
                     "width": max(320, min(int(viewport_width), 3840)),
                     "height": max(240, min(int(viewport_height), 2160)),
                 }
             }
-            storage_state = _existing_file_path(input_storage_state_path)
-            if storage_state is None:
-                storage_state = _existing_file_path(
-                    browser_session.get("storage_state_path")
+            browser: Any = None
+            if plan.persistent and plan.user_data_dir:
+                Path(plan.user_data_dir).expanduser().mkdir(parents=True, exist_ok=True)
+                context = await playwright.chromium.launch_persistent_context(
+                    plan.user_data_dir,
+                    **launch_options,
+                    **context_options,
                 )
-            if storage_state is not None:
-                context_options["storage_state"] = str(storage_state)
-            context = await browser.new_context(**context_options)
-            page = await context.new_page()
+                pages = list(getattr(context, "pages", None) or [])
+                page = pages[0] if pages else await context.new_page()
+            else:
+                # Only this branch consults the storage state, and that is the
+                # whole relationship between the two mechanisms: a persistent
+                # profile already holds the cookies in `user_data_dir` (and
+                # Playwright refuses `storage_state` alongside it), so the file
+                # is the carrier only when there is no profile to carry them.
+                # They never both apply, so they cannot disagree.
+                browser = await playwright.chromium.launch(**launch_options)
+                storage_state = _existing_file_path(input_storage_state_path)
+                if storage_state is None:
+                    storage_state = _existing_file_path(
+                        browser_session.get("storage_state_path")
+                    )
+                if storage_state is not None:
+                    context_options["storage_state"] = str(storage_state)
+                context = await browser.new_context(**context_options)
+                page = await context.new_page()
             initial_url = _restorable_url(browser_session.get("current_url"))
             if initial_url is not None:
                 await page.goto(
@@ -508,7 +541,7 @@ class BrowserRuntimeManager:
             viewport_width=context_options["viewport"]["width"],
             viewport_height=context_options["viewport"]["height"],
             headless=headless,
-            browser_owner_pid=_browser_owner_pid(browser),
+            browser_owner_pid=_browser_owner_pid(browser if browser is not None else context),
         )
         self._sessions[session_id] = runtime
         await runtime.sync_state(save_storage=False)
@@ -533,9 +566,34 @@ def get_browser_runtime_manager() -> BrowserRuntimeManager:
     return _browser_runtime_manager
 
 
-def _headless() -> bool:
-    value = os.environ.get("CODEBRIDGE_BROWSER_HEADLESS", "1").strip().lower()
+def _headless_override() -> bool | None:
+    """`CODEBRIDGE_BROWSER_HEADLESS` still wins, when it is set at all.
+
+    It predates the stored setting and is what a developer reaches for to watch
+    one session. Unset (the normal case) means "no override" so the operator's
+    stored choice decides — the old default of 1 would have overridden that
+    choice on every machine.
+    """
+    raw = os.environ.get("CODEBRIDGE_BROWSER_HEADLESS")
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if not value:
+        return None
     return value not in {"0", "false", "no", "off"}
+
+
+def offscreen_window_args(
+    *,
+    viewport_width: int = 1280,
+    viewport_height: int = 720,
+) -> list[str]:
+    """Window args for a headed launch that must not steal the operator's screen."""
+    return _browser_launch_args(
+        headless=False,
+        viewport_width=viewport_width,
+        viewport_height=viewport_height,
+    )
 
 
 def _browser_launch_args(

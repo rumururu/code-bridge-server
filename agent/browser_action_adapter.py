@@ -8,7 +8,6 @@ Playwright-backed adapter when the runtime has a browser available.
 from __future__ import annotations
 
 import re
-import sys
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -16,14 +15,31 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from agent.tool_artifacts import ARTIFACT_ROOT
-from .browser_runtime_manager import get_browser_runtime_manager
+from system.browser_preferences import (
+    BrowserLaunchPlan,
+    get_browser_preferences,
+    resolve_browser_launch_plan,
+)
+from system.browser_runtime_setup import (
+    CHROMIUM_DISK_MB,
+    CHROMIUM_DOWNLOAD_MB,
+    chromium_install_command,
+    detect_installed_chrome,
+)
+from .browser_runtime_manager import get_browser_runtime_manager, offscreen_window_args
 
 # Derived from the interpreter that is actually running this server, not from a
 # guessed repo-relative path. The old literal ("server/.venv/bin/python …")
 # named a directory that exists in no install: the dev tree uses `server/venv`
 # and a real install uses `~/.code-bridge/venv`, so the diagnostic told the
 # operator to run a command that could not work.
-PLAYWRIGHT_CHROMIUM_INSTALL_COMMAND = f"{sys.executable} -m playwright install chromium"
+#
+# Defined in `system/browser_runtime_setup.py` so the command this server tells
+# you to run, the command the installers run, and the command the dashboard's
+# one-click install runs are literally the same string. Three copies in three
+# scripts is what let the installer grow a Chromium step that the deploy path
+# in daily use never called.
+PLAYWRIGHT_CHROMIUM_INSTALL_COMMAND = chromium_install_command()
 
 # `_probe_browser_runtime_readiness` starts the Playwright driver process on
 # every call, so anything that asks per request (commit gate, dashboard rail,
@@ -127,9 +143,22 @@ class PlaywrightBrowserActionAdapter:
         extracted: list[dict[str, Any]] = []
         run_id = str(context.get("run_id") or "run")
         step_id = str(context.get("step_id") or "step")
-        input_storage_state_path = _existing_file_path(
-            context.get("browser_input_storage_state_path")
-            or context.get("browser_storage_state_path")
+        # Tried in order, each candidate checked for itself. This used to be
+        # `_existing_file_path(a or b)`, which is not the same thing: a truthy
+        # `a` naming a file that does not exist yet consumed the expression, so
+        # `b` was never reached and neither was anything after it.
+        #
+        # The orchestrator resolves the handoff itself and normally supplies
+        # the first candidate (`task_orchestrator._previous_browser_session_for_execution`).
+        # The task-scoped lookup stays here as the answer for any caller that
+        # does not — it asks the same store method, so the two cannot disagree.
+        input_storage_state_path = _first_existing_file(
+            context.get("browser_input_storage_state_path"),
+            context.get("browser_storage_state_path"),
+            lambda: _previous_run_storage_state(
+                task_id=context.get("task_id"),
+                run_id=context.get("run_id"),
+            ),
         )
         output_storage_state_path = _storage_state_path(
             context.get("browser_storage_state_path"),
@@ -165,24 +194,35 @@ class PlaywrightBrowserActionAdapter:
                 browser_context = runtime.context
                 page = runtime.page
             else:
+                # The operator's three answers — which browser, headed or
+                # headless, whose profile — resolved once, here. Nothing below
+                # decides any of them on its own.
+                plan = resolve_browser_launch_plan()
+                if not plan.usable:
+                    return BrowserActionAdapterResult(
+                        status="waiting_for_user",
+                        wait_reason=str(plan.blocked_reason),
+                        prompt=str(plan.blocked_message or ""),
+                    )
                 playwright = await async_playwright().start()
                 try:
-                    browser = await playwright.chromium.launch(headless=True)
+                    browser, browser_context = await _launch_from_plan(
+                        playwright,
+                        plan,
+                        storage_state_path=input_storage_state_path,
+                    )
                 except Exception as exc:  # pragma: no cover - environment-dependent
                     return BrowserActionAdapterResult(
                         status="waiting_for_user",
                         wait_reason="browser_adapter_unavailable",
                         prompt=(
-                            "서버에서 Playwright 브라우저를 실행할 수 없습니다. "
+                            f"서버에서 브라우저({plan.label})를 실행할 수 없습니다. "
                             "브라우저 작업을 직접 완료한 뒤 재개하세요."
                         ),
                         error={"message": str(exc)},
                     )
-                context_options: dict[str, Any] = {}
-                if input_storage_state_path is not None:
-                    context_options["storage_state"] = str(input_storage_state_path)
-                browser_context = await browser.new_context(**context_options)
-                page = await browser_context.new_page()
+                pages = list(getattr(browser_context, "pages", None) or [])
+                page = pages[0] if pages else await browser_context.new_page()
 
             async def with_storage_state(
                 result: BrowserActionAdapterResult,
@@ -214,9 +254,11 @@ class PlaywrightBrowserActionAdapter:
                             extracted=extracted,
                         ))
 
+                    http_status: int | None = None
                     if action_type == "navigate":
                         url = str(action.get("url") or action.get("target") or "").strip()
-                        await page.goto(url, wait_until="domcontentloaded")
+                        response = await page.goto(url, wait_until="domcontentloaded")
+                        http_status = _response_status(response)
                     elif action_type in {"click", "check", "uncheck"}:
                         selector = _selector(action)
                         if action_type == "click":
@@ -260,7 +302,11 @@ class PlaywrightBrowserActionAdapter:
                             extracted=extracted,
                         ))
 
-                    observations.append(await _observe(page, action=action, index=index))
+                    observations.append(
+                        await _observe(
+                            page, action=action, index=index, http_status=http_status
+                        )
+                    )
                     blocked = await _blocked_state(page)
                     if blocked is not None:
                         return await with_storage_state(BrowserActionAdapterResult(
@@ -306,6 +352,57 @@ class PlaywrightBrowserActionAdapter:
             extracted=extracted,
             storage_state_path=saved_storage_state_path,
         )
+
+
+async def _launch_from_plan(
+    playwright: Any,
+    plan: BrowserLaunchPlan,
+    *,
+    storage_state_path: Path | None,
+) -> tuple[Any, Any]:
+    """Start the browser the plan describes and return ``(browser, context)``.
+
+    ``browser`` is ``None`` for a persistent profile: Playwright's
+    ``launch_persistent_context`` owns the process itself and exposes no
+    ``Browser``. Closing the context closes everything, which is what the
+    caller's ``finally`` already does.
+    """
+    launch_options: dict[str, Any] = {"headless": plan.headless}
+    if plan.channel:
+        launch_options["channel"] = plan.channel
+    if not plan.headless:
+        launch_options["args"] = offscreen_window_args()
+
+    if plan.persistent and plan.user_data_dir:
+        Path(plan.user_data_dir).expanduser().mkdir(parents=True, exist_ok=True)
+        context = await playwright.chromium.launch_persistent_context(
+            plan.user_data_dir,
+            **launch_options,
+        )
+        return None, context
+
+    browser = await playwright.chromium.launch(**launch_options)
+    context_options: dict[str, Any] = {}
+    if storage_state_path is not None:
+        context_options["storage_state"] = str(storage_state_path)
+    context = await browser.new_context(**context_options)
+    return browser, context
+
+
+def _previous_run_storage_state(*, task_id: Any, run_id: Any) -> str | None:
+    """The storage state the previous run of this task left behind, if any."""
+    task = _text_or_none(task_id)
+    if task is None:
+        return None
+    try:
+        from agent.browser_session_store import get_browser_session_store
+
+        return get_browser_session_store().latest_storage_state_for_task(
+            task,
+            exclude_run_id=_text_or_none(run_id),
+        )
+    except Exception:  # noqa: BLE001 - a missing carry-over is not a run failure
+        return None
 
 
 def get_browser_action_adapter() -> BrowserActionAdapter:
@@ -355,17 +452,75 @@ def reset_browser_readiness_cache() -> None:
 
 
 async def _probe_browser_runtime_readiness() -> dict[str, Any]:
-    """Actually start Playwright and look for the Chromium executable."""
+    """Actually start Playwright, look for an installed Chrome, and for Chromium.
+
+    Both browsers are decided by a file on disk. Neither is assumed from the
+    platform: "this is a Mac, so Chrome is probably there" would let this
+    surface report that no download is needed and then park every browser step
+    at run time, which is the failure it exists to prevent.
+    """
+    preferences = get_browser_preferences()
+    chrome = detect_installed_chrome()
     readiness: dict[str, Any] = {
         "ready": False,
         "playwright_python": False,
         "chromium_executable": False,
         "chromium_executable_path": None,
         "install_command": PLAYWRIGHT_CHROMIUM_INSTALL_COMMAND,
+        # Stated wherever the install is offered. A step that goes quiet for
+        # four minutes with no size given reads as hung, and users kill it.
+        "install_download_mb": CHROMIUM_DOWNLOAD_MB,
+        "install_disk_mb": CHROMIUM_DISK_MB,
+        # False whenever a browser step can run without fetching anything —
+        # which is the case on every machine that already has Chrome.
+        "install_required": True,
+        "installed_chrome": chrome.as_dict() if chrome is not None else None,
+        "preferences": preferences.as_dict(),
+        "plan": None,
         "message": "",
         "diagnostics": [],
     }
     diagnostics: list[dict[str, Any]] = []
+
+    def finish(*, chromium_present: bool | None, chromium_path: str | None) -> dict[str, Any]:
+        plan = resolve_browser_launch_plan(
+            preferences,
+            chrome=chrome,
+            detect_chrome=False,
+            chromium_executable_path=chromium_path,
+            chromium_present=chromium_present,
+        )
+        readiness["plan"] = plan.as_dict()
+        readiness["install_required"] = bool(plan.install_required)
+        if not plan.usable:
+            readiness["ready"] = False
+            readiness["message"] = str(plan.blocked_message or "")
+            diagnostics.append(
+                {"code": str(plan.blocked_reason), "message": readiness["message"]}
+            )
+        elif plan.browser == "chrome":
+            readiness["ready"] = True
+            readiness["message"] = (
+                f"{plan.label} will run browser steps — no download needed."
+            )
+        elif chromium_present:
+            readiness["ready"] = True
+            readiness["message"] = "Playwright Chromium is ready."
+        else:
+            readiness["ready"] = False
+            readiness["message"] = "Playwright Chromium executable is missing."
+            diagnostics.append(
+                {
+                    "code": "chromium_executable_missing",
+                    "message": (
+                        "Playwright Chromium executable is missing. Install "
+                        "Google Chrome, or run "
+                        f"`{PLAYWRIGHT_CHROMIUM_INSTALL_COMMAND}`."
+                    ),
+                }
+            )
+        readiness["diagnostics"] = diagnostics
+        return readiness
 
     try:
         from playwright.async_api import async_playwright
@@ -378,6 +533,7 @@ async def _probe_browser_runtime_readiness() -> dict[str, Any]:
         )
         readiness["message"] = "Python Playwright package is not available."
         readiness["diagnostics"] = diagnostics
+        # Without the package no browser runs, installed Chrome or not.
         return readiness
 
     readiness["playwright_python"] = True
@@ -398,22 +554,7 @@ async def _probe_browser_runtime_readiness() -> dict[str, Any]:
     readiness["chromium_executable_path"] = executable_path
     chromium_exists = Path(executable_path).is_file()
     readiness["chromium_executable"] = chromium_exists
-    readiness["ready"] = bool(readiness["playwright_python"] and chromium_exists)
-    if chromium_exists:
-        readiness["message"] = "Playwright Chromium is ready."
-    else:
-        diagnostics.append(
-            {
-                "code": "chromium_executable_missing",
-                "message": (
-                    "Playwright Chromium executable is missing. Run "
-                    f"`{PLAYWRIGHT_CHROMIUM_INSTALL_COMMAND}`."
-                ),
-            }
-        )
-        readiness["message"] = "Playwright Chromium executable is missing."
-    readiness["diagnostics"] = diagnostics
-    return readiness
+    return finish(chromium_present=chromium_exists, chromium_path=executable_path)
 
 
 def _requires_user_target(action: dict[str, Any], action_type: str) -> bool:
@@ -446,6 +587,20 @@ def _is_placeholder(value: str) -> bool:
 
 def _selector(action: dict[str, Any]) -> str:
     return str(action.get("selector") or action.get("target") or "").strip()
+
+
+def _first_existing_file(*candidates: Any) -> Path | None:
+    """First candidate that names a file on disk. Callables are asked lazily.
+
+    Lazy so the cross-run store lookup is not paid for on the common path
+    where the orchestrator already supplied the state.
+    """
+    for candidate in candidates:
+        value = candidate() if callable(candidate) else candidate
+        path = _existing_file_path(value)
+        if path is not None:
+            return path
+    return None
 
 
 def _existing_file_path(value: Any) -> Path | None:
@@ -518,14 +673,55 @@ async def _extract(page: Any, action: dict[str, Any], *, index: int) -> dict[str
     return {"action_index": index, "selector": selector or "body", "text": value[:10000]}
 
 
-async def _observe(page: Any, *, action: dict[str, Any], index: int) -> dict[str, Any]:
+def _response_status(response: Any) -> int | None:
+    """HTTP status of a navigation, when there was one.
+
+    ``page.goto`` answers ``None`` for a same-document navigation, and some
+    fakes have no ``status`` at all, so this never raises — an unknown status
+    is reported as unknown.
+    """
+    if response is None:
+        return None
+    status = getattr(response, "status", None)
+    if callable(status):
+        try:
+            status = status()
+        except Exception:  # noqa: BLE001 - a diagnostic must not fail the step
+            return None
+    try:
+        return int(status)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _observe(
+    page: Any,
+    *,
+    action: dict[str, Any],
+    index: int,
+    http_status: int | None = None,
+) -> dict[str, Any]:
     title = await page.title()
-    return {
+    observation: dict[str, Any] = {
         "action_index": index,
         "action": action,
         "url": page.url,
         "title": title,
     }
+    # Recorded, not acted on. The run record used to contain no trace of the
+    # server having answered 4xx/5xx: a navigate onto a "503 Service
+    # Temporarily Unavailable" page completed silently, and whatever failed
+    # next got the blame — an assertion timeout, or an action reported as
+    # having no concrete target. The status belongs in the observation so the
+    # real reason is on the record.
+    #
+    # Deliberately not a `waiting_for_user`: "is the site up?" is one of the
+    # things these agents are for, and parking on a 503 would break the very
+    # check that wants to see it.
+    if http_status is not None:
+        observation["http_status"] = http_status
+        observation["http_ok"] = http_status < 400
+    return observation
 
 
 async def _blocked_state(page: Any) -> str | None:

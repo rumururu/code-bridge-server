@@ -23,10 +23,24 @@ sse-starlette>=1.6.1,<2.2
 # Browser automation for `browser_action` workflow steps
 # (agent/browser_action_adapter.py). Without it every browser step parks the
 # run waiting for a human, which is honest but useless. The wheel + driver is
-# ~40MB; the Chromium browser itself is NOT installed by pip — install/install.sh
-# and install/install.ps1 run `python -m playwright install chromium` after this
-# file is applied (opt out with CODE_BRIDGE_BROWSER=0).
-playwright>=1.58
+# ~40MB; no browser binary comes with it.
+#
+# Bounded to one minor version on purpose. Each playwright *minor* pins a
+# different Chromium revision, and the open-ended `>=1.58` meant every
+# reinstall could demand a revision nobody had and fetch another ~200MB.
+# Measured on the machine that prompted this: `~/Library/Caches/ms-playwright`
+# held 1.0GB across revisions 1200 and 1228 while 1.58 wanted 1208 and 1.62
+# wanted 1234 — three installs, four revisions, none of them shared. Patch
+# releases inside a minor keep the same revision, so `>=1.62,<1.63` is the
+# range that actually holds the download still. Move it deliberately, and
+# expect a download when you do.
+#
+# Most machines never pay that download at all now: an installed Google Chrome
+# is preferred (`channel="chrome"`), and `python -m playwright install
+# chromium` only runs when there is none — see system/browser_runtime_setup.py
+# and system/browser_preferences.py (opt out entirely with
+# CODE_BRIDGE_BROWSER=0).
+playwright>=1.62,<1.63
 
 # QR code generation for pairing
 qrcode[pil]>=7.4

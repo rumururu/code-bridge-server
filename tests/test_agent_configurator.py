@@ -449,17 +449,46 @@ I'll model this after the existing runner.
         install_step = _step_by_id(flow, "install_app")
         verify_step = _step_by_id(flow, "verify_launch")
         save_step = _step_by_id(flow, "save_result")
+        # The step *type* is repaired — an `mcp_tool` step hinting at
+        # `app_action` is an app step, and that judgement is the model's own,
+        # read off its `tool_hint`.
         self.assertEqual(collect_step.type, "app_action")
-        self.assertEqual(collect_step.actions[0]["type"], "read_screen")
         self.assertEqual(join_step.type, "app_action")
-        self.assertEqual(join_step.actions[0]["type"], "tap_text")
         self.assertEqual(install_step.type, "app_action")
-        self.assertEqual(install_step.actions[0]["type"], "install_app")
         self.assertEqual(verify_step.type, "app_action")
-        self.assertEqual(verify_step.actions[0]["type"], "verify_launch")
         self.assertEqual(save_step.type, "llm")
-        self.assertEqual(save_step.actions, [])
         self.assertTrue(all(step.type != "browser_action" for step in flow))
+
+        # The *interaction* is not invented. "join request" used to make the
+        # server write `tap_text: join_or_apply_control_from_current_screen`
+        # and "collect requests" `read_screen: current_review_exchange_request_list`
+        # — a control to press and a list to read, composed from two words in
+        # the user's sentence. That is the same fabrication `_naver_cafe_flow`
+        # and `_join_request_steps` were deleted for, one layer down, and the
+        # commit gate cannot save the user from it because the values look
+        # deliberate. What is left is an observation, which invents nothing:
+        # look at whatever is on screen and keep the evidence.
+        for step in (collect_step, join_step):
+            self.assertEqual(
+                [action["type"] for action in step.actions],
+                ["read_screen", "screenshot"],
+            )
+            self.assertEqual(step.actions[0]["target"], "current_screen")
+        self.assertEqual(save_step.actions, [])
+
+        # And one step's words do not reach another's actions. The request says
+        # "install app" once; only the step that is about installing gets an
+        # install action.
+        self.assertNotIn(
+            "install_app", [action["type"] for action in collect_step.actions]
+        )
+
+        # What *is* still written is a named placeholder for a value only the
+        # user has — the runtime cannot guess an APK path, and the commit gate
+        # blocks on it by design (`unresolved_app_target`).
+        self.assertEqual(install_step.actions[0]["type"], "install_app")
+        self.assertEqual(install_step.actions[0]["apk_path"], "configured_apk_path")
+        self.assertEqual(verify_step.actions[0]["type"], "verify_launch")
 
     def test_concrete_android_package_launch_request_gets_no_invented_step(self) -> None:
         """A launch request with no model-written steps stays stepless.

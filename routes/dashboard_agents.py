@@ -14,7 +14,7 @@ app entirely, so this adds no external surface.
 
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Query
 from fastapi.responses import JSONResponse, Response
 
 from agent.agent_models import (
@@ -32,6 +32,21 @@ from agent.script_models import (
     ScriptUpdate,
 )
 from policy.policy_models import PolicyRuleCreate
+from agent.browser_action_adapter import (
+    get_browser_runtime_readiness,
+    reset_browser_readiness_cache,
+)
+from system.browser_preferences import (
+    get_browser_preferences,
+    preference_options,
+    resolve_browser_launch_plan,
+    set_browser_preferences,
+)
+from system.browser_runtime_install_jobs import (
+    BROWSER_INSTALL_DISABLED,
+    BrowserRuntimeInstallDisabled,
+    get_browser_runtime_install_job_manager,
+)
 
 from . import agents as agents_routes
 # The mirrors below must declare the *route-level* body models, not the shared
@@ -147,6 +162,97 @@ async def browser_runtime_readiness() -> dict[str, Any]:
     browser step cannot honour.
     """
     return await agents_routes.browser_runtime_readiness()
+
+
+# The three routes below are NOT mirrors of anything in `routes/agents.py`, and
+# that is on purpose. Every other endpoint in this file exists because the
+# dashboard has no API key; these exist because the *phone* should not have one
+# either for this operation. Starting a 200MB download on the host is a local,
+# physical-machine decision, and `agents_router` is shared with the
+# tunnel-exposed app — a leaked pairing key would otherwise be enough to make a
+# stranger's server fetch 450MB on demand. The phone still gets the readiness
+# probe and the exact command; only the trigger is localhost-only.
+@router.post("/browser-runtime/install", response_model=None)
+async def install_browser_runtime() -> JSONResponse:
+    """Install the Chromium build `browser_action` steps run on.
+
+    Answers 202 with a job to poll. The job's own re-probe decides whether the
+    runtime is usable afterwards — this endpoint never reports readiness on the
+    strength of the install having started.
+    """
+    manager = get_browser_runtime_install_job_manager()
+    try:
+        job = await manager.start_install()
+    except BrowserRuntimeInstallDisabled as exc:
+        return JSONResponse(
+            status_code=409,
+            content={"error": str(exc), "error_code": BROWSER_INSTALL_DISABLED},
+        )
+    return JSONResponse(status_code=202, content=manager.serialize(job))
+
+
+@router.get("/browser-runtime/install/jobs/{job_id}", response_model=None)
+async def get_browser_runtime_install_job(job_id: str) -> dict[str, Any] | JSONResponse:
+    manager = get_browser_runtime_install_job_manager()
+    job = manager.get_job(job_id)
+    if job is None:
+        return JSONResponse(status_code=404, content={"error": "Install job not found"})
+    return manager.serialize(job)
+
+
+@router.get("/browser-runtime/preferences", response_model=None)
+async def get_browser_runtime_preferences() -> dict[str, Any]:
+    """The three answers that decide how a browser step runs, and their costs.
+
+    Localhost-only for the same reason the install trigger is: one of the
+    options hands the agent every login the person's own Chrome holds. That is
+    a decision for someone sitting at the machine, not for whoever holds a
+    pairing key. The phone still sees the *result* — the readiness probe
+    reports which browser will be used and under which profile.
+    """
+    preferences = get_browser_preferences()
+    plan = resolve_browser_launch_plan(preferences)
+    return {
+        "preferences": preferences.as_dict(),
+        "options": preference_options(),
+        "plan": plan.as_dict(),
+    }
+
+
+@router.put("/browser-runtime/preferences", response_model=None)
+async def update_browser_runtime_preferences(
+    body: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any] | JSONResponse:
+    """Store the operator's choice. Unknown values are refused, not rounded off."""
+    try:
+        preferences = set_browser_preferences(
+            browser=body.get("browser"),
+            headless_mode=body.get("headless_mode"),
+            profile=body.get("profile"),
+        )
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    # The stored choice changes what the readiness answer *is* (a machine that
+    # was "needs a 200MB download" becomes "will use your Chrome" the moment
+    # the browser setting changes), so the cached snapshot has to go.
+    reset_browser_readiness_cache()
+    readiness = await get_browser_runtime_readiness(force_refresh=True)
+    return {
+        "preferences": preferences.as_dict(),
+        "options": preference_options(),
+        "plan": resolve_browser_launch_plan(preferences).as_dict(),
+        "readiness": readiness,
+    }
+
+
+@router.post("/browser-runtime/install/jobs/{job_id}/cancel", response_model=None)
+async def cancel_browser_runtime_install_job(job_id: str) -> dict[str, Any] | JSONResponse:
+    manager = get_browser_runtime_install_job_manager()
+    job = await manager.cancel_job(job_id)
+    if job is None:
+        return JSONResponse(status_code=404, content={"error": "Install job not found"})
+    return manager.serialize(job)
 
 
 @router.post("/agents/{agent_id}/dry-run", response_model=None)

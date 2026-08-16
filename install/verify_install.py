@@ -58,6 +58,12 @@ SOURCE_EXCLUDES: tuple[str, ...] = (
     "code_bridge.db*",
     "/core/code_bridge.db",
     "/core/browser_sessions/",
+    # The browser profile the agent signs in with. It appeared when browser
+    # steps gained a persistent `user_data_dir`, and without this line a
+    # deployment reported ~190 of its files as orphans — a Chrome profile is
+    # thousands of small runtime files, and it is where the user's logins live.
+    # Nothing here is ever authored in the repo, so it can only be runtime state.
+    "/core/browser_profile/",
     "/server_info.json",
     "/firebase_config.json",
     "/config.yaml",
@@ -94,6 +100,12 @@ PROTECTED_TARGETS: tuple[str, ...] = (
     "/logs/",
     "/generated_scripts/",
     "/global_chat/",
+    # The browser profile the agent signs in with. Protected as well as
+    # excluded: excluding keeps it out of the transfer, but this list is the
+    # answer to "what must a delete never reach", and a persistent Chrome
+    # profile holds the logins that make an unattended browser agent work at
+    # all. Losing it silently signs the agent out of every site.
+    "/core/browser_profile/",
     "/start-menubar.sh",
     "/install/",
     "/scripts/",

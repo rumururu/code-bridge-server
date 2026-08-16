@@ -321,30 +321,53 @@ setup_venv() {
 # browser step waiting for a human. This is the one step in the installer that
 # downloads hundreds of megabytes, so it says so before it starts: an installer
 # that goes silent for four minutes reads as hung, and the user kills it.
+#
+# The decision (is it already here? is this machine opted out? did the download
+# actually leave an executable behind?) lives in ONE place —
+# $INSTALL_DIR/system/browser_runtime_setup.py — shared with
+# install/sync-local-install.sh, install/install.ps1 and the dashboard's
+# one-click install. Three separate copies of that logic is precisely how this
+# installer ended up with a Chromium step that the deploy path in daily use
+# never ran.
 setup_browser_runtime() {
-    if [ "${CODE_BRIDGE_BROWSER:-1}" = "0" ]; then
-        echo ""
-        echo -e "${YELLOW}! Skipping browser runtime (CODE_BRIDGE_BROWSER=0)${NC}"
-        echo "  Browser workflow steps will wait for manual handling until you run:"
-        echo "  $INSTALL_DIR/venv/bin/python -m playwright install chromium"
+    local python="$INSTALL_DIR/venv/bin/python"
+    local helper="$INSTALL_DIR/system/browser_runtime_setup.py"
+
+    echo ""
+
+    # An older pinned CODE_BRIDGE_REF has no helper. Fall back to the plain
+    # command rather than skipping the browser runtime altogether.
+    if [ ! -f "$helper" ]; then
+        if [ "${CODE_BRIDGE_BROWSER:-1}" = "0" ]; then
+            echo -e "${YELLOW}! Skipping browser runtime (CODE_BRIDGE_BROWSER=0)${NC}"
+            echo "  Browser workflow steps will wait for manual handling until you run:"
+            echo "  $python -m playwright install chromium"
+            return 0
+        fi
+        echo -e "${CYAN}Installing browser runtime (Chromium for browser workflow steps)...${NC}"
+        echo "  Download: about 200MB. On disk: about 450MB. Takes 1-5 minutes."
+        echo "  Skip with CODE_BRIDGE_BROWSER=0 (browser steps then wait for a human)."
+        if "$python" -m playwright install chromium; then
+            echo -e "${GREEN}✓ Browser runtime ready${NC}"
+        else
+            echo -e "${YELLOW}! Chromium download failed — the server still starts.${NC}"
+            echo "  Browser workflow steps will wait for manual handling until you run:"
+            echo "  $python -m playwright install chromium"
+        fi
         return 0
     fi
 
-    echo ""
-    echo -e "${CYAN}Installing browser runtime (Chromium for browser workflow steps)...${NC}"
-    echo "  Download: about 200MB. On disk: about 450MB. Takes 1-5 minutes."
-    echo "  Skip with CODE_BRIDGE_BROWSER=0 (browser steps then wait for a human)."
+    echo -e "${CYAN}Checking browser runtime (Chromium for browser workflow steps)...${NC}"
 
     # Never fail the install over this: the server runs fine without a browser,
     # and it reports the missing runtime honestly rather than pretending.
-    if "$INSTALL_DIR/venv/bin/python" -m playwright install chromium; then
-        echo -e "${GREEN}✓ Browser runtime ready${NC}"
-        return 0
+    if "$python" "$helper" --ensure; then
+        echo -e "${GREEN}✓ Browser runtime ready (or deliberately skipped)${NC}"
+    else
+        echo -e "${YELLOW}! No browser runtime — the server still starts.${NC}"
+        echo "  Browser workflow steps will wait for manual handling, and the"
+        echo "  dashboard offers a one-click install on the agents page."
     fi
-
-    echo -e "${YELLOW}! Chromium download failed — the server still starts.${NC}"
-    echo "  Browser workflow steps will wait for manual handling until you run:"
-    echo "  $INSTALL_DIR/venv/bin/python -m playwright install chromium"
     return 0
 }
 

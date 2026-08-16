@@ -35,6 +35,7 @@ from agent.configurator import (
     delete_builder_session,
     get_builder_session,
     looks_like_manual_timing,
+    resolve_task_draft_workdir,
     task_goal_from_draft,
 )
 from agent.agent_models import (
@@ -882,9 +883,18 @@ def _contract_readiness_fact(
     browser_runtime: dict[str, Any] | None = None
     if runtime_findings:
         finding = runtime_findings[0]
+        # The command is carried only when a download is genuinely the fix.
+        # The phone renders a copyable install command whenever it is present,
+        # and a server that is unready because of its *browser setting* — say,
+        # set to installed Chrome on a machine that has none — would otherwise
+        # be answered with an install that changes nothing.
+        needs_download = finding.detail.get("install_required") is not False
         browser_runtime = {
             "ready": False,
-            "install_command": finding.detail.get("install_command"),
+            "install_command": (
+                finding.detail.get("install_command") if needs_download else None
+            ),
+            "install_required": needs_download,
             "message": finding.ask,
             "step_ids": finding.detail.get("step_ids") or [],
         }
@@ -1452,9 +1462,22 @@ async def builder_commit(body: BuilderCommitBody) -> dict[str, Any] | JSONRespon
     }
     if task_draft is not None:
         goal = str(task_draft.goal).strip()
+        # Resolve the folder the conversation named *here*, at the moment the
+        # task is written, so a `cwd` that matched nothing never reaches the
+        # metadata `_resolve_project_path` reads. `project_name` comes back set
+        # only when the value matched a project the user actually registered —
+        # and it has to be passed on, because every other consumer keys off it:
+        # a task without one runs under the `__global__` sentinel, which puts
+        # its files outside any workspace (so the path guard asks permission for
+        # routine reads) and leaves a standing rule with no project to attach
+        # to. `POST /tasks` has always set it; the builder path never did, which
+        # is why conversationally-built agents were the ones that stalled.
+        workdir = resolve_task_draft_workdir(task_draft)
+        task_draft = workdir.task_draft or task_draft
         task = store.create_task(
             title=goal[:80],
             description=None,
+            project_name=workdir.project_name,
             workspace_id=task_draft.workspace_id,
             assigned_agent_id=agent["id"],
             kind="general",

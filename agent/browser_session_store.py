@@ -163,6 +163,10 @@ class BrowserSessionStore:
         return _row_to_browser_session(row)
 
     def latest_resumable_for_run(self, run_id: str) -> dict[str, Any] | None:
+        # `rowid DESC` is the tiebreak, not decoration: SQLite's
+        # CURRENT_TIMESTAMP has one-second resolution, and two browser steps of
+        # one run land inside the same second routinely. Without it "newest"
+        # is undefined exactly where it is asked most often.
         with get_db_connection(use_row_factory=True) as conn:
             row = conn.execute(
                 """
@@ -170,12 +174,89 @@ class BrowserSessionStore:
                 WHERE run_id = ?
                   AND status IN ('created', 'waiting_for_user', 'resumed')
                   AND storage_state_path IS NOT NULL
-                ORDER BY updated_at DESC, created_at DESC
+                ORDER BY updated_at DESC, created_at DESC, rowid DESC
                 LIMIT 1
                 """,
                 (run_id,),
             ).fetchone()
         return _row_to_browser_session(row)
+
+    def latest_with_storage_state_for_task(
+        self,
+        task_id: str,
+        *,
+        exclude_run_id: str | None = None,
+        exclude_session_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """The newest session of this *task* that left a storage state behind.
+
+        Scoped to the task, not the run, and that is the whole point.
+        `latest_resumable_for_run` only ever looks inside the run being
+        executed, so a scheduled agent — a new run every night — started signed
+        out however many times a person had logged in. The task id is what
+        survives between runs, so a login captured on Monday is the input to
+        Tuesday's run.
+
+        Returns the whole session rather than just the path so the caller can
+        name which session it is continuing from. A path on its own would leave
+        `browser_input_storage_state_path` and `previous_browser_session_id`
+        free to disagree about where the login came from.
+
+        Closed and expired sessions are included on purpose: a finished session
+        is exactly where a completed login lives.
+
+        `exclude_session_id` is how a session is kept from reading back its own
+        state. It is deliberately narrower than `exclude_run_id`: excluding the
+        whole current run would also skip an earlier *step* of that run, whose
+        state is newer than any previous run's and is the one to continue from.
+        Ordering does the rest — newest wins, so an earlier step in this run
+        beats last night, and last night wins when this run has nothing yet.
+        """
+        clauses = [
+            "task_id = ?",
+            "storage_state_path IS NOT NULL",
+            "storage_state_path != ''",
+        ]
+        values: list[Any] = [task_id]
+        if exclude_run_id:
+            clauses.append("run_id != ?")
+            values.append(exclude_run_id)
+        if exclude_session_id:
+            clauses.append("id != ?")
+            values.append(exclude_session_id)
+        with get_db_connection(use_row_factory=True) as conn:
+            row = conn.execute(
+                f"""
+                SELECT * FROM browser_sessions
+                WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC, created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                tuple(values),
+            ).fetchone()
+        return _row_to_browser_session(row)
+
+    def latest_storage_state_for_task(
+        self,
+        task_id: str,
+        *,
+        exclude_run_id: str | None = None,
+        exclude_session_id: str | None = None,
+    ) -> str | None:
+        """Just the path from :meth:`latest_with_storage_state_for_task`.
+
+        One SQL statement behind both so the adapter's own safety net and the
+        orchestrator's handoff can never select different sessions.
+        """
+        session = self.latest_with_storage_state_for_task(
+            task_id,
+            exclude_run_id=exclude_run_id,
+            exclude_session_id=exclude_session_id,
+        )
+        if session is None:
+            return None
+        value = session.get("storage_state_path")
+        return str(value) if value else None
 
     def update(
         self,

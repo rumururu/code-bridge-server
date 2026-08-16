@@ -2759,6 +2759,7 @@ async def _execute_browser_action_workflow_step(
     )
     previous_session = _previous_browser_session_for_execution(
         run_id=run_id,
+        task_id=task_id,
         current_session_id=browser_session.get("id") if browser_session else None,
     )
 
@@ -2891,7 +2892,13 @@ def _prepare_browser_session_for_execution(
     existing = store.find_active_for_step(run_id=run_id, step_id=step_id)
     if existing is not None:
         return existing
-    previous = store.latest_resumable_for_run(run_id)
+    # Same resolver the context below uses, so the session's recorded
+    # provenance cannot disagree with the state actually handed to the adapter.
+    previous = _previous_browser_session_for_execution(
+        run_id=run_id,
+        task_id=task_id,
+        current_session_id=None,
+    )
     metadata = {"source": "browser_action", "live_context": True}
     if previous is not None:
         metadata["previous_browser_session_id"] = previous["id"]
@@ -2909,14 +2916,45 @@ def _prepare_browser_session_for_execution(
 def _previous_browser_session_for_execution(
     *,
     run_id: str,
+    task_id: str | None,
     current_session_id: str | None,
 ) -> dict[str, Any] | None:
-    previous = get_browser_session_store().latest_resumable_for_run(run_id)
-    if previous is None:
+    """Which earlier browser session does this step continue from?
+
+    The newest session of the same *task* that left a storage state behind,
+    whichever run it belonged to. That single rule covers both cases:
+
+    *   an earlier **step in this run** — newer than anything before it, so it
+        wins, which is the behaviour this already had;
+    *   the previous **run of the same task** — a scheduled agent gets a new
+        ``run_id`` every night, and this used to look no further than the
+        current run (``latest_resumable_for_run``), so every nightly run
+        started signed out however many times a person had logged in. The task
+        id is what survives between runs.
+
+    Only the current session is excluded, never the whole current run:
+    excluding the run would also skip that earlier step. That exclusion is
+    what stops a session shadowing a real previous state with the
+    ``storage_state.json`` it has not written yet.
+
+    The lookup lives here rather than in `_browser_session_context` because
+    deciding *which* session to continue from is this function's whole job;
+    `_browser_session_context` only formats a session pair into the adapter's
+    context. Putting a store query there would give the formatter a second
+    responsibility and let the session id and the storage-state path in the
+    same dict come from two different lookups.
+    """
+    store = get_browser_session_store()
+    if not task_id:
+        # No task to scope by (direct/ad-hoc execution): the run is all there
+        # is to go on, which is the pre-existing behaviour.
+        previous = store.latest_resumable_for_run(run_id)
+        if previous is not None and previous.get("id") != current_session_id:
+            return previous
         return None
-    if current_session_id and previous.get("id") == current_session_id:
-        return None
-    return previous
+    return store.latest_with_storage_state_for_task(
+        task_id, exclude_session_id=current_session_id
+    )
 
 
 def _browser_session_context(

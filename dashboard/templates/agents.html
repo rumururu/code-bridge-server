@@ -1353,11 +1353,26 @@
                 r_browser: 'Browser runtime',
                 fix_browser: 'This server has no working browser runtime, so every browser step stops and waits for a person',
                 fix_browser_unknown: 'The server did not answer whether it has a browser runtime — treat browser steps as unproven until it does',
+                fix_browser_settings: 'Choose which browser this server drives, whether it shows a window, and whose logins it uses',
+                modal_browser_prefs_title: 'How this server drives a browser',
+                modal_browser_prefs_unknown: 'Could not read this server’s browser settings, so they are not shown. Reload the page to try again.',
+                modal_browser_prefs_saving: 'Saving…',
+                modal_browser_prefs_failed: 'Could not save the browser settings',
+                modal_browser_will_use: 'Browser steps will use: {browser}',
+                modal_browser_pref_browser: 'Browser',
+                modal_browser_pref_window: 'Window',
+                modal_browser_pref_profile: 'Logins',
                 modal_browser_title: 'Browser runtime',
                 modal_browser_hint: 'Browser steps run on the server, not in this page. Until the server has Playwright and Chromium, each browser step pauses and waits for someone to take over.',
                 modal_browser_unknown: 'The readiness check did not answer. Reload the page; if it keeps failing, the server may be down or mid-restart.',
                 modal_browser_command: 'Run this on the machine hosting the server',
                 modal_browser_copy: 'Copy command',
+                modal_browser_install: 'Install browser runtime',
+                modal_browser_cost: 'This server downloads it — about {download}MB over the network, about {disk}MB on disk, usually 1-5 minutes. The server keeps running while it downloads.',
+                modal_browser_installing: 'Downloading Chromium on the server… you can leave this open or close it; the download continues.',
+                modal_browser_install_done: 'Browser runtime is ready. Browser steps will run instead of waiting.',
+                modal_browser_install_failed: 'The install did not leave a working browser runtime behind',
+                modal_browser_install_disabled: 'Browser runtime installs are switched off on this machine (CODE_BRIDGE_BROWSER=0). Clear that setting and restart the server to install from here.',
                 copied: 'Copied',
                 copy_failed: 'Could not copy',
                 step_parks_note: 'This step pauses the run and waits for you to respond, every time — no permission setting can skip it.',
@@ -1625,11 +1640,26 @@
                 r_browser: '브라우저 런타임',
                 fix_browser: '이 서버에는 동작하는 브라우저 런타임이 없어, 브라우저 단계마다 멈춰 사람을 기다립니다',
                 fix_browser_unknown: '브라우저 런타임 상태를 서버가 알려주지 않았습니다 — 확인되기 전까지 브라우저 단계는 검증되지 않은 것으로 보세요',
+                fix_browser_settings: '이 서버가 어떤 브라우저를 쓸지, 창을 띄울지, 누구의 로그인을 쓸지 고릅니다',
+                modal_browser_prefs_title: '이 서버가 브라우저를 다루는 방식',
+                modal_browser_prefs_unknown: '이 서버의 브라우저 설정을 읽지 못해 표시하지 않습니다. 페이지를 새로 고쳐 다시 시도하세요.',
+                modal_browser_prefs_saving: '저장 중…',
+                modal_browser_prefs_failed: '브라우저 설정을 저장하지 못했습니다',
+                modal_browser_will_use: '브라우저 단계는 이것을 사용합니다: {browser}',
+                modal_browser_pref_browser: '브라우저',
+                modal_browser_pref_window: '창',
+                modal_browser_pref_profile: '로그인',
                 modal_browser_title: '브라우저 런타임',
                 modal_browser_hint: '브라우저 단계는 이 화면이 아니라 서버에서 실행됩니다. 서버에 Playwright와 Chromium이 준비되기 전까지 각 브라우저 단계는 멈춰서 사람이 대신하기를 기다립니다.',
                 modal_browser_unknown: '준비 상태 확인이 응답하지 않았습니다. 페이지를 새로 고쳐 보고, 계속 실패하면 서버가 내려갔거나 재시작 중일 수 있습니다.',
                 modal_browser_command: '서버가 실행 중인 컴퓨터에서 이 명령을 실행하세요',
                 modal_browser_copy: '명령 복사',
+                modal_browser_install: '브라우저 런타임 설치',
+                modal_browser_cost: '서버가 직접 내려받습니다 — 네트워크로 약 {download}MB, 디스크에 약 {disk}MB, 보통 1~5분 걸립니다. 내려받는 동안에도 서버는 계속 동작합니다.',
+                modal_browser_installing: '서버에서 Chromium을 내려받는 중입니다… 이 창을 닫아도 다운로드는 계속됩니다.',
+                modal_browser_install_done: '브라우저 런타임이 준비되었습니다. 이제 브라우저 단계가 멈추지 않고 실행됩니다.',
+                modal_browser_install_failed: '설치가 끝났지만 동작하는 브라우저 런타임이 남지 않았습니다',
+                modal_browser_install_disabled: '이 컴퓨터에서는 브라우저 런타임 설치가 꺼져 있습니다 (CODE_BRIDGE_BROWSER=0). 설정을 해제하고 서버를 다시 시작하면 여기서 설치할 수 있습니다.',
                 copied: '복사했습니다',
                 copy_failed: '복사하지 못했습니다',
                 step_parks_note: '이 단계는 실행마다 멈춰서 응답을 기다립니다 — 어떤 권한 설정도 이를 건너뛰게 하지 못합니다.',
@@ -1846,6 +1876,11 @@
         // for a human, and a chip that guessed green would have promised the
         // opposite of what the run does.
         let browserRuntime = null;
+        // The operator's three answers (which browser / headed or headless /
+        // whose profile) plus the option descriptions, from
+        // GET /browser-runtime/preferences. `null` = not loaded; the modal then
+        // says so rather than drawing selects that would post a guess.
+        let browserPrefs = null;
 
         async function api(path, options = {}) {
             try {
@@ -2327,6 +2362,11 @@
                     ok: !!(browserRuntime && browserRuntime.ready === true),
                     fix: browserRuntime ? t('fix_browser') : t('fix_browser_unknown'),
                     go: () => openBrowserRuntimeFixModal(),
+                    // The only chip that opens when it is already green: the
+                    // modal is also where the browser, window and profile are
+                    // chosen, and a working runtime is exactly when someone
+                    // wants to change whose logins the agent has.
+                    alwaysOpens: true,
                 });
             }
             return items;
@@ -2362,7 +2402,7 @@
         function renderRail(agent) {
             return `<div class="rail-full">` + readiness(agent).map((item, index) =>
                 `<span class="rail-chip" data-on="${item.ok ? 1 : 0}" data-fix="${index}"
-                       ${item.ok ? '' : `role="button" tabindex="0" title="${escapeHtml(item.fix)}"`}
+                       ${(item.ok && !item.alwaysOpens) ? '' : `role="button" tabindex="0" title="${escapeHtml(item.ok ? t('fix_browser_settings') : item.fix)}"`}
                        onclick="fixReadiness('${agent.id}', ${index})">
                     <span class="dot"></span>${escapeHtml(item.label)}
                  </span>`
@@ -2373,7 +2413,8 @@
             const agent = agents.find((candidate) => candidate.id === agentId);
             if (!agent) return;
             const item = readiness(agent)[index];
-            if (item && !item.ok && typeof item.go === 'function') item.go();
+            if (!item || typeof item.go !== 'function') return;
+            if (!item.ok || item.alwaysOpens) item.go();
         }
 
         // --- Fix-in-place modal ----------------------------------------------
@@ -2434,16 +2475,147 @@
             copyText(command).then((ok) => toast(ok ? t('copied') : t('copy_failed')));
         }
 
-        // Nothing to submit here: the fix is a command the operator runs on
-        // the machine hosting the server. The modal states what is missing and
-        // hands over the exact command rather than implying the UI can do it.
+        // The modal used to hand over a command and stop there: the product
+        // knew the runtime was missing and could not fix it, so the only way
+        // back to a working browser step was a terminal on the host. The
+        // button below is that fix without the terminal. The command stays,
+        // because the server this page talks to is not always the machine the
+        // person is sitting at.
+        //
+        // The size is stated before the button, not after: a step that goes
+        // quiet for four minutes with no number attached reads as a hang.
+        // The three questions that used to be answered in code: which browser,
+        // headed or headless, whose logins. Each option says what it costs, and
+        // the one that hands the agent every login the person's own Chrome
+        // holds says so before they pick it — it is never the default and never
+        // arrived at by falling back.
+        // Korean wording for the same option set. The server still owns *which*
+        // options exist and what each one does — this only translates them, and
+        // falls back to the server's English rather than showing a blank, so a
+        // new option added server-side is visible before it is translated.
+        const BROWSER_OPTION_KO = {
+            browser: {
+                auto: { label: '설치된 Chrome이 있으면 사용', detail: '이 컴퓨터에 이미 있는 Google Chrome을 우선 쓰고, 없으면 번들 Chromium으로 넘어갑니다.' },
+                chrome: { label: '설치된 Google Chrome만', detail: '이 컴퓨터에 Chrome이 없으면 실행이 멈추고 그 이유를 알려줍니다.' },
+                chromium: { label: '번들 Chromium만', detail: 'Playwright 버전마다 약 200MB 다운로드가 필요하고, 사이트가 자동화를 감지하기 더 쉽습니다.' },
+            },
+            headless_mode: {
+                auto: { label: '서버가 결정 (현재: 창 없음)', detail: '지금은 모든 실행이 창 없이 동작합니다. 예약 실행은 보는 사람이 없고, 서버에는 화면이 아예 없을 수도 있기 때문입니다.' },
+                headless: { label: '항상 창 없이', detail: '창을 띄우지 않습니다. 가장 빠르고, 화면이 없는 컴퓨터에서도 동작합니다.' },
+                headed: { label: '항상 창을 띄움', detail: '창 없는 브라우저를 거부하는 사이트용입니다. 서버가 도는 컴퓨터에 로그인된 데스크톱 화면이 필요하며, 없으면 실행이 실패하고 그 사실을 알려줍니다.' },
+            },
+            profile: {
+                dedicated: { label: '에이전트 전용 프로필', detail: '브라우저 핸드오프에서 한 번만 로그인하면 이후 모든 실행이 그 로그인을 이어받습니다. 에이전트는 자기가 로그인한 것만 볼 수 있습니다.' },
+                shared_chrome: { label: '내 Chrome 프로필', detail: '바로 로그인된 상태로 시작합니다 — 대신 에이전트가 그 브라우저에 로그인된 모든 사이트에 접근할 수 있습니다. 실행 중에는 Chrome을 닫아 두어야 합니다.' },
+                ephemeral: { label: '프로필 없음', detail: '아무것도 남기지 않습니다. 매 실행이 로그아웃 상태로 시작합니다 — 공개 페이지에는 충분하지만 로그인이 필요한 곳에는 쓸 수 없습니다.' },
+            },
+        };
+
+        function browserOptionText(key, option) {
+            const translated = (currentLang === 'ko' && BROWSER_OPTION_KO[key])
+                ? BROWSER_OPTION_KO[key][option.value]
+                : null;
+            return {
+                label: (translated && translated.label) || option.label || option.value,
+                detail: (translated && translated.detail) || option.detail || '',
+            };
+        }
+
+        function browserPrefsBlock() {
+            if (!browserPrefs || !browserPrefs.preferences) {
+                return `<p class="hint">${escapeHtml(t('modal_browser_prefs_unknown'))}</p>`;
+            }
+            const prefs = browserPrefs.preferences;
+            const options = browserPrefs.options || {};
+            const plan = browserPrefs.plan || {};
+            const field = (key, label) => {
+                const list = options[key] || [];
+                const current = prefs[key];
+                const chosen = list.find((option) => option.value === current) || null;
+                return `
+                <div class="field">
+                    <label>${escapeHtml(label)}</label>
+                    <select id="browserPref_${key}" onchange="saveBrowserPreferences()">
+                        ${list.map((option) => `<option value="${escapeHtml(option.value)}"${option.value === current ? ' selected' : ''}>${escapeHtml(browserOptionText(key, option).label)}</option>`).join('')}
+                    </select>
+                    <p class="hint"${chosen && chosen.consequence === 'shared' ? ' style="color:var(--danger, #d64545);"' : ''}>${escapeHtml(chosen ? browserOptionText(key, chosen).detail : '')}</p>
+                </div>`;
+            };
+            const warnings = (plan.warnings || []).map((warning) =>
+                `<p class="hint" style="color:var(--danger, #d64545);">${escapeHtml(warning.message)}</p>`
+            ).join('');
+            const blocked = plan.blocked_message
+                ? `<p class="hint" style="color:var(--danger, #d64545);">${escapeHtml(plan.blocked_message)}</p>`
+                : '';
+            const willUse = plan.label
+                ? `<p class="hint"><strong>${escapeHtml(t('modal_browser_will_use').replace('{browser}', plan.label))}</strong></p>`
+                : '';
+            return `
+                <hr style="border:0;border-top:1px solid rgba(127,127,127,0.25);margin:16px 0;">
+                <p class="hint"><strong>${escapeHtml(t('modal_browser_prefs_title'))}</strong></p>
+                ${willUse}
+                ${blocked}
+                ${field('browser', t('modal_browser_pref_browser'))}
+                ${field('headless_mode', t('modal_browser_pref_window'))}
+                ${field('profile', t('modal_browser_pref_profile'))}
+                ${warnings}
+                <p class="hint" id="browserPrefStatus"></p>`;
+        }
+
+        async function saveBrowserPreferences() {
+            const read = (key) => {
+                const el = document.getElementById(`browserPref_${key}`);
+                return el ? el.value : undefined;
+            };
+            const status = document.getElementById('browserPrefStatus');
+            if (status) { status.textContent = t('modal_browser_prefs_saving'); status.style.color = ''; }
+            const result = await api('/browser-runtime/preferences', {
+                method: 'PUT',
+                body: JSON.stringify({
+                    browser: read('browser'),
+                    headless_mode: read('headless_mode'),
+                    profile: read('profile'),
+                }),
+            });
+            if (!result || result.error || !result.preferences) {
+                if (status) {
+                    status.textContent = (result && result.error) || t('modal_browser_prefs_failed');
+                    status.style.color = 'var(--danger, #d64545)';
+                }
+                return;
+            }
+            browserPrefs = result;
+            // The setting changes what readiness *is*: a machine that needed a
+            // 200MB download stops needing one the moment Chrome is chosen.
+            if (result.readiness) browserRuntime = result.readiness;
+            openBrowserRuntimeFixModal();
+            renderAgentList();
+        }
+
         function openBrowserRuntimeFixModal() {
             const known = !!browserRuntime;
             const command = (browserRuntime && browserRuntime.install_command) || '';
             const detail = known
                 ? (browserRuntime.message || '')
                 : t('modal_browser_unknown');
-            const commandBlock = command ? `
+            const downloadMb = (browserRuntime && browserRuntime.install_download_mb) || 200;
+            const diskMb = (browserRuntime && browserRuntime.install_disk_mb) || 450;
+            const cost = t('modal_browser_cost')
+                .replace('{download}', String(downloadMb))
+                .replace('{disk}', String(diskMb));
+            // Only offered when the probe actually answered, said "not ready",
+            // and said a download is what is missing. A machine that will use
+            // its installed Chrome needs nothing fetched, so it is not offered
+            // a 450MB download it would never launch.
+            const installBlock = (known && browserRuntime.ready !== true
+                && browserRuntime.install_required !== false) ? `
+                <p class="hint">${escapeHtml(cost)}</p>
+                <div class="actions">
+                    <button class="btn btn-primary" id="browserInstallBtn" onclick="startBrowserRuntimeInstall()">${escapeHtml(t('modal_browser_install'))}</button>
+                </div>
+                <p class="hint" id="browserInstallStatus"></p>
+                <pre id="browserInstallOutput" style="display:none;white-space:pre-wrap;word-break:break-all;max-height:180px;overflow:auto;padding:10px;border-radius:6px;background:rgba(127,127,127,0.12);"></pre>` : '';
+            const commandBlock = (command && browserRuntime && browserRuntime.install_required !== false) ? `
                 <div class="field">
                     <label>${escapeHtml(t('modal_browser_command'))}</label>
                     <code style="display:block;padding:10px;border-radius:6px;background:rgba(127,127,127,0.12);word-break:break-all;">${escapeHtml(command)}</code>
@@ -2454,8 +2626,89 @@
             const body = `
                 <p class="hint">${escapeHtml(t('modal_browser_hint'))}</p>
                 ${detail ? `<p class="hint">${escapeHtml(detail)}</p>` : ''}
-                ${commandBlock}`;
+                ${installBlock}
+                ${commandBlock}
+                ${browserPrefsBlock()}`;
             openFixModal(t('modal_browser_title'), body);
+        }
+
+        function setBrowserInstallStatus(message, isError) {
+            const el = document.getElementById('browserInstallStatus');
+            if (!el) return;
+            el.textContent = message || '';
+            el.style.color = isError ? 'var(--danger, #d64545)' : '';
+        }
+
+        function showBrowserInstallOutput(text) {
+            const el = document.getElementById('browserInstallOutput');
+            if (!el) return;
+            if (!text) { el.style.display = 'none'; return; }
+            el.textContent = text;
+            el.style.display = '';
+        }
+
+        // Poll rather than stream: the job outlives the modal, and a closed
+        // modal must not cancel a download that is already 150MB in.
+        async function pollBrowserRuntimeInstall(jobId) {
+            // Bounded on both axes: the server's own job timeout is 30 minutes,
+            // and a run of poll failures means the server went away rather than
+            // that the download is still healthy. Neither may spin forever.
+            const deadline = Date.now() + (35 * 60 * 1000);
+            let consecutiveFailures = 0;
+            while (Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+                const job = await api(`/browser-runtime/install/jobs/${encodeURIComponent(jobId)}`);
+                if (!job || job.error) {
+                    consecutiveFailures += 1;
+                    if (consecutiveFailures >= 10) {
+                        setBrowserInstallStatus(t('modal_browser_unknown'), true);
+                        return;
+                    }
+                    continue;
+                }
+                consecutiveFailures = 0;
+                if (!job.finished) continue;
+
+                // `installed` is the server's re-probe of the executable on
+                // disk, not the install command's exit code. Green here means
+                // a browser step will actually run.
+                if (job.status === 'completed' && job.installed === true) {
+                    browserRuntime = job.readiness || browserRuntime;
+                    setBrowserInstallStatus(t('modal_browser_install_done'), false);
+                    showBrowserInstallOutput('');
+                    toast(t('modal_browser_install_done'));
+                    // Re-render so every chip that was red on this account
+                    // turns over at once.
+                    await reloadAll();
+                    return;
+                }
+                const reason = job.error_message || t('modal_browser_install_failed');
+                setBrowserInstallStatus(`${t('modal_browser_install_failed')}: ${reason}`, true);
+                showBrowserInstallOutput(job.output || '');
+                return;
+            }
+            setBrowserInstallStatus(t('modal_browser_unknown'), true);
+        }
+
+        async function startBrowserRuntimeInstall() {
+            const button = document.getElementById('browserInstallBtn');
+            if (button) button.disabled = true;
+            showBrowserInstallOutput('');
+            setBrowserInstallStatus(t('modal_browser_installing'), false);
+
+            const job = await api('/browser-runtime/install', { method: 'POST' });
+            if (!job || job.error) {
+                const disabled = !!(job && job.error_body
+                    && job.error_body.error_code === 'browser_runtime_install_disabled');
+                setBrowserInstallStatus(
+                    disabled ? t('modal_browser_install_disabled') : ((job && job.error) || t('modal_browser_install_failed')),
+                    true,
+                );
+                if (button) button.disabled = false;
+                return;
+            }
+            await pollBrowserRuntimeInstall(job.job_id);
+            if (button) button.disabled = false;
         }
 
         function syncFixScheduleKind() {
@@ -4987,7 +5240,7 @@
         // --- Bootstrap ------------------------------------------------------
 
         async function reloadAll() {
-            const [agentResult, scheduleResult, taskResult, ruleResult, operationResult, stepOperationResult, approvalResult, scriptResult, runResult, stepSchemaResult, cliSweepResult, browserRuntimeResult] = await Promise.all([
+            const [agentResult, scheduleResult, taskResult, ruleResult, operationResult, stepOperationResult, approvalResult, scriptResult, runResult, stepSchemaResult, cliSweepResult, browserRuntimeResult, browserPrefsResult] = await Promise.all([
                 api('/agents?limit=200'),
                 api('/schedules'),
                 api('/tasks?limit=200'),
@@ -5000,6 +5253,7 @@
                 api('/workflow/step-schema'),
                 api('/cli-agents/sweep'),
                 api('/browser-runtime/readiness'),
+                api('/browser-runtime/preferences'),
             ]);
             agents = (agentResult && agentResult.agents) || [];
             schedules = (scheduleResult && scheduleResult.schedules) || [];
@@ -5046,6 +5300,12 @@
             // green here would tell someone their browser step will run.
             browserRuntime = (browserRuntimeResult && !browserRuntimeResult.error)
                 ? browserRuntimeResult
+                : null;
+            // Same rule: a failed fetch means "we do not know what this server
+            // is set to". Showing the defaults would tell someone their agent
+            // uses its own profile when it might be sharing their Chrome.
+            browserPrefs = (browserPrefsResult && !browserPrefsResult.error && browserPrefsResult.preferences)
+                ? browserPrefsResult
                 : null;
             renderPolicyOperationOptions();
             renderAgentList();
