@@ -313,14 +313,26 @@ class ApprovalExpirySweepTest(_DbBackedTest):
         self.assertIn("deny_from_permission_message", seen_kwargs[0])
         self.assertNotIn("retry_from_permission", seen_kwargs[0])
 
-        # And the run is no longer parked on the approval.
+        # And the run is no longer parked on the approval. It *is* parked
+        # again — on `on_failure: ask_user` — because a step whose tool call
+        # was refused did not do its work: the turn ending cleanly is not
+        # evidence the step succeeded. Before 2026-08-16 this landed
+        # `completed`, and the run told the user a refusal had succeeded.
         run = self.store.get_run(result["run"]["id"])
         step = self.store.list_task_steps(task["id"])[0]
         assert run is not None
-        self.assertNotEqual(run["status"], "waiting_for_user")
-        self.assertNotEqual(step["status"], "waiting_for_user")
-        # The park is gone: the step's output is a turn result, not a checkpoint.
-        self.assertNotIn("checkpoint", step["output"])
+        self.assertEqual(step["output"]["checkpoint"]["reason"], "ask_user")
+        self.assertNotEqual(step["output"]["checkpoint"]["reason"], "approval_required")
+        self.assertEqual(
+            [
+                event["event_type"]
+                for event in self.store.list_events(result["run"]["id"])
+            ].count("task.step.failed"),
+            1,
+        )
+        self.assertEqual(
+            step["output"]["denied_tool_calls"][0]["source"], "approval_decision"
+        )
         resumed_events = [
             event
             for event in self.store.list_events(result["run"]["id"])
@@ -454,9 +466,13 @@ class ResumeMeetsExpiredApprovalTest(_DbBackedTest):
         # The denial is recorded on the row, not just acted on.
         self.assertEqual(self.approvals.get_request(approval["id"])["status"], "expired")
 
+        # The approval park is over, and the step did not silently "complete":
+        # its tool call was refused, so it failed and `on_failure: ask_user`
+        # parked it for a person under a *different* reason.
         step = self.store.list_task_steps(task["id"])[0]
-        self.assertNotEqual(step["status"], "waiting_for_user")
-        self.assertNotIn("checkpoint", step["output"])
+        self.assertEqual(step["output"]["checkpoint"]["reason"], "ask_user")
+        self.assertEqual(step["output"]["reason"], "ask_user")
+        self.assertIn("denied_tool_calls", step["output"])
 
     async def test_resume_stays_parked_for_an_approval_that_is_still_live(self):
         _agent, task, result = self._prepare()

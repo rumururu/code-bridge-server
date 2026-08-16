@@ -10,6 +10,7 @@ from policy.policy_engine import default_policy_snapshot
 from policy.policy_store import decide_policy_with_rules, get_policy_rule_store
 
 from .approval_store import get_approval_store, is_request_expired
+from .approver_channel import CHANNEL_REMOTE, is_desktop_channel, stamp_approver
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,7 @@ def decide_approval(
     reason: str | None = None,
     constraints: dict[str, Any] | None = None,
     approver: dict[str, Any] | None = None,
+    channel: str = CHANNEL_REMOTE,
     rule_scope: str | None = None,
     rule_expires_at: str | None = None,
 ) -> dict[str, Any] | None:
@@ -214,7 +216,20 @@ def decide_approval(
     (scheduled) runs possible: with no client connected there is nobody to
     answer a permission prompt, and the run would otherwise sit in
     ``waiting_for_user`` forever.
+
+    ``channel`` says where the decision physically arrived from and is the only
+    thing that can satisfy a ``desktop_only`` request. It is *not* read from
+    ``approver``: that dict is client-supplied metadata for the audit trail and
+    was, until this changed, also the thing being trusted — the phone sends
+    ``{'type': 'desktop_app'}``, which is why a phone tap could approve a
+    secret-file read the policy engine had escalated to the desktop. Routes
+    derive it from the gate they sit behind; see
+    :mod:`approvals.approver_channel`. The default is
+    :data:`~approvals.approver_channel.CHANNEL_REMOTE` so an in-process caller
+    that says nothing (``routes/agents.py``'s emergency stop, which only
+    denies) is never mistaken for the desktop.
     """
+    approver = stamp_approver(approver, channel=channel)
     store = get_approval_store()
     request = store.get_request(approval_id)
     if request is None:
@@ -237,7 +252,7 @@ def decide_approval(
             "approval": store.get_request(approval_id) or request,
         }
 
-    if decision.startswith("approve") and request.get("desktop_only") and not _is_desktop_approver(approver):
+    if decision.startswith("approve") and request.get("desktop_only") and not is_desktop_channel(channel):
         get_audit_store().record_event(
             operation=request["operation"],
             run_id=request["run_id"],
@@ -300,8 +315,15 @@ def decide_approval(
 
 
 def _rule_author(approver: dict[str, Any] | None) -> str:
+    """A human-readable label for who wrote a standing rule.
+
+    Reads ``claimed_type`` rather than ``type`` because ``type`` is now the
+    server's own channel label (``desktop_app``/``remote_client``), which says
+    nothing about *who* — the client's own description of itself does. This is
+    a display string on the rule record, never an authorization input.
+    """
     if isinstance(approver, dict):
-        for key in ("id", "name", "type"):
+        for key in ("id", "name", "claimed_type"):
             value = approver.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
@@ -314,10 +336,3 @@ def get_policy_snapshot() -> dict[str, Any]:
         "default_policy": default_policy_snapshot(),
         "rules": get_policy_rule_store().list_rules(),
     }
-
-
-def _is_desktop_approver(approver: dict[str, Any] | None) -> bool:
-    if not approver:
-        return False
-    approver_type = str(approver.get("type") or "").strip().lower()
-    return approver_type in {"desktop", "desktop_app", "local_desktop_app"}

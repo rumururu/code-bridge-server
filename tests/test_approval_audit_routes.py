@@ -112,7 +112,7 @@ class ApprovalAuditRoutesTest(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["policy"]["effect"], "forbidden")
 
-    def test_desktop_only_approval_requires_desktop_approver(self):
+    def test_desktop_only_approval_refuses_the_api_key_route(self):
         response = self.client.post(
             "/api/approvals/request",
             json={
@@ -139,15 +139,21 @@ class ApprovalAuditRoutesTest(unittest.TestCase):
         self.assertEqual(rejected.status_code, 403)
         self.assertIn("Desktop-only", rejected.json()["error"])
 
-        approved = self.client.post(
+        # This route is api-key gated, so it is never the desktop — and saying
+        # "I am the desktop app" in the body does not make it one. This case
+        # used to return 200: the phone sends exactly this
+        # (lib/providers/approval_provider.dart), which meant a phone tap could
+        # approve the secret-file reads the policy engine escalates here.
+        forged = self.client.post(
             f"/api/approvals/{approval_id}/decision",
             json={
                 "decision": "approve_once",
                 "approver": {"type": "desktop_app"},
             },
         )
-        self.assertEqual(approved.status_code, 200)
-        self.assertEqual(approved.json()["approval"]["status"], "approved")
+        self.assertEqual(forged.status_code, 403)
+        self.assertIn("Desktop-only", forged.json()["error"])
+        self.assertEqual(forged.json()["approval"]["status"], "pending")
 
     def test_policies_endpoint_returns_default_sets(self):
         response = self.client.get("/api/approvals/policies")

@@ -32,10 +32,12 @@ from .browser_runtime_manager import get_browser_runtime_manager
 from .browser_session_store import get_browser_session_store
 from .capability_adapters import describe_capability_adapter
 from .capability_registry import (
+    BROWSER_RUNTIME_CAPABILITY_NAME,
     detected_mcp_server_configs,
     refresh_capability_registry,
     verify_declared_mcp_ids,
 )
+from .configurator import is_builder_added_tool
 from .prompt_composer import compose_system_prompt
 from .cli_agent_runtime import find_cli_agent_source_path, resolve_cli_agent_definition
 from .cli_agent_sources import cli_agent_reference_prompt
@@ -94,6 +96,13 @@ class AgentTaskRunSink:
         # required", and the phone shows a card with nothing on it that says
         # which run or which file it belongs to.
         self.permission_denial: dict[str, Any] | None = None
+        # Tool calls that were *refused* during this turn, as opposed to parked
+        # on. A policy denial (`chat_stream_service` "permission.policy_denied")
+        # never stops the turn: the SDK is answered with a deny result and the
+        # model carries on, so the turn still ends `subtype: success` and
+        # nothing downstream could tell that the work was refused. Recording it
+        # here is what lets the step be judged on what happened inside it.
+        self.denied_tool_calls: list[dict[str, Any]] = []
         self.error_message: str | None = None
         # What the model actually said. Without it a completed LLM step reads
         # "Workflow step completed." and the answer — the diagnosis you asked
@@ -110,6 +119,8 @@ class AgentTaskRunSink:
         if event_type == "permission_required":
             self.permission_required = True
             self.permission_denial = self._extract_permission_denial(data)
+        if event_type == "app_event" and data.get("event") == "permission.policy_denied":
+            self.denied_tool_calls.append(self._extract_policy_denial(data))
         if event_type == "error":
             message = data.get("message")
             self.error_message = str(message) if message is not None else "Unknown error"
@@ -242,6 +253,24 @@ class AgentTaskRunSink:
             "input": tool_input if isinstance(tool_input, dict) else {},
         }
         return denial
+
+    @staticmethod
+    def _extract_policy_denial(data: dict[str, Any]) -> dict[str, Any]:
+        """Pull the refused tool out of a ``permission.policy_denied`` event.
+
+        The app event carries the tool name in ``detail`` and the standing
+        rule's own words in ``data.reason``; both are optional, and a denial
+        with neither is still a denial, so nothing here is allowed to make the
+        record disappear.
+        """
+        payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+        tool_name = data.get("detail")
+        reason = payload.get("reason")
+        return {
+            "source": "policy",
+            "tool_name": tool_name if isinstance(tool_name, str) else None,
+            "reason": reason if isinstance(reason, str) else None,
+        }
 
     @staticmethod
     def _extract_assistant_text(data: dict[str, Any]) -> str:
@@ -1000,6 +1029,20 @@ async def execute_task_orchestration(execution: dict[str, Any]) -> None:
             error={"message": sink.error_message or "Provider turn did not complete."},
         )
         return
+    if sink.denied_tool_calls:
+        # Same rule as the workflow path (`_DENIED_STEP_MESSAGE`): a standing
+        # rule refused a tool, the turn carried on and ended clean, and calling
+        # that "Provider turn completed." would report a refusal as a success.
+        # This path has no `on_failure`, so the run simply ends failed.
+        _finish_execution(
+            task_id=task_id,
+            run_id=run_id,
+            execute_step=execute_step,
+            summary_step=summary_step,
+            status="failed",
+            error=_denied_step_error(sink.denied_tool_calls, sink.result_text),
+        )
+        return
 
     _finish_execution(
         task_id=task_id,
@@ -1454,6 +1497,86 @@ _APPROVAL_DENY_DECISIONS = frozenset(
 APPROVAL_WAIT_REASON = "approval_required"
 
 
+#: Where a step keeps the tool calls that were refused while it ran.
+#:
+#: It lives on the step's ``output`` rather than in a local variable because a
+#: step can be denied one tool, park on a *second* one, and be resumed minutes
+#: later in a fresh process. Only a persisted record survives that, and without
+#: it the rule below would quietly stop holding for exactly the runs that took
+#: the longest to finish.
+STEP_DENIED_TOOL_CALLS_KEY = "denied_tool_calls"
+
+#: Why a step with a denied tool call is failed rather than completed.
+#:
+#: The rule, deliberately fail-closed: **a workflow step in which any tool call
+#: was refused ends `failed`.** The runtime cannot judge whether the model met
+#: the step's `success_criteria` some other way — the only witness to that is
+#: the model's own prose, and taking its word for it is the guess this codebase
+#: refuses to make. The provider turn ending `subtype: success` says the turn
+#: was clean, not that the work happened. Failing is also the recoverable
+#: mistake: `on_failure` runs, which for the default `ask_user` puts the person
+#: back in the loop, while a false "completed" tells them a refusal succeeded
+#: and is never corrected. See RESULT_020.
+_DENIED_STEP_MESSAGE = (
+    "A tool call was denied while this step ran, so the step is not reported as "
+    "completed."
+)
+
+
+def _recorded_tool_denials(step: dict[str, Any]) -> list[dict[str, Any]]:
+    """Denials this step already recorded, from an earlier park/resume cycle."""
+    output = step.get("output")
+    if not isinstance(output, dict):
+        return []
+    recorded = output.get(STEP_DENIED_TOOL_CALLS_KEY)
+    if not isinstance(recorded, list):
+        return []
+    return [entry for entry in recorded if isinstance(entry, dict)]
+
+
+def _merge_step_output(step: dict[str, Any], extra: dict[str, Any]) -> None:
+    """Merge keys into a step's output, on the row *and* on the in-memory dict.
+
+    Both halves matter. The row is what a later resume — possibly in a fresh
+    process — will read. The in-memory dict is what ``_wait_for_user_step``
+    builds its checkpoint output from: it takes the *passed-in* step, which the
+    driver loop is still holding from before the failure, so anything written
+    only to the row is dropped the moment an ``ask_user`` policy parks the step.
+    """
+    if not extra:
+        return
+    output = dict(step.get("output") or {})
+    output.update(extra)
+    step["output"] = output
+    get_agent_store().update_task_step(step["id"], {"output": output})
+
+
+def _record_tool_denials(step: dict[str, Any], denials: list[dict[str, Any]]) -> None:
+    """Persist the tool calls this step has had refused so far."""
+    if not denials:
+        return
+    _merge_step_output(step, {STEP_DENIED_TOOL_CALLS_KEY: denials})
+
+
+def _denied_step_error(
+    denials: list[dict[str, Any]], result_text: str | None
+) -> dict[str, Any]:
+    """The failure a denied step is recorded with.
+
+    Carries the model's closing words as evidence: it was told to "say plainly
+    what you could not do", and that sentence is the most useful thing on the
+    step for whoever answers the `ask_user` this failure triggers.
+    """
+    error: dict[str, Any] = {
+        "message": _DENIED_STEP_MESSAGE,
+        "reason": "tool_call_denied",
+        STEP_DENIED_TOOL_CALLS_KEY: denials,
+    }
+    if result_text:
+        error["result"] = _truncate_workflow_evidence(result_text, 4000)
+    return error
+
+
 def _approval_checkpoint_for_step(step: dict[str, Any]) -> dict[str, Any] | None:
     """The step's own approval checkpoint, if it is parked on one right now."""
     if step.get("status") != "waiting_for_user":
@@ -1589,6 +1712,25 @@ MCP_INJECTION_PROVIDER_ID = "anthropic"
 MCP_TOOLS_EVENT_TYPE = "task.step.mcp_tools"
 
 
+def _declared_mcp_tools(agent: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """The ``tools_json`` entries of an agent, keyed by ``mcp_id``.
+
+    First entry wins for a repeated id, matching :func:`_declared_mcp_ids`,
+    which reports each declaration once in first-seen order.
+    """
+    tools = (agent or {}).get("tools_json")
+    if not isinstance(tools, list):
+        return {}
+    entries: dict[str, dict[str, Any]] = {}
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        mcp_id = tool.get("mcp_id")
+        if isinstance(mcp_id, str) and mcp_id.strip():
+            entries.setdefault(mcp_id.strip(), tool)
+    return entries
+
+
 def _declared_mcp_ids(agent: dict[str, Any] | None) -> list[str]:
     """The ``mcp_id`` values in an agent's ``tools_json``, in order."""
     tools = (agent or {}).get("tools_json")
@@ -1602,6 +1744,107 @@ def _declared_mcp_ids(agent: dict[str, Any] | None) -> list[str]:
         if isinstance(mcp_id, str) and mcp_id.strip():
             declared.append(mcp_id.strip())
     return declared
+
+
+#: Which workflow step types actually run on which declared runtime. Only the
+#: step *type* counts: `configurator._add_playwright_hints` stamps
+#: `tool_hint: "playwright"` onto any step whose prose merely mentions a URL or
+#: the word "click" (configurator.py:2048), so treating a `tool_hint` on an
+#: ordinary `llm` step as proof of need would just re-run the same keyword
+#: guess the need check exists to stop trusting.
+_STEP_TYPES_REQUIRING_MCP_ID: dict[str, frozenset[str]] = {
+    # A `browser_action` step drives the server's built-in Playwright runtime,
+    # and its flow is a flow that automates a browser: an llm step in it
+    # reaching for the `playwright` MCP server is the agent doing its job.
+    "playwright": frozenset({"browser_action"}),
+    BROWSER_RUNTIME_CAPABILITY_NAME: frozenset({"browser_action"}),
+    # Same four types `_is_app_action_workflow_type` dispatches on; the
+    # agreement is asserted in tests/test_mcp_injection_need.py.
+    "app_action": frozenset(
+        {"app_action", "android_action", "mobile_action", "device_action"}
+    ),
+}
+
+#: `tool_hint` values on an ``mcp_tool`` step that name a runtime rather than
+#: repeating the server id. An ``mcp_tool`` step is the author saying "call
+#: this server here", which is the strongest need signal there is, so the
+#: aliases the builder writes for those steps have to resolve too.
+_MCP_TOOL_HINT_ALIASES: dict[str, frozenset[str]] = {
+    "playwright": frozenset({"playwright", "browser", "browser_action"}),
+    "app_action": frozenset(
+        {
+            "app_action",
+            "android_adb",
+            "android",
+            "android-device",
+            "android_device",
+            "mobile_action",
+            "device_action",
+        }
+    ),
+}
+
+
+def _agent_flow_steps(agent: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The agent's stored workflow steps, raw.
+
+    Raw rather than normalized on purpose: a flow that `normalize_workflow`
+    would reject still says which step types it contains, and refusing to read
+    it would silently turn "this agent has a browser step" into "this agent
+    needs nothing".
+    """
+    flow = (agent or {}).get("flow_json")
+    if not isinstance(flow, list):
+        return []
+    return [step for step in flow if isinstance(step, dict)]
+
+
+def _flow_need_for_mcp_id(flow: list[dict[str, Any]], mcp_id: str) -> str | None:
+    """The step that needs ``mcp_id``, described, or ``None`` if none does."""
+    aliases = _MCP_TOOL_HINT_ALIASES.get(mcp_id, frozenset()) | {mcp_id.casefold()}
+    step_types = _STEP_TYPES_REQUIRING_MCP_ID.get(mcp_id, frozenset())
+    for index, step in enumerate(flow):
+        raw_type = step.get("type") or step.get("step_type") or "llm"
+        step_type = str(raw_type).strip().casefold()
+        name = str(step.get("name") or step.get("id") or f"step {index + 1}").strip()
+        if step_type == "mcp_tool":
+            hint = str(step.get("tool_hint") or "").strip().casefold()
+            if hint and hint in aliases:
+                return f'step "{name}" calls it directly'
+        if step_type in step_types:
+            return f'step "{name}" is a {step_type} step'
+    return None
+
+
+def _mcp_id_is_needed(
+    mcp_id: str,
+    *,
+    declared_entry: dict[str, Any] | None,
+    flow: list[dict[str, Any]],
+) -> str | None:
+    """Why this run needs ``mcp_id``, or ``None`` when nothing says it does.
+
+    Two things count as need, and nothing else does:
+
+    * the agent's own declaration — an entry the model wrote into the draft
+      because the agent is supposed to use that server; and
+    * a workflow step that runs on it.
+
+    The gap between them is the whole point. `configurator._ensure_playwright_
+    tool` adds a `playwright` entry to any draft whose *wording* looked web-ish
+    ("click", "form", "url", "웹"), so on a machine with a `playwright` MCP
+    server configured, an agent that never opens a browser was handed one —
+    and, since C6-2, spawned `npx @playwright/mcp@latest` on every llm turn,
+    every two minutes for a scheduled agent. A builder-added entry with no step
+    to justify it is therefore not a need; a model-declared entry always is.
+    """
+    if not is_builder_added_tool(declared_entry):
+        # Includes every agent stored before this check existed whose entry
+        # does not match the builder's templates: unrecognised means
+        # "the model declared it", so those runs keep the server they have
+        # been getting instead of quietly losing it.
+        return "the agent declares it"
+    return _flow_need_for_mcp_id(flow, mcp_id)
 
 
 async def _apply_declared_mcp_servers(
@@ -1627,6 +1870,12 @@ async def _apply_declared_mcp_servers(
     Never raises for the missing case: a declared-but-absent server is
     reported, not fatal, because the turn may well not need it, and failing
     the step would take a working run down over a tool it never calls.
+
+    A configured server is only passed through when this agent actually needs
+    it — see :func:`_mcp_id_is_needed`. One that exists but nothing in the
+    agent asks for is reported as ``not_injected`` with
+    ``reason: "not_required_by_agent"``, never as ``missing``: it is here, it
+    was simply not started, and the two are different facts.
     """
     store = get_agent_store()
     agent = store.get_agent(agent_id) if agent_id else None
@@ -1636,6 +1885,8 @@ async def _apply_declared_mcp_servers(
 
     verdicts = verify_declared_mcp_ids(declared)
     configs = detected_mcp_server_configs()
+    declared_entries = _declared_mcp_tools(agent)
+    flow = _agent_flow_steps(agent)
 
     builtin: list[str] = []
     missing: list[dict[str, str]] = []
@@ -1643,6 +1894,10 @@ async def _apply_declared_mcp_servers(
     injectable: dict[str, Any] = {}
     for verdict in verdicts:
         if verdict.source == "builtin_runtime":
+            # Not gated by need: a built-in runtime starts no process for this
+            # agent and injects nothing, so there is nothing to withhold, and
+            # reporting it as "not required" instead of "runs on our own
+            # runtime" would replace a true sentence with a misleading one.
             builtin.append(verdict.mcp_id)
             continue
         if not verdict.verified:
@@ -1653,10 +1908,36 @@ async def _apply_declared_mcp_servers(
             unlaunchable.append(
                 {
                     "mcp_id": verdict.mcp_id,
+                    "reason": "no_launch_config",
                     "detail": (
                         f'MCP server "{verdict.mcp_id}" is configured but its entry does '
                         "not describe how to launch it (no command for a stdio server, "
                         "no url for an http/sse server), so it was not passed to the run."
+                    ),
+                }
+            )
+            continue
+        # Asked before the session is consulted, because need is a property of
+        # the agent rather than of the provider: a server this agent has no
+        # use for should read as "not required" on every provider, not as
+        # "your session type could not take it".
+        need = _mcp_id_is_needed(
+            verdict.mcp_id,
+            declared_entry=declared_entries.get(verdict.mcp_id),
+            flow=flow,
+        )
+        if need is None:
+            unlaunchable.append(
+                {
+                    "mcp_id": verdict.mcp_id,
+                    "reason": "not_required_by_agent",
+                    "detail": (
+                        f'MCP server "{verdict.mcp_id}" is configured on this machine, but '
+                        "the Agent Builder added this tool from the wording of the request "
+                        "rather than the agent asking for it, and no workflow step uses it, "
+                        "so this run does not start it. Give the agent a step that uses it "
+                        f'(a browser_action step, or an mcp_tool step naming "{verdict.mcp_id}") '
+                        "if it really needs it."
                     ),
                 }
             )
@@ -1687,6 +1968,7 @@ async def _apply_declared_mcp_servers(
         unlaunchable.extend(
             {
                 "mcp_id": name,
+                "reason": "session_cannot_take_mcp_servers",
                 "detail": (
                     f'MCP server "{name}" is configured on this machine, but '
                     f"{blocked_by}, so this run does not have it."
@@ -1765,6 +2047,10 @@ async def _execute_llm_workflow_step(
     approval_checkpoint = _approval_checkpoint_for_step(step)
     parked_session: Any | None = None
     resume_decision: str | None = None
+    # Denials this step already collected before it parked. See
+    # `STEP_DENIED_TOOL_CALLS_KEY`: a refusal earlier in the step still counts
+    # against the step when a later tool is approved and the turn ends clean.
+    denials: list[dict[str, Any]] = _recorded_tool_denials(step)
     if approval_checkpoint is not None:
         resume_decision = _resolve_permission_decision(
             approval_checkpoint, permission_decision
@@ -1799,6 +2085,21 @@ async def _execute_llm_workflow_step(
                 },
             )
             return None
+        if resume_decision == "deny":
+            # The decision itself is the denial record — deterministic, owned by
+            # the runtime, and written before the turn that will be told about
+            # it. Nothing downstream has to read the model's prose to know a
+            # tool call was refused in this step.
+            denials.append(
+                {
+                    "source": "approval_decision",
+                    "approval_id": approval_checkpoint.get("approval_id"),
+                    "tool_name": approval_checkpoint.get("tool_name"),
+                    "tool_target": approval_checkpoint.get("tool_target"),
+                    "decision": str(permission_decision or "").strip().lower() or "deny",
+                }
+            )
+            _record_tool_denials(step, denials)
         parked_session = _parked_permission_session(session_scope)
         if parked_session is None and resume_decision == "deny":
             # Re-running the step would ask the model to do the very thing the
@@ -1813,7 +2114,9 @@ async def _execute_llm_workflow_step(
                         "Approval was denied and the provider session that asked "
                         "for it is gone, so the step was not re-run."
                     ),
+                    "reason": "tool_call_denied",
                     "approval_id": approval_checkpoint.get("approval_id"),
+                    STEP_DENIED_TOOL_CALLS_KEY: denials,
                 },
             )
             return False
@@ -1907,7 +2210,14 @@ async def _execute_llm_workflow_step(
         )
         return False
 
+    # Refusals the turn itself carried (a standing rule denying a tool never
+    # stops the turn, so this is the only place they are seen).
+    denials.extend(sink.denied_tool_calls)
+
     if sink.permission_required:
+        # Parked again, on a different tool. The step is not over, so the
+        # denials it has collected so far have to outlive the park.
+        _record_tool_denials(step, denials)
         denial = sink.permission_denial or {}
         tool_name = denial.get("tool_name")
         tool_target = _approval_tool_target(denial.get("input"))
@@ -1928,11 +2238,35 @@ async def _execute_llm_workflow_step(
         )
         return None
     if sink.error_message or not completed:
+        error: dict[str, Any] = {
+            "message": sink.error_message or "Provider turn did not complete."
+        }
+        if denials:
+            error[STEP_DENIED_TOOL_CALLS_KEY] = denials
         _fail_step(
             task=store.get_task(task_id) or {"id": task_id},
             step_id=step_id,
             run_id=run_id,
-            error={"message": sink.error_message or "Provider turn did not complete."},
+            error=error,
+        )
+        return False
+
+    if denials:
+        # The turn ended cleanly, and that is not the same thing as the step
+        # having done its work: a `subtype: success` result only says the
+        # provider finished. Something in this step was refused, so the step
+        # failed and `on_failure` decides what happens next — which is how the
+        # model's own "I could not do this" reaches the person.
+        denied_error = _denied_step_error(denials, sink.result_text)
+        # Onto the step before it fails, so an `ask_user` park — which rebuilds
+        # the output from the step the driver loop is holding — keeps the reason
+        # and the model's account instead of showing a prompt with no cause.
+        _merge_step_output(step, denied_error)
+        _fail_step(
+            task=store.get_task(task_id) or {"id": task_id},
+            step_id=step_id,
+            run_id=run_id,
+            error=denied_error,
         )
         return False
 
@@ -2734,6 +3068,14 @@ def _apply_workflow_failure_policy(
             next_input = {**step_input, "retry_state": retry_state}
             output = dict(failed_step.get("output") or {})
             output["last_retry_error"] = error
+            # A retry is a *fresh attempt*, so it starts with no denials against
+            # it. The record exists to survive a park inside one attempt (see
+            # `STEP_DENIED_TOOL_CALLS_KEY`); carrying it into the next attempt
+            # would fail an attempt in which nothing was refused, which is a lie
+            # in the other direction. The error it came from is preserved above
+            # in `last_retry_error`.
+            output.pop(STEP_DENIED_TOOL_CALLS_KEY, None)
+            failed_step["output"] = output
             store.update_task_step(
                 failed_step["id"],
                 {

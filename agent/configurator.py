@@ -1917,30 +1917,99 @@ def _extract_schedule(text: str) -> str | None:
     return None
 
 
+#: The tool entries this module adds *by itself*, from keyword classification
+#: of the user's wording, when the model never declared them. Both are written
+#: verbatim from these templates, which makes them the marker: an entry in a
+#: stored `agents.tools_json` that matches one of these field-for-field was put
+#: there by `_ensure_playwright_tool` / `_ensure_app_action_tool`, and an entry
+#: that does not match is something the model wrote. Nothing else on the draft
+#: records that difference, and the runtime needs it — `task_orchestrator.
+#: _apply_declared_mcp_servers` must not start a browser MCP server every turn
+#: for an agent that only *sounded* web-ish. Keeping the literals here (rather
+#: than inline in the two helpers) is what makes the marker recoverable from
+#: `tools_json` alone, with no schema change and no migration for the agents
+#: already stored.
+BUILDER_ADDED_TOOL_TEMPLATES: dict[str, dict[str, Any]] = {
+    "playwright": {
+        "mcp_id": "playwright",
+        "tool_names": [
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_click",
+            "browser_type",
+        ],
+        "user_capability": "웹사이트를 열고 상태를 읽고 필요한 버튼/입력 필드를 조작한다.",
+        # Neutral by design: these examples are shown to the user and
+        # must not name a site the agent has nothing to do with.
+        "user_examples": ["웹페이지 열기", "버튼 클릭", "입력 필드 채우기"],
+        "category": MCPCategory.BROWSER,
+        "risk_tier": MCPRiskTier.MEDIUM,
+    },
+    "app_action": {
+        "mcp_id": "app_action",
+        "tool_names": [
+            "list_packages",
+            "open_play_store",
+            "install_package",
+            "install_app",
+            "launch_app",
+            "verify_launch",
+            "tap_text",
+            "read_screen",
+            "wait",
+        ],
+        "user_capability": "연결된 Android 기기에서 앱 설치, 실행, 화면 확인, 간단한 탭을 수행한다.",
+        "user_examples": ["Play Store 열기", "앱 설치", "설치된 앱 실행 확인"],
+        "category": MCPCategory.OTHER,
+        "risk_tier": MCPRiskTier.MEDIUM,
+    },
+}
+
+#: Fields compared when recognising a builder-added entry. Deliberately not
+#: `category` / `risk_tier`: those are enums whose stored form depends on how
+#: the entry was serialised, while these three are plain JSON scalars and
+#: lists, and the capability sentence alone is distinctive enough that no
+#: model output collides with it (it appears nowhere in the prompt).
+_BUILDER_ADDED_MATCH_FIELDS = ("tool_names", "user_capability", "user_examples")
+
+
+def is_builder_added_tool(entry: Any) -> bool:
+    """True when this ``tools_json`` entry is one the builder added on its own.
+
+    False for anything the model wrote — including a model-written entry for
+    the same ``mcp_id``, which will carry its own tool list and its own
+    capability sentence. False, too, for an entry written by an *older*
+    version of the templates above: unrecognised degrades to "the model
+    declared it", which is the conservative direction (the run keeps the
+    server it has been getting) rather than silently taking a capability away
+    from an agent we cannot prove was auto-fitted.
+    """
+    if not isinstance(entry, dict):
+        return False
+    mcp_id = entry.get("mcp_id")
+    template = BUILDER_ADDED_TOOL_TEMPLATES.get(str(mcp_id or "").strip())
+    if template is None:
+        return False
+    for field_name in _BUILDER_ADDED_MATCH_FIELDS:
+        expected = template[field_name]
+        actual = entry.get(field_name)
+        if isinstance(expected, list):
+            if not isinstance(actual, list) or [str(item) for item in actual] != expected:
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
+def _builder_added_tool(mcp_id: str) -> AgentToolDraft:
+    return AgentToolDraft(**dict(BUILDER_ADDED_TOOL_TEMPLATES[mcp_id]))
+
+
 def _ensure_playwright_tool(draft: AgentDraft) -> AgentDraft:
     if any(tool.mcp_id == "playwright" for tool in draft.tools):
         return draft
     return draft.model_copy(
-        update={
-            "tools": [
-                *draft.tools,
-                AgentToolDraft(
-                    mcp_id="playwright",
-                    tool_names=[
-                        "browser_navigate",
-                        "browser_snapshot",
-                        "browser_click",
-                        "browser_type",
-                    ],
-                    user_capability="웹사이트를 열고 상태를 읽고 필요한 버튼/입력 필드를 조작한다.",
-                    # Neutral by design: these examples are shown to the user and
-                    # must not name a site the agent has nothing to do with.
-                    user_examples=["웹페이지 열기", "버튼 클릭", "입력 필드 채우기"],
-                    category=MCPCategory.BROWSER,
-                    risk_tier=MCPRiskTier.MEDIUM,
-                ),
-            ]
-        }
+        update={"tools": [*draft.tools, _builder_added_tool("playwright")]}
     )
 
 
@@ -1948,29 +2017,7 @@ def _ensure_app_action_tool(draft: AgentDraft) -> AgentDraft:
     if any(tool.mcp_id == "app_action" for tool in draft.tools):
         return draft
     return draft.model_copy(
-        update={
-            "tools": [
-                *draft.tools,
-                AgentToolDraft(
-                    mcp_id="app_action",
-                    tool_names=[
-                        "list_packages",
-                        "open_play_store",
-                        "install_package",
-                        "install_app",
-                        "launch_app",
-                        "verify_launch",
-                        "tap_text",
-                        "read_screen",
-                        "wait",
-                    ],
-                    user_capability="연결된 Android 기기에서 앱 설치, 실행, 화면 확인, 간단한 탭을 수행한다.",
-                    user_examples=["Play Store 열기", "앱 설치", "설치된 앱 실행 확인"],
-                    category=MCPCategory.OTHER,
-                    risk_tier=MCPRiskTier.MEDIUM,
-                ),
-            ]
-        }
+        update={"tools": [*draft.tools, _builder_added_tool("app_action")]}
     )
 
 

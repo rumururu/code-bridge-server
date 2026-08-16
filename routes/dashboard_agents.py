@@ -24,6 +24,7 @@ from agent.agent_models import (
     DryRunRequest,
 )
 from approvals.approval_models import ApprovalDecisionCreate
+from approvals.approver_channel import CHANNEL_DESKTOP
 from agent.script_models import (
     ScriptDraftRequest,
     ScriptDraftSave,
@@ -410,11 +411,22 @@ async def list_pending_approvals(run_id: str | None = None) -> dict[str, Any]:
 
 @router.post("/approvals/{approval_id}/decision", response_model=None)
 async def decide_approval(approval_id: str, body: ApprovalDecisionCreate) -> Any:
-    # Delegating to the api-key route rather than calling `decide_approval`
-    # directly is what makes the dashboard resume a parked run too: the
-    # `agent.approval_resume` hand-off lives in that handler, and adding a
-    # second call here would spawn the same resume twice.
-    return await approvals_routes.create_approval_decision(approval_id, body)
+    # Delegating to the shared body in routes/approvals.py rather than calling
+    # `approvals.approval_service.decide_approval` directly is what makes the
+    # dashboard resume a parked run too: the `agent.approval_resume` hand-off
+    # lives there, and adding a second call here would spawn the same resume
+    # twice.
+    #
+    # This is the *only* route allowed to answer a `desktop_only` approval, and
+    # the claim rests entirely on where this router lives: `require_local_access`
+    # on the router above, plus registration in `_DASHBOARD_ONLY_ROUTERS`
+    # (routes/__init__.py) so it is never mounted on the tunnel-exposed API app.
+    # Reaching this handler therefore means the request arrived on the
+    # localhost-bound dashboard listener — someone at the machine. Nothing in
+    # `body` is consulted for that; `body.approver` is audit metadata only.
+    return await approvals_routes.apply_approval_decision(
+        approval_id, body, channel=CHANNEL_DESKTOP
+    )
 
 
 __all__ = ["router"]

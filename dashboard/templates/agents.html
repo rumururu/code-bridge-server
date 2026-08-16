@@ -219,6 +219,39 @@
         .roster-meta .fault { color: var(--danger-color); }
         .roster-meta .ok { color: var(--link); }
 
+        /* Roster status chip (E-S1). `waiting_run_count` is deliberately not
+           part of the server's active count, so an agent parked on a question
+           used to read as "nothing happening" — the one row worth opening was
+           the one that looked idle. Three states, one chip, in the same
+           priority the app uses (lib/screens/agent/widgets/agent_list_tile.dart
+           ::_statusChip): needs-response, last-run-failed, active count. */
+        .roster-head { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
+        .run-chip {
+            flex: 0 0 auto;
+            display: inline-flex; align-items: center; gap: 5px;
+            padding: 2px 9px; border-radius: 999px;
+            border: 1px solid var(--border-color); color: var(--text-muted);
+            font-family: var(--mono); font-size: 11px; letter-spacing: .03em;
+            white-space: nowrap;
+        }
+        .run-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: 0 0 auto; }
+        .run-chip[data-kind="waiting"] { color: var(--warning-color); border-color: var(--warning-color); background: var(--pulse-bg); }
+        .run-chip[data-kind="failed"] { color: var(--danger-color); border-color: var(--danger-color); background: var(--fault-bg); }
+
+        /* A path or command is read character by character — a proportional
+           font is where `~/.ssh/id_rsa` and `~/.ssh/id_rsa.pub` stop being
+           distinguishable at a glance. Same reason the app's approval card
+           and refusal dialog use monospace for the same two values. */
+        .target-line {
+            font-family: var(--mono); font-size: 12.5px;
+            color: var(--text-primary); word-break: break-all;
+            margin: 2px 0;
+        }
+        .finding { margin: 0 0 10px; }
+        .finding .where { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+        .finding .ask { font-size: 12.5px; color: var(--text-secondary); margin-top: 2px; }
+        .finding .target-line { color: var(--danger-color); }
+
         /* --- Create flow ---------------------------------------------------- */
         /* The definition and the conversation that shapes it sit side by side,
            so a reply and what it changed are visible at the same time. */
@@ -1270,6 +1303,39 @@
                 commit_unattended_no: 'This agent will NOT run on its own — you have to start it yourself.',
                 commit_fix_schedule: 'Add a schedule now',
 
+                // The commit gate (C3). Wording matches the app's
+                // builderCommit* ARB keys so the same refusal reads the same
+                // on the PC and on the phone.
+                refusal_title: 'Some steps still need a value',
+                refusal_step_line: 'Step {step}, action {action}',
+                refusal_save_incomplete: 'Save it unfinished',
+                refusal_save_incomplete_explain: 'It is saved exactly as written, and every run stops at the steps above until you fill them in.',
+                refusal_fix_first: 'Go back and fix',
+                readiness_gaps_title: 'Saved, but it will not run as written',
+                readiness_warnings_title: 'Worth checking',
+                readiness_saved_incomplete: 'Saved unfinished, at your request.',
+                readiness_browser_missing: 'Browser steps will stop and wait for you every run until Playwright is installed on the server.',
+                readiness_install_label: 'Install command',
+                readiness_copy: 'Copy',
+
+                // Roster status chip (E-S1), same priority as the app's
+                // agent_list_tile.dart::_statusChip.
+                chip_needs_response: 'Needs response',
+                chip_last_run_failed: 'Last run failed',
+                chip_active_runs: '{n} active',
+
+                // Approval card (B6). One sentence per normalized
+                // `details.display.action` — the server sends the identifier,
+                // never the sentence.
+                appr_read_file: 'The agent wants to read a file',
+                appr_write_file: 'The agent wants to write a file',
+                appr_edit_file: 'The agent wants to edit a file',
+                appr_delete_file: 'The agent wants to delete a file',
+                appr_list_files: 'The agent wants to list files',
+                appr_search_files: 'The agent wants to search files',
+                appr_run_command: 'The agent wants to run a command',
+                appr_fetch_url: 'The agent wants to fetch a web address',
+
                 agent_simulate_btn: 'Simulate', agent_run_once_btn: 'Run once now',
                 sim_confirm_title: 'Simulate this agent now?',
                 sim_confirm_body: 'Previews each step. Nothing runs for real — no files touched, no tools called.',
@@ -1516,6 +1582,31 @@
                 commit_unattended_yes: '이 에이전트는 스스로 예약대로 실행됩니다.',
                 commit_unattended_no: '이 에이전트는 스스로 실행되지 않습니다 — 직접 실행해야 합니다.',
                 commit_fix_schedule: '지금 예약 추가',
+
+                refusal_title: '값이 아직 없는 단계가 있습니다',
+                refusal_step_line: '{step} 단계, {action}번째 동작',
+                refusal_save_incomplete: '미완성 상태로 저장',
+                refusal_save_incomplete_explain: '지금 쓴 그대로 저장되고, 값을 채울 때까지 실행할 때마다 위 단계에서 멈춥니다.',
+                refusal_fix_first: '돌아가서 고치기',
+                readiness_gaps_title: '저장했지만 지금 상태로는 실행되지 않습니다',
+                readiness_warnings_title: '확인해 볼 점',
+                readiness_saved_incomplete: '요청하신 대로 미완성 상태로 저장했습니다.',
+                readiness_browser_missing: '서버에 Playwright가 설치될 때까지 브라우저 단계는 실행할 때마다 멈춰 사용자를 기다립니다.',
+                readiness_install_label: '설치 명령',
+                readiness_copy: '복사',
+
+                chip_needs_response: '응답 필요',
+                chip_last_run_failed: '마지막 실행 실패',
+                chip_active_runs: '활성 {n}개',
+
+                appr_read_file: '에이전트가 파일을 읽으려 합니다',
+                appr_write_file: '에이전트가 파일을 쓰려 합니다',
+                appr_edit_file: '에이전트가 파일을 수정하려 합니다',
+                appr_delete_file: '에이전트가 파일을 삭제하려 합니다',
+                appr_list_files: '에이전트가 파일 목록을 보려 합니다',
+                appr_search_files: '에이전트가 파일을 검색하려 합니다',
+                appr_run_command: '에이전트가 명령을 실행하려 합니다',
+                appr_fetch_url: '에이전트가 웹 주소를 가져오려 합니다',
 
                 agent_simulate_btn: '모의 실행', agent_run_once_btn: '지금 한 번 실행',
                 sim_confirm_title: '지금 모의 실행을 해볼까요?',
@@ -1765,7 +1856,19 @@
                 const body = await response.json().catch(() => null);
                 if (!response.ok) {
                     const detail = body && (body.detail || body.error);
-                    return { error: detail || `HTTP ${response.status}` };
+                    // A refusal can be more than a sentence. The commit gate
+                    // answers 400 with a per-action list and an explicit offer
+                    // to save the draft unfinished
+                    // (routes/agents.py::_contract_refusal_response); flattening
+                    // it to one string here is what left the PC showing a wall
+                    // of text with no way past it, while the phone showed the
+                    // same refusal item by item. Callers that only read
+                    // `.error` are unaffected.
+                    return {
+                        error: detail || `HTTP ${response.status}`,
+                        error_status: response.status,
+                        error_body: (body && typeof body === 'object') ? body : null,
+                    };
                 }
                 return body;
             } catch (error) {
@@ -1790,6 +1893,13 @@
             const div = document.createElement('div');
             div.textContent = text == null ? '' : String(text);
             return div.innerHTML;
+        }
+
+        // escapeHtml leaves double quotes alone — fine in text, fatal in an
+        // attribute, and the values that land in attributes here are paths and
+        // shell commands that routinely contain them.
+        function escapeAttr(text) {
+            return escapeHtml(text).replace(/"/g, '&quot;');
         }
 
         // The definition on the left and the conversation on the right are one
@@ -2287,6 +2397,14 @@
             fixModalAgentId = null;
             fixModalMissingOps = [];
             fixModalStepIndices = [];
+            // Dismissing the commit-gate dialog by its X or by the backdrop is
+            // an answer too ("no, I will go fix it"). Without this the save
+            // that is awaiting that answer would hang forever.
+            if (contractRefusalResolve) {
+                const resolve = contractRefusalResolve;
+                contractRefusalResolve = null;
+                resolve(false);
+            }
         }
 
         async function copyText(text) {
@@ -2677,6 +2795,31 @@
 
         // --- Agents ---------------------------------------------------------
 
+        // What is going on with this agent, in one chip — from the fields
+        // `GET /agents` carries per agent (routes/agents.py::_agent_run_activity),
+        // not from the page-wide `/runs?limit=60` window, which silently drops
+        // an agent whose last run fell out of the newest sixty.
+        //
+        // Priority is deliberate and matches the app
+        // (lib/screens/agent/widgets/agent_list_tile.dart::_statusChip):
+        // "needs response" outranks "last run failed" because it is the only
+        // one the user can resolve right now; both outrank the active count,
+        // which reads "0 active" for an agent parked on a question — the
+        // server deliberately excludes `waiting_for_user` from active.
+        //
+        // A server that sends neither field renders no chip at all. Nothing
+        // here infers a state from silence.
+        function runStatusChip(agent) {
+            const chip = (kind, label) =>
+                `<span class="run-chip" data-kind="${kind}"><span class="dot"></span>${escapeHtml(label)}</span>`;
+            const waiting = Number.isFinite(agent.waiting_run_count) ? agent.waiting_run_count : null;
+            if (waiting !== null && waiting > 0) return chip('waiting', t('chip_needs_response'));
+            if (agent.last_run_status === 'failed') return chip('failed', t('chip_last_run_failed'));
+            const active = Number.isFinite(agent.active_run_count) ? agent.active_run_count : null;
+            if (active === null && waiting === null) return '';
+            return chip('active', t('chip_active_runs').replace('{n}', String(active || 0)));
+        }
+
         function renderAgentList() {
             const host = document.getElementById('agentList');
             document.getElementById('agentCount').textContent = countText(agents.length, 'total');
@@ -2699,7 +2842,10 @@
                 if (missing) meta.push(currentLang === 'ko' ? `${missing}${t('to_finish')}` : `${missing} to finish`);
                 return `
                     <div class="roster-item" data-selected="${agent.id === selectedAgentId ? 1 : 0}" onclick="selectAgent('${agent.id}')">
-                        <div class="roster-name">${escapeHtml(agent.name)}</div>
+                        <div class="roster-head">
+                            <div class="roster-name">${escapeHtml(agent.name)}</div>
+                            ${runStatusChip(agent)}
+                        </div>
                         <div class="rail">${rail}</div>
                         <div class="roster-meta">${meta.join('<span>&middot;</span>')}</div>
                     </div>`;
@@ -3363,27 +3509,48 @@
             // task the draft asked for — POST /agents does neither. The form
             // still wins on every field it shows, so an edit made by hand is
             // not undone by committing the draft it was edited away from.
-            let result;
-            if (!id && builderSession && builderDraft) {
-                const merged = {
-                    ...builderDraft,
-                    name: body.name,
-                    description: body.description,
-                    system_prompt: body.system_prompt !== undefined
-                        ? body.system_prompt
-                        : builderDraft.system_prompt,
-                    provider_id: body.provider_id,
-                    model: body.model,
-                    flow: body.flow_json,
-                };
-                result = await api('/builder/commit', {
-                    method: 'POST',
-                    body: JSON.stringify({ session_id: builderSession, draft: merged }),
-                });
-            } else {
-                result = id
-                    ? await api(`/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) })
-                    : await api('/agents', { method: 'POST', body: JSON.stringify(body) });
+            const submit = (commitIncomplete) => {
+                if (!id && builderSession && builderDraft) {
+                    const merged = {
+                        ...builderDraft,
+                        name: body.name,
+                        description: body.description,
+                        system_prompt: body.system_prompt !== undefined
+                            ? body.system_prompt
+                            : builderDraft.system_prompt,
+                        provider_id: body.provider_id,
+                        model: body.model,
+                        flow: body.flow_json,
+                    };
+                    return api('/builder/commit', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            session_id: builderSession,
+                            draft: merged,
+                            ...(commitIncomplete ? { commit_incomplete: true } : {}),
+                        }),
+                    });
+                }
+                const payload = commitIncomplete
+                    ? { ...body, commit_incomplete: true }
+                    : body;
+                return id
+                    ? api(`/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) })
+                    : api('/agents', { method: 'POST', body: JSON.stringify(payload) });
+            };
+
+            let result = await submit(false);
+            // The commit gate is not a failure to report and walk away from —
+            // it is a list of things the user can answer, one per action, plus
+            // the server's own offer to keep the draft as it is. Same handling
+            // as lib/screens/agent/agent_builder_screen.dart::_save.
+            const refusal = contractRefusalFrom(result);
+            if (refusal) {
+                setStatus('editorStatus', '');
+                const saveAnyway = await showContractRefusal(refusal);
+                if (!saveAnyway) return;
+                setStatus('editorStatus', t('saving'));
+                result = await submit(true);
             }
             if (!result || result.error) {
                 setStatus('editorStatus', (result && result.error) || t('save_failed'), true);
@@ -3396,6 +3563,11 @@
             // guess. A plain PATCH/POST to /agents never fabricates a task or
             // schedule, so there is nothing here for it to report.
             const commitResult = result.commit_result || null;
+            // What the saved workflow still cannot do. `/builder/commit` always
+            // carries it inside commit_result; POST/PATCH /agents attach it
+            // only when it is not ok (routes/agents.py:1763, :1957), so its
+            // presence there is itself the signal.
+            const readiness = (commitResult && commitResult.readiness) || result.readiness || null;
             resetBuilder();
             await reloadAll();
             if (saved && saved.id) await selectAgent(saved.id);
@@ -3406,16 +3578,163 @@
                 // how a user was once told "매일 아침 09:00 자동 실행" for an
                 // agent with no schedule at all, gone before they could read it
                 // twice. What actually exists stays open until closed.
-                renderCommitResultModal(saved, commitResult);
+                renderCommitResultModal(saved, commitResult, readiness);
+            } else if (readinessWorthShowing(readiness)) {
+                // A 200 whose readiness says the workflow stalls at its first
+                // browser step is not a clean save, and a "saved" toast is
+                // exactly how it stopped looking like one.
+                openFixModal(
+                    readiness.ok === true ? t('readiness_warnings_title') : t('readiness_gaps_title'),
+                    renderReadinessBlock(readiness, { withHeading: false })
+                        + `<div class="actions"><button class="btn btn-secondary" onclick="closeFixModal()">${escapeHtml(t('modal_close'))}</button></div>`
+                );
             } else {
                 toast(id ? t('agent_updated') : t('agent_created'));
             }
         }
 
+        // --- Commit gate (C3) -------------------------------------------------
+        //
+        // `_contract_refusal_response` in routes/agents.py answers 400 with a
+        // sentence *and* the same facts item by item: `unresolved[]` /
+        // `unknown_step_references[]` each address one action by `step_id` and
+        // a 0-based `action_index`, and `can_save_incomplete` says whether the
+        // server will take the draft as written. The dashboard used to render
+        // only the sentence, in a one-line status field, with no way to accept
+        // the offer — so the PC could reach a refusal it could not answer.
+
+        function contractRefusalFrom(result) {
+            const body = result && result.error_body;
+            if (!body || typeof body !== 'object') return null;
+            const list = (value) => (Array.isArray(value)
+                ? value.filter((item) => item && typeof item === 'object') : []);
+            const blocking = list(body.blocking);
+            const unresolved = list(body.unresolved);
+            const unknown = list(body.unknown_step_references);
+            // Nothing is inferred from a bare 400: without findings this is
+            // some other refusal, and the plain error path still reports it.
+            if (!blocking.length && !unresolved.length && !unknown.length) return null;
+            return {
+                detail: typeof body.detail === 'string' ? body.detail
+                    : (typeof body.message === 'string' ? body.message : ''),
+                findings: blocking.length ? blocking : unresolved.concat(unknown),
+                canSaveIncomplete: body.can_save_incomplete === true,
+            };
+        }
+
+        // One finding → where it is, what it is asking for, and the literal
+        // value that is wrong. `action_index` is 0-based on the wire and shown
+        // +1, the same as the app does — a person counts actions from one.
+        function renderFinding(finding) {
+            const detail = (finding && finding.detail && typeof finding.detail === 'object')
+                ? finding.detail : {};
+            const stepId = typeof finding.step_id === 'string' ? finding.step_id.trim() : '';
+            const index = Number.isInteger(detail.action_index) ? detail.action_index : null;
+            const ask = typeof finding.ask === 'string' ? finding.ask.trim() : '';
+            const value = typeof detail.value === 'string' ? detail.value.trim() : '';
+            const where = stepId
+                ? (index === null
+                    ? stepId
+                    : t('refusal_step_line').replace('{step}', stepId).replace('{action}', String(index + 1)))
+                : '';
+            const parts = [];
+            if (where) parts.push(`<div class="where">${escapeHtml(where)}</div>`);
+            if (ask) parts.push(`<div class="ask">${escapeHtml(ask)}</div>`);
+            if (value) parts.push(`<div class="target-line">${escapeHtml(value)}</div>`);
+            if (!parts.length) return '';
+            return `<div class="finding">${parts.join('')}</div>`;
+        }
+
+        let contractRefusalResolve = null;
+
+        // Resolves true when the user chose to save it as it is. The escape
+        // hatch is offered only when the server said it would accept one —
+        // showing it otherwise would send a request that comes back as this
+        // same refusal.
+        function showContractRefusal(refusal) {
+            const parts = [];
+            if (refusal.detail) parts.push(`<p class="hint">${escapeHtml(refusal.detail)}</p>`);
+            parts.push(refusal.findings.map(renderFinding).join(''));
+            if (refusal.canSaveIncomplete) {
+                parts.push(`<p class="hint">${escapeHtml(t('refusal_save_incomplete_explain'))}</p>`);
+            }
+            const actions = [];
+            if (refusal.canSaveIncomplete) {
+                actions.push(`<button class="btn btn-secondary" onclick="resolveContractRefusal(true)">${escapeHtml(t('refusal_save_incomplete'))}</button>`);
+            }
+            actions.push(`<button class="btn" onclick="resolveContractRefusal(false)">${escapeHtml(t('refusal_fix_first'))}</button>`);
+            parts.push(`<div class="actions">${actions.join('')}</div>`);
+            openFixModal(t('refusal_title'), parts.join(''));
+            return new Promise((resolve) => { contractRefusalResolve = resolve; });
+        }
+
+        function resolveContractRefusal(saveAnyway) {
+            const resolve = contractRefusalResolve;
+            contractRefusalResolve = null;
+            closeFixModal();
+            if (resolve) resolve(saveAnyway === true);
+        }
+
+        // `readiness.ok === false` is a saved workflow that will stall; warnings
+        // alone are worth a look. An absent readiness says nothing either way
+        // and must never be rendered as a clean bill of health.
+        function readinessWorthShowing(readiness) {
+            if (!readiness || typeof readiness !== 'object') return false;
+            const any = (value) => Array.isArray(value) && value.length > 0;
+            return readiness.ok === false
+                || !!readiness.browser_runtime
+                || readiness.saved_incomplete === true
+                || any(readiness.unresolved_targets)
+                || any(readiness.unknown_step_references)
+                || any(readiness.warnings);
+        }
+
+        function renderReadinessBlock(readiness, options) {
+            if (!readinessWorthShowing(readiness)) return '';
+            const withHeading = !options || options.withHeading !== false;
+            const blocked = readiness.ok !== true;
+            const parts = [];
+            if (withHeading) {
+                parts.push(`<div class="note${blocked ? ' blocking' : ''}" style="margin-top:8px;">${escapeHtml(
+                    blocked ? t('readiness_gaps_title') : t('readiness_warnings_title'))}</div>`);
+            }
+            if (readiness.saved_incomplete === true) {
+                parts.push(`<p class="hint">${escapeHtml(t('readiness_saved_incomplete'))}</p>`);
+            }
+            // The server's own sentence, unedited, whenever it wrote one. Only
+            // the browser-runtime line below is worded here, because that one
+            // comes with a command a person has to be able to copy.
+            const message = typeof readiness.message === 'string' ? readiness.message.trim() : '';
+            if (message) parts.push(`<p class="hint">${escapeHtml(message)}</p>`);
+            const findings = []
+                .concat(Array.isArray(readiness.unresolved_targets) ? readiness.unresolved_targets : [])
+                .concat(Array.isArray(readiness.unknown_step_references) ? readiness.unknown_step_references : []);
+            parts.push(findings.filter((item) => item && typeof item === 'object').map(renderFinding).join(''));
+            const runtime = readiness.browser_runtime;
+            if (runtime && typeof runtime === 'object' && runtime.ready !== true) {
+                parts.push(`<p class="hint">${escapeHtml(t('readiness_browser_missing'))}</p>`);
+                const command = typeof runtime.install_command === 'string' ? runtime.install_command.trim() : '';
+                if (command) {
+                    parts.push(`
+                        <label>${escapeHtml(t('readiness_install_label'))}</label>
+                        <div class="target-line">${escapeHtml(command)}</div>
+                        <button class="btn btn-secondary btn-xs" onclick="copyReadinessCommand(this)"
+                                data-command="${escapeAttr(command)}">${escapeHtml(t('readiness_copy'))}</button>`);
+                }
+            }
+            return parts.join('');
+        }
+
+        function copyReadinessCommand(button) {
+            const command = button && button.getAttribute('data-command');
+            if (!command) return;
+            copyText(command).then((ok) => toast(ok ? t('copied') : t('copy_failed')));
+        }
+
         // What builder/commit actually built, in the user's own language —
         // never commit_result.summary/message, which the server always writes
         // in Korean regardless of the dashboard's language toggle.
-        function renderCommitResultModal(agent, commitResult) {
+        function renderCommitResultModal(agent, commitResult, readiness) {
             const agentName = (agent && (agent.name || agent.id)) || (commitResult.agent && commitResult.agent.name) || '';
             const taskFact = commitResult.task || {};
             const scheduleFact = commitResult.schedule || {};
@@ -3445,6 +3764,13 @@
             }
 
             parts.push(`<div class="note${unattended ? '' : ' blocking'}" style="margin-top:8px;">${escapeHtml(unattended ? t('commit_unattended_yes') : t('commit_unattended_no'))}</div>`);
+
+            // "What was actually created" has to include what it cannot do.
+            // `readiness.ok: false` means the agent is in the database and will
+            // stall at its first browser step — a modal that lists the task and
+            // the schedule and stops there is the half-truth this whole modal
+            // exists to stop telling.
+            parts.push(renderReadinessBlock(readiness || (commitResult && commitResult.readiness)));
 
             const actions = [];
             if (!scheduleFact.created && agent && agent.id) {
@@ -4252,6 +4578,26 @@
             reloadAll();
         }
 
+        // The sentence for a normalized `details.display.action`, or '' when
+        // there is none. '' covers both "the server sent no display" (an older
+        // build) and "it sent an action this page has never heard of" — an MCP
+        // tool keeps its own name as the action on purpose
+        // (chat/chat_stream_service.py::_approval_display), and inventing a
+        // sentence for it would describe an act nobody verified.
+        function approvalActionSentence(action) {
+            const key = {
+                read_file: 'appr_read_file',
+                write_file: 'appr_write_file',
+                edit_file: 'appr_edit_file',
+                delete_file: 'appr_delete_file',
+                list_files: 'appr_list_files',
+                search_files: 'appr_search_files',
+                run_command: 'appr_run_command',
+                fetch_url: 'appr_fetch_url',
+            }[action];
+            return key ? t(key) : '';
+        }
+
         function renderApprovals() {
             const host = document.getElementById('approvalList');
             if (!approvals.length) {
@@ -4260,11 +4606,30 @@
             }
             const rows = approvals.map((approval) => {
                 const details = approval.details || {};
-                const command = (details.input && (details.input.command || details.input.file_path)) || details.tool_name || '';
+                const display = (details.display && typeof details.display === 'object') ? details.display : null;
+                const sentence = approvalActionSentence(display && display.action);
+                const target = (display && typeof display.target === 'string' && display.target.trim())
+                    ? display.target.trim() : '';
+                // With a sentence the page leads with what is being asked and
+                // demotes the operation id to the meta line — the id names the
+                // policy, not the act. Without one (an older server, or a tool
+                // this page has no sentence for) it keeps the raw operation and
+                // the guessed preview rather than inventing a friendlier
+                // wording for data it cannot interpret.
+                const legacy = (details.input && (details.input.command || details.input.file_path))
+                    || details.tool_name || '';
+                // With a sentence, an absent target stays absent — the server
+                // sends null rather than a guess, and filling it in here would
+                // undo that. Without one, the old preview is still the best
+                // description available.
+                const command = sentence ? target : (target || legacy);
+                const what = sentence
+                    ? `<div>${escapeHtml(sentence)}</div><div class="hint" style="margin:2px 0 0;">${escapeHtml(approval.operation)}</div>`
+                    : escapeHtml(approval.operation);
                 return `
                     <tr>
-                        <td>${escapeHtml(approval.operation)}</td>
-                        <td style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(command)}</td>
+                        <td>${what}</td>
+                        <td class="${command ? 'target-line' : ''}" style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(command)}</td>
                         <td><span class="badge off">${escapeHtml(approval.risk_level || '')}</span></td>
                         <td style="text-align:right; white-space:nowrap;">
                             <button class="btn btn-secondary btn-xs" onclick="decideApproval('${approval.id}', 'approve_once')">Approve once</button>
