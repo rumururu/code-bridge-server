@@ -15,8 +15,10 @@ This is also the only periodic timer the server owns, so other work that has
 to happen "every so often" rides this tick rather than starting a rival loop —
 see :meth:`TaskScheduler._sweep_cli_agents_if_due`, which asks
 :mod:`agent.cli_agent_sweep` whether its (much coarser) interval has elapsed,
-and :meth:`TaskScheduler._sweep_expired_approvals`, which ends approvals whose
-``expires_at`` has passed so the runs parked on them stop waiting forever.
+:meth:`TaskScheduler._sweep_expired_approvals`, which ends approvals whose
+``expires_at`` has passed so the runs parked on them stop waiting forever, and
+:meth:`TaskScheduler._sweep_stalled_parks`, which ends the parks that have no
+approval behind them at all — the ones no schedule would ever have looked at.
 """
 
 from __future__ import annotations
@@ -62,6 +64,12 @@ _ACTIVE_RUN_STATUSES = _PROGRESSING_RUN_STATUSES | _WAITING_RUN_STATUSES
 # within the hour still gets to answer; short enough that a schedule recovers
 # on its own overnight.
 _STALL_GRACE_SECONDS = 3600
+
+# Most parked runs the park sweep will read per status in one tick. Not a
+# throttle on abandonment — anything beyond it is picked up on a later tick —
+# but a ceiling on what one tick can cost if a store ever holds an absurd
+# number of simultaneously parked runs.
+_PARK_SWEEP_LIMIT = 200
 
 
 def _stall_grace_seconds() -> int:
@@ -156,18 +164,66 @@ async def _abandon_stalled_run(run: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
-async def _blocking_run_for_task(task_id: str) -> tuple[dict[str, Any] | None, str]:
+def _parked_runs() -> list[dict[str, Any]]:
+    """Every run currently stopped waiting for a person, across all tasks.
+
+    Deliberately queried by *status* rather than by walking tasks or schedules.
+    ``agent_runs`` is indexed on ``status`` (``idx_agent_runs_status``,
+    core/database.py:150), and the statuses asked for here are the parked ones,
+    so the work is proportional to how many runs are parked *right now* — a
+    handful — and not to how many runs the store has ever held. A year of
+    finished runs costs nothing, because ``completed``/``failed`` rows are never
+    read.
+
+    Capped per status, so a store that somehow accumulated thousands of parked
+    runs cannot turn one tick into an unbounded read. The cap sorts newest
+    first, so in that (unreached) case the oldest parks wait for a later tick
+    once the newer ones have been settled and left the set.
+    """
+    try:
+        store = get_agent_store()
+    except Exception:
+        return []
+    runs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for status in sorted(_WAITING_RUN_STATUSES):
+        try:
+            rows = store.list_runs(status=status, limit=_PARK_SWEEP_LIMIT)
+        except TypeError:
+            # Older store signature without a status filter. Rather than read
+            # every run to emulate it, leave the parked runs to the per-task
+            # check; a wrong-shaped store must not make this loop expensive.
+            logger.warning("scheduler: run store cannot filter by status")
+            return []
+        except Exception:
+            logger.exception("scheduler: failed to list %s runs", status)
+            continue
+        for row in rows:
+            run_id = row.get("id")
+            if not isinstance(run_id, str) or not run_id or run_id in seen:
+                continue
+            if not row.get("task_id"):
+                # Abandonment is task-shaped (it fails the parked step and
+                # closes the task out). A run with no task has no park this
+                # module knows how to end, and retrying it every 30s would log
+                # a warning a minute forever.
+                continue
+            seen.add(run_id)
+            runs.append(row)
+    return runs
+
+
+def _blocking_run_for_task(task_id: str) -> tuple[dict[str, Any] | None, str]:
     """The run that should stop this firing, and why.
 
-    Returns ``(None, "")`` when the schedule is free to fire. A run waiting on
-    a human that nothing else will settle is abandoned here rather than
-    reported as blocking, which is what lets a schedule recover by itself.
-
-    Abandonment through the deny path is asynchronous — it hands the parked
-    provider turn a denial and lets the step's failure policy run — so a run
-    settled that way keeps blocking for *this* firing and the schedule fires on
-    the next tick, once the run has actually landed somewhere. Firing straight
-    away would stack a second run on top of one still being wound down.
+    Returns ``(None, "")`` when the schedule is free to fire. Purely a report:
+    this used to abandon a stalled run itself, but
+    :meth:`TaskScheduler._sweep_stalled_parks` now does that for *every* parked
+    run earlier in the same tick, schedule or no schedule. Anything still
+    waiting when this runs is either inside the grace period or is being
+    settled right now, and both of those block rather than get abandoned —
+    so a second copy of the give-up policy here would have nothing left to do
+    but disagree with the first.
     """
     runs = _runs_for_task(task_id)
     waiting: list[dict[str, Any]] = []
@@ -180,31 +236,18 @@ async def _blocking_run_for_task(task_id: str) -> tuple[dict[str, Any] | None, s
 
     from agent.approval_resume import is_settling_run
 
-    grace = _stall_grace_seconds()
-    stalled: list[dict[str, Any]] = []
     for run in waiting:
-        run_id = run.get("id")
-        if is_settling_run(run_id):
-            # The expiry sweep (same tick) or a decision from the app is already
-            # ending this run. Neither abandon it again nor fire over the top.
+        if is_settling_run(run.get("id")):
+            # Being wound down right now — by a decision from the app, by the
+            # approval expiry sweep, or by the park sweep earlier in this tick.
+            # Settling through the deny path is asynchronous (it answers the
+            # parked provider turn and then applies the step's failure policy),
+            # so the run has not landed anywhere yet and firing over the top of
+            # it would stack two runs on one task. Reported ahead of a plain
+            # park because it is the more specific answer to "why not now".
             return run, "previous run is being settled"
-        elapsed = _waiting_seconds(run)
-        if elapsed is not None and elapsed < grace:
-            return run, "previous run is waiting for a person"
-        stalled.append(run)
-
-    settling: dict[str, Any] | None = None
-    for run in stalled:
-        logger.warning(
-            "scheduler: abandoning run %s — waiting on a human for longer than %ss",
-            run.get("id"),
-            grace,
-        )
-        record = await _abandon_stalled_run(run)
-        if isinstance(record, dict) and record.get("path") == "deny":
-            settling = run
-    if settling is not None:
-        return settling, "previous run is being settled"
+    if waiting:
+        return waiting[0], "previous run is waiting for a person"
     return None, ""
 
 
@@ -219,7 +262,7 @@ async def _fire_schedule(schedule: dict[str, Any]) -> None:
     store = get_schedule_store()
 
     if schedule.get("skip_if_active"):
-        blocking, reason = await _blocking_run_for_task(task_id)
+        blocking, reason = _blocking_run_for_task(task_id)
         if blocking is not None:
             logger.info(
                 "scheduler: skipping schedule %s — task %s: %s",
@@ -361,23 +404,78 @@ class TaskScheduler:
         # the schedule fires on the next tick instead of over the top of a run
         # still being wound down.
         await self._sweep_expired_approvals()
+        await self._sweep_stalled_parks()
         for schedule in due:
             await _fire_schedule(schedule)
         await self._sweep_cli_agents_if_due()
         return len(due)
+
+    async def _sweep_stalled_parks(self) -> None:
+        """End every park nobody answered, schedule or no schedule.
+
+        Giving up on a stalled run used to happen in exactly one place:
+        ``_blocking_run_for_task``, which only ever runs when a schedule of
+        that task is due. A run with no schedule — a ``run once`` agent, a task
+        whose schedule was disabled, anything started by hand — was therefore
+        never looked at, and an unanswered ``ask_user`` park on one of those sat
+        in ``waiting_for_user`` for good, piling up in the user's run list.
+
+        The approval expiry sweep above does not cover it either, whatever its
+        docstring used to say: it iterates expired approval *rows*, and an
+        ``ask_user`` or ``manual_handoff`` park has no approval row to expire.
+        Measured on 2026-08-16 with a 60s grace: five such runs were still
+        ``waiting_for_user`` three minutes later.
+
+        Runs after the approval sweep and before any schedule fires. That order
+        matters twice: an approval past its deadline gets to end as its own
+        expiry (which claims the run, so this sweep skips it), and anything this
+        sweep settles is already settled by the time ``_blocking_run_for_task``
+        reports on it — so one tick can never abandon a run here and abandon or
+        fire over it again there.
+
+        Best-effort, like the sweeps around it: a failure here must not cost
+        the tick its due schedules.
+        """
+        try:
+            from agent.approval_resume import is_settling_run
+
+            grace = _stall_grace_seconds()
+            for run in await asyncio.to_thread(_parked_runs):
+                if is_settling_run(run.get("id")):
+                    # Already being ended — by the approval sweep a moment ago,
+                    # or by a decision the user is making right now.
+                    continue
+                elapsed = _waiting_seconds(run)
+                if elapsed is not None and elapsed < grace:
+                    continue
+                logger.warning(
+                    "scheduler: abandoning run %s — waiting on a human for "
+                    "longer than %ss",
+                    run.get("id"),
+                    grace,
+                )
+                await _abandon_stalled_run(run)
+        except Exception:
+            logger.exception("scheduler: stalled park sweep failed")
 
     async def _sweep_expired_approvals(self) -> None:
         """Settle approvals whose deadline passed, on this same tick.
 
         An approval nobody answers parks its run in ``waiting_for_user``
         indefinitely, and — because that counts as active above — takes the
-        task's schedule down with it. ``_blocking_run_for_task`` also abandons
-        such a run once the stall grace runs out, but only when the schedule
-        next fires: a run started by hand, or one whose schedule is disabled,
-        has nobody to notice it. This sweep is the one that notices. Both now
-        end the run the same way — through
-        :func:`agent.approval_resume.abandon_waiting_run` / the deny path — so
-        which one gets there first changes only the timing, not the outcome.
+        task's schedule down with it. This sweep ends the approval on its own
+        deadline, which is what lets a run be settled *as an expired approval*
+        (row recorded expired, audited, denied) rather than merely abandoned.
+
+        Its scope is exactly the approval rows: a park with no approval behind
+        it is invisible here, which is why :meth:`_sweep_stalled_parks` exists.
+        This docstring used to claim it covered "a run started by hand, or one
+        whose schedule is disabled" in general — it never did, and an
+        ``ask_user`` park on such a run sat forever. Between the two sweeps the
+        coverage is now whole, and both end a run the same way, through
+        :func:`agent.approval_resume.abandon_waiting_run` / the deny path, so
+        which one gets there first changes the recorded reason but not the
+        outcome.
 
         Every tick rather than on its own cadence: it is one indexed query
         against a table that is nearly always empty of expired rows, and the

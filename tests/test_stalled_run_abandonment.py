@@ -59,6 +59,7 @@ from agent import (  # noqa: E402
     agent_store,
     approval_resume,
     browser_session_store,
+    schedule_store,
     scheduler,
 )
 from agent.approval_resume import abandon_waiting_run  # noqa: E402
@@ -234,7 +235,8 @@ class UnansweredApprovalIsDeniedTest(_AbandonmentTestBase):
         ), patch("agent.task_orchestrator.stream_claude_turn", fake_stream), patch.object(
             scheduler, "_stall_grace_seconds", return_value=0
         ):
-            blocking, reason = await scheduler._blocking_run_for_task(task["id"])
+            await scheduler.TaskScheduler()._sweep_stalled_parks()
+            blocking, reason = scheduler._blocking_run_for_task(task["id"])
             await _drain_resumes()
 
         # The deny is delivered to the parked session — not "the run is failed".
@@ -242,8 +244,9 @@ class UnansweredApprovalIsDeniedTest(_AbandonmentTestBase):
         self.assertIn("deny_from_permission_message", seen_kwargs[0])
         self.assertNotIn("retry_from_permission", seen_kwargs[0])
 
-        # Settling is asynchronous, so this firing is still blocked; the
-        # schedule fires on the next tick rather than over the top of it.
+        # Settling is asynchronous, so the firing later in this same tick is
+        # still blocked; the schedule fires on the next tick rather than over
+        # the top of a run still being wound down.
         self.assertIsNotNone(blocking)
         self.assertEqual(reason, "previous run is being settled")
 
@@ -301,11 +304,13 @@ class UnansweredApprovalIsDeniedTest(_AbandonmentTestBase):
         ), patch("agent.task_orchestrator.stream_claude_turn", fake_stream), patch.object(
             scheduler, "_stall_grace_seconds", return_value=0
         ):
-            await scheduler._blocking_run_for_task(task["id"])
+            tick = scheduler.TaskScheduler()
+            await tick._sweep_stalled_parks()
             await _drain_resumes()
             # Next tick: the run is parked on `ask_user` now, with no approval
             # in it, so the non-approval path ends it.
-            blocking, reason = await scheduler._blocking_run_for_task(task["id"])
+            await tick._sweep_stalled_parks()
+            blocking, reason = scheduler._blocking_run_for_task(task["id"])
 
         self.assertIsNone(blocking, f"schedule still blocked: {reason}")
         run = self.store.get_run(run_id)
@@ -458,16 +463,19 @@ class NothingIsSettledTwiceTest(_AbandonmentTestBase):
         # was written exactly once.
         self.assertEqual(self._event_types(run_id).count("task.run.abandoned"), 1)
 
-    async def test_a_run_the_sweep_is_settling_is_not_abandoned_by_the_scheduler(self):
+    async def test_a_claimed_run_survives_a_whole_tick_untouched(self):
+        # The approval expiry sweep, or a decision the user is making right
+        # now, holds the claim. Neither half of the rest of the tick may touch
+        # the run: not the park sweep, not the schedule check.
         _agent, task, result = self._prepare()
         run_id = result["run"]["id"]
         await self._park_on_ask_user(result)
 
-        # Stand in for the sweep, earlier in the same tick, holding the claim.
         self.assertTrue(approval_resume._claim_settlement(run_id))
         try:
             with patch.object(scheduler, "_stall_grace_seconds", return_value=0):
-                blocking, reason = await scheduler._blocking_run_for_task(task["id"])
+                await scheduler.TaskScheduler()._sweep_stalled_parks()
+                blocking, reason = scheduler._blocking_run_for_task(task["id"])
         finally:
             approval_resume._release_settlement(run_id)
 
@@ -475,6 +483,23 @@ class NothingIsSettledTwiceTest(_AbandonmentTestBase):
         self.assertEqual(reason, "previous run is being settled")
         self.assertEqual(self.store.get_run(run_id)["status"], "waiting_for_user")
         self.assertEqual(self._event_types(run_id).count("task.run.abandoned"), 0)
+
+    async def test_one_tick_abandons_a_run_exactly_once(self):
+        # The sweep ends it; the schedule check that follows in the same tick
+        # must find nothing left to do rather than write a second ending.
+        _agent, task, result = self._prepare()
+        run_id = result["run"]["id"]
+        await self._park_on_ask_user(result)
+
+        with patch.object(scheduler, "_stall_grace_seconds", return_value=0):
+            await scheduler.TaskScheduler()._sweep_stalled_parks()
+            blocking, reason = scheduler._blocking_run_for_task(task["id"])
+
+        self.assertIsNone(blocking, f"schedule still blocked: {reason}")
+        self.assertEqual(self._event_types(run_id).count("task.run.abandoned"), 1)
+        self.assertEqual(
+            self._event_types(run_id).count("task.execution.failed"), 1
+        )
 
     async def test_a_decision_cannot_drive_a_run_that_is_already_settling(self):
         _agent, _task, result = self._prepare()
@@ -499,35 +524,112 @@ class ProgressingRunStillBlocksTest(_AbandonmentTestBase):
         self.store.update_run_status(run_id, "running")
 
         with patch.object(scheduler, "_stall_grace_seconds", return_value=0):
-            blocking, reason = await scheduler._blocking_run_for_task(task["id"])
+            await scheduler.TaskScheduler()._sweep_stalled_parks()
+            blocking, reason = scheduler._blocking_run_for_task(task["id"])
 
         self.assertEqual(blocking["id"], run_id)
         self.assertEqual(reason, "previous run still active")
         self.assertEqual(self.store.get_run(run_id)["status"], "running")
 
 
+class AParkWithNoScheduleIsStillNoticedTest(_AbandonmentTestBase):
+    """The gap this class exists for, in one sentence.
+
+    Giving up on a stalled run used to happen only inside
+    `_blocking_run_for_task`, whose one caller is `_fire_schedule`
+    (`agent/scheduler.py`). So a run on a task with **no schedule** — a
+    `run once` agent, a disabled schedule, anything started by hand — was never
+    looked at by it, and the approval expiry sweep does not cover it either
+    because an `ask_user` park has no approval row to expire.
+
+    Measured live on 2026-08-16 with a 60s grace: five `ask_user`-parked runs on
+    scheduleless tasks were still `waiting_for_user` three minutes later, and
+    had to be ended by hand.
+    """
+
+    async def test_an_ask_user_park_on_a_scheduleless_task_is_abandoned(self):
+        _agent, task, result = self._prepare()
+        run_id = result["run"]["id"]
+        await self._park_on_ask_user(result)
+        self.assertEqual(self.store.get_run(run_id)["status"], "waiting_for_user")
+        # The premise, asserted rather than assumed: no schedule exists for
+        # this task, so `_fire_schedule` — the only caller of
+        # `_blocking_run_for_task` — will never look at this run.
+        self.assertEqual(
+            schedule_store.get_schedule_store().list_for_task(task["id"]), []
+        )
+
+        with patch.object(scheduler, "_stall_grace_seconds", return_value=0):
+            await scheduler.TaskScheduler()._sweep_stalled_parks()
+
+        run = self.store.get_run(run_id)
+        self.assertEqual(run["status"], "failed")
+        self.assertIsNotNone(run["ended_at"])
+        step = self.store.list_task_steps(task["id"])[0]
+        self.assertEqual(step["status"], "failed")
+        self.assertEqual(step["output"]["reason"], ABANDONED_WAIT_REASON)
+        self.assertEqual(self._event_types(run_id).count("task.run.abandoned"), 1)
+
+    async def test_a_park_still_inside_the_grace_is_left_alone(self):
+        _agent, task, result = self._prepare()
+        run_id = result["run"]["id"]
+        await self._park_on_ask_user(result)
+
+        with patch.object(scheduler, "_stall_grace_seconds", return_value=3600):
+            await scheduler.TaskScheduler()._sweep_stalled_parks()
+
+        self.assertEqual(self.store.get_run(run_id)["status"], "waiting_for_user")
+        step = self.store.list_task_steps(task["id"])[0]
+        self.assertEqual(step["output"]["checkpoint"]["reason"], "ask_user")
+        self.assertEqual(self._event_types(run_id).count("task.run.abandoned"), 0)
+
+    async def test_a_whole_tick_ends_it_with_no_schedule_due_at_all(self):
+        # End to end through `trigger_once`, with nothing due to fire: the
+        # gap was that a tick with no due schedule did nothing about parks.
+        _agent, task, result = self._prepare()
+        run_id = result["run"]["id"]
+        await self._park_on_ask_user(result)
+
+        with patch.object(scheduler, "_stall_grace_seconds", return_value=0), patch(
+            "agent.scheduler.TaskScheduler._sweep_cli_agents_if_due",
+            lambda _self: asyncio.sleep(0),
+        ):
+            fired = await scheduler.TaskScheduler().trigger_once()
+
+        self.assertEqual(fired, 0, "no schedule exists to fire")
+        self.assertEqual(self.store.get_run(run_id)["status"], "failed")
+        self.assertEqual(self._event_types(run_id).count("task.run.abandoned"), 1)
+
+
 class TickOrderTest(_AbandonmentTestBase):
-    async def test_the_sweep_claims_a_run_before_the_schedule_check_sees_it(self):
+    async def test_the_sweeps_run_before_any_schedule_fires(self):
         """Ordering, stated as an ordering.
 
-        Both halves of a tick can decide to end the same run, and by default
-        their two deadlines are now the same number — so the sweep has to go
-        first and take the claim, or the schedule check would abandon a run the
-        sweep is in the middle of denying.
+        Three things on one tick can decide to end the same run — the approval
+        expiry sweep, the park sweep, the schedule check — and by default the
+        first two share one deadline. Approvals go first so a run past its
+        approval deadline ends *as an expired approval* and takes the claim;
+        the park sweep goes next so anything it settles is already settled by
+        the time the schedule check reports on it.
         """
         order: list[str] = []
 
-        async def fake_sweep():
-            order.append("sweep")
+        async def fake_approvals():
+            order.append("approvals")
             return []
+
+        async def fake_parks(_self):
+            order.append("parks")
 
         async def fake_fire(_schedule):
             order.append("fire")
 
         due = [{"id": "sch_1", "task_id": "task_1"}]
-        with patch("agent.approval_resume.sweep_expired_approvals", fake_sweep), patch(
-            "agent.scheduler._fire_schedule", fake_fire
+        with patch(
+            "agent.approval_resume.sweep_expired_approvals", fake_approvals
         ), patch(
+            "agent.scheduler.TaskScheduler._sweep_stalled_parks", fake_parks
+        ), patch("agent.scheduler._fire_schedule", fake_fire), patch(
             "agent.scheduler.TaskScheduler._sweep_cli_agents_if_due",
             lambda _self: asyncio.sleep(0),
         ), patch(
@@ -537,7 +639,7 @@ class TickOrderTest(_AbandonmentTestBase):
             with patch("agent.scheduler.get_schedule_store", store_mock):
                 await scheduler.TaskScheduler().trigger_once()
 
-        self.assertEqual(order, ["sweep", "fire"])
+        self.assertEqual(order, ["approvals", "parks", "fire"])
 
 
 if __name__ == "__main__":
