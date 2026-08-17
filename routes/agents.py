@@ -208,6 +208,94 @@ def _with_script_names(flow: Any) -> Any:
     return annotated
 
 
+def _flow_graph_view(flow_json: Any) -> dict[str, Any]:
+    """The kernel graph view of a stored workflow — or the reason there is none.
+
+    Returns exactly one key: ``flow_graph`` with the derived graph, or
+    ``flow_graph_unavailable`` with a machine-readable ``reason`` and a
+    sentence a person can act on. Never both, and never neither: a client
+    that finds no graph can always say *why* it found none. Dropping the
+    field silently (or sending ``flow_graph: null``) is the failure this
+    project keeps having to undo — an absent field reads as "this agent has
+    no graph", which is a claim about the agent when the truth is a claim
+    about this server.
+
+    ``agent.flow_graph`` is imported **inside this function on purpose**. It
+    imports ``agent_flow_core`` at module top, and the deployed server venv
+    (``~/.code-bridge/venv``) does not have that kernel installed yet. A
+    module-level import here would therefore not degrade the graph field —
+    it would stop the whole server from starting, taking every route with
+    it. The ``except`` is narrowed to ``ImportError`` so a genuine bug
+    inside the converter still surfaces as a bug.
+
+    The derivation runs on the *stored* ``flow_json``, not the
+    ``_with_script_names`` annotated copy: the graph is a view of the canon,
+    and ``script_name``/``script_path`` are display sugar this route adds,
+    not fields the workflow contract knows about.
+    """
+
+    try:
+        from agent.flow_graph import UnsupportedTopologyError, to_graph
+    except ImportError as exc:  # kernel absent — the deployed-venv case
+        return {
+            "flow_graph_unavailable": {
+                "reason": "kernel_not_installed",
+                "message": (
+                    "This server's Python environment has no agent-flow-core"
+                    " kernel, so the graph view cannot be derived. The"
+                    " workflow itself is unaffected — flow_json is the canon"
+                    " and runs exactly as stored."
+                ),
+                "detail": str(exc),
+            }
+        }
+
+    try:
+        normalized = normalize_workflow(flow_json)
+    except WorkflowNormalizationError as exc:
+        # A stored workflow older than a normalization rule, or written
+        # straight into the store. It cannot run either, so saying so here is
+        # the useful answer, not a 500.
+        return {
+            "flow_graph_unavailable": {
+                "reason": "not_normalizable",
+                "message": (
+                    "The stored workflow does not normalize, so no graph can"
+                    f" be derived from it: {exc}"
+                ),
+                "detail": str(exc),
+            }
+        }
+
+    try:
+        flow = to_graph(normalized)
+    except UnsupportedTopologyError as exc:
+        return {
+            "flow_graph_unavailable": {
+                "reason": "not_linear",
+                "message": str(exc),
+                "issues": exc.detail["issues"],
+            }
+        }
+    except Exception as exc:
+        # Broad on purpose, and only here: a derived convenience view must
+        # not be able to take down the read of an agent. It is *reported*,
+        # not swallowed — the reason and the exception text both ride out.
+        logger.exception("flow_graph derivation failed")
+        return {
+            "flow_graph_unavailable": {
+                "reason": "conversion_failed",
+                "message": (
+                    "Deriving the graph view raised an unexpected error;"
+                    " the stored workflow is unchanged."
+                ),
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        }
+
+    return {"flow_graph": flow.model_dump(by_alias=True)}
+
+
 _ACTIVE_RUN_STATUSES = ("queued", "starting", "running")
 
 # A run in one of these has stopped and is waiting on the user. Counting it as
@@ -290,18 +378,33 @@ def _as_utc_iso(stamp: str) -> str | None:
     return parsed.astimezone(UTC).isoformat()
 
 
-def _agent_with_next_fire(agent: dict[str, Any]) -> dict[str, Any]:
+def _agent_with_next_fire(
+    agent: dict[str, Any],
+    *,
+    include_flow_graph: bool = False,
+) -> dict[str, Any]:
     """The stored agent plus everything a client needs that is not a column.
 
     ``origin`` is the one that changes what the client is allowed to *offer*.
     Without it an agent registered from a Claude Code agent file looks exactly
     like one authored here, so every client hands the user a prompt box for
     text that will never execute — see :mod:`agent.agent_origin`.
+
+    ``include_flow_graph`` is off by default and turned on by exactly one
+    caller: ``GET /agents/{agent_id}``. The graph is a per-step derivation
+    (a kernel ``FlowStep`` model built for every step, plus the edge
+    derivation), so on the list route — which serves up to 200 agents in one
+    response — the cost multiplies by the agent count for a field a list view
+    has no use for: a list draws names, schedules and run status, and opening
+    an agent is what asks about its shape. Write responses (create/patch/
+    builder-commit) share this serializer and stay off it too: they echo what
+    was just saved, and the caller that wants the derived view reads the agent
+    back. Turning it on for a caller is one keyword away if that changes.
     """
     agent_id = str(agent["id"])
     next_fire = compute_next_fire_at(agent_id)
     activation = _store().get_agent_activation_summary(agent_id)
-    return {
+    payload = {
         **agent,
         "flow_json": _with_script_names(agent.get("flow_json")),
         "next_fire_at": next_fire.isoformat() if next_fire else None,
@@ -309,6 +412,9 @@ def _agent_with_next_fire(agent: dict[str, Any]) -> dict[str, Any]:
         "activation": activation,
         "origin": resolve_agent_origin(agent_id).to_view(),
     }
+    if include_flow_graph:
+        payload.update(_flow_graph_view(agent.get("flow_json")))
+    return payload
 
 
 def _resolve_agent_task(agent_id: str, task_id: str | None) -> dict[str, Any] | None:
@@ -1790,7 +1896,16 @@ async def create_agent(body: AgentCreateBody) -> dict[str, Any] | JSONResponse:
 
 @router.get("/agents/{agent_id}", dependencies=[Depends(verify_api_key)], response_model=None)
 async def get_agent(agent_id: str) -> dict[str, Any]:
-    return _agent_with_next_fire(_require_agent(agent_id))
+    """One agent, including the derived graph view of its workflow.
+
+    This is the only agent read that carries ``flow_graph`` — see
+    ``_agent_with_next_fire`` for why the list route does not. When the graph
+    cannot be derived (kernel absent on this server, or a stored workflow that
+    does not fold), ``flow_graph_unavailable`` takes its place and says which;
+    the response stays 200 either way, because everything else about the agent
+    is still true.
+    """
+    return _agent_with_next_fire(_require_agent(agent_id), include_flow_graph=True)
 
 
 @router.post("/agents/{agent_id}/dry-run", dependencies=[Depends(verify_api_key)], response_model=None)
