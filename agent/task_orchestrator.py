@@ -4412,6 +4412,34 @@ def _workflow_step_output_summary(output: dict[str, Any]) -> list[str]:
                         parts.append(f"target={_workflow_text(target)}")
                 if parts:
                     lines.append(f"observation: {'; '.join(parts)}")
+        # What the step actually read. Without this the summary described the
+        # visit and omitted its result: a flow that browsed a board and asked
+        # an LLM to summarise the posts handed it URLs and titles and no page
+        # text, and the model went and read the run's SQLite row itself to
+        # find what should have been in front of it. Named extractions are
+        # listed first and in full — they are short by construction, and a
+        # later step referring to `{{cafe_id}}` needs the value, not a prefix.
+        extracted = browser_action.get("extracted")
+        if isinstance(extracted, list):
+            named = [
+                item
+                for item in extracted
+                if isinstance(item, dict) and item.get("name") and item.get("value") is not None
+            ]
+            for item in named:
+                lines.append(f"extracted.{item['name']}: {_workflow_text(item['value'])}")
+            for item in extracted[-3:]:
+                if not isinstance(item, dict) or item.get("name"):
+                    continue
+                text = item.get("text")
+                if not text:
+                    continue
+                selector = item.get("selector") or "body"
+                note = " (truncated)" if item.get("truncated") else ""
+                lines.append(
+                    f"extracted[{selector}]{note}: "
+                    + _truncate_workflow_evidence(str(text), 4000)
+                )
         screenshots = browser_action.get("screenshots")
         if isinstance(screenshots, list) and screenshots:
             lines.append(
