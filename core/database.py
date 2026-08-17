@@ -23,7 +23,11 @@ AUDIT_REDACTED_CATEGORIES_SCHEMA_VERSION = 2026060500
 EVENT_PAIRING_COLUMNS_SCHEMA_VERSION = 2026060601
 BROWSER_SESSIONS_SCHEMA_VERSION = 2026061000
 AGENT_SCRIPTS_SCHEMA_VERSION = 2026072600
-AGENT_NOTIFICATIONS_SCHEMA_VERSION = 2026080200
+# 2026081700 adds `reason`, so the once-a-day throttle can be per agent *and*
+# per kind of trouble. Bumped rather than edited in place: the version is what
+# decides whether this migration runs at all, so a database that already
+# recorded 2026080200 would never gain the column.
+AGENT_NOTIFICATIONS_SCHEMA_VERSION = 2026081700
 CLI_AGENT_IMPORTS_SCHEMA_VERSION = 2026080900
 CLI_AGENT_SWEEPS_SCHEMA_VERSION = 2026080901
 CLI_AGENT_RENAME_SCHEMA_VERSION = 2026080902
@@ -790,6 +794,16 @@ def _migrate_agent_notifications(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_agent_notifications_unread
         ON agent_notifications(read_at, created_at DESC);
     """)
+    # What kind of trouble this notification was about, so the once-a-day
+    # throttle can be per agent *and* per kind. Keyed on the agent alone, an
+    # agent that told you about an expired login in the morning stayed silent
+    # about a captcha in the afternoon — a different problem, needing a
+    # different action, suppressed as if it were a repeat.
+    _add_column_if_missing(conn, "agent_notifications", "reason", "TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_notifications_agent_reason "
+        "ON agent_notifications(agent_id, reason, created_at DESC)"
+    )
 
 
 def _migrate_cli_agent_imports(conn: sqlite3.Connection) -> None:

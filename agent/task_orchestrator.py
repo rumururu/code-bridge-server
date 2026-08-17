@@ -3724,7 +3724,7 @@ def _wait_notification_body(body: str, *, reason: str) -> str:
 
 
 def _wait_notification_gate(
-    *, store: Any, agent_id: str | None, run_id: str
+    *, store: Any, agent_id: str | None, run_id: str, reason: str
 ) -> tuple[bool, str]:
     """Should this parked run push, or is it a quiet repeat of a known streak.
 
@@ -3742,11 +3742,13 @@ def _wait_notification_gate(
     four-a-day flood the failure throttle above exists to stop, just
     triggered by a stuck human handoff instead of a stuck script.
 
-    Keyed on the agent alone, the same as the failure gate and for the same
-    reason: the specific wait reason (login vs. captcha vs. approval) is not
-    the thing the user asked to be throttled, and treating every reason
-    change as a fresh event would mean an agent that oscillates between two
-    wait reasons never goes quiet at all.
+    Keyed on the agent **and** the wait reason. It used to be the agent
+    alone, which suppressed a different problem as though it were a repeat:
+    an agent that reported an expired login in the morning stayed silent
+    about a captcha in the afternoon, and the captcha needs a different
+    action from the person. Bounded either way — each reason still notifies
+    at most once a day, and the set of reasons is small and closed, so the
+    worst case is a handful of notifications rather than one per firing.
 
     A run that *completes* — the previous run for this agent actually
     finished successfully — ends the streak the same way a success ends the
@@ -3778,7 +3780,7 @@ def _wait_notification_gate(
         from agent.notification_store import get_notification_store
 
         recent = get_notification_store().list_notifications(
-            agent_id=str(agent_id), level="warning", limit=1
+            agent_id=str(agent_id), level="warning", reason=reason, limit=1
         )
     except Exception:
         logger.exception(
@@ -3789,7 +3791,7 @@ def _wait_notification_gate(
         return True, "notification-history read failed; notifying (fail open)"
 
     if not recent:
-        return True, "no prior wait notification on record for this agent; notifying"
+        return True, f"no prior {reason} notification on record for this agent; notifying"
 
     last_at = _parse_notification_instant(recent[0].get("created_at"))
     if last_at is None:
@@ -3800,14 +3802,20 @@ def _wait_notification_gate(
         return True, "24h throttle window elapsed since the last wait notification"
 
     return False, (
-        f"same agent still stuck waiting on a human; last notified "
+        f"same agent still stuck on {reason}; last notified "
         f"{recent[0].get('created_at')}, next eligible at "
         f"{(last_at + _NOTIFICATION_THROTTLE_WINDOW).isoformat()}"
     )
 
 
 def _record_suppressed_notification(
-    *, store: Any, run_id: str, kind: str, agent_id: str | None, why: str
+    *,
+    store: Any,
+    run_id: str,
+    kind: str,
+    agent_id: str | None,
+    why: str,
+    wait_reason: str | None = None,
 ) -> None:
     """Make a suppressed notification discoverable without touching run state.
 
@@ -3821,16 +3829,24 @@ def _record_suppressed_notification(
     is a much smaller problem than a broken run.
     """
     logger.info(
-        "notification throttled: kind=%s run_id=%s agent_id=%s reason=%s",
+        "notification throttled: kind=%s run_id=%s agent_id=%s wait_reason=%s why=%s",
         kind,
         run_id,
         agent_id,
+        wait_reason,
         why,
     )
     store.append_event(
         run_id=run_id,
         event_type="notification.suppressed",
-        app_event={"kind": kind, "agent_id": agent_id, "reason": why},
+        app_event={
+            "kind": kind,
+            "agent_id": agent_id,
+            # `why` explains the throttle; `wait_reason` is what the run is
+            # stuck on. Reading the timeline, those answer different questions.
+            "reason": why,
+            "wait_reason": wait_reason,
+        },
     )
 
 
@@ -3866,7 +3882,7 @@ def _notify_waiting_for_user_best_effort(
         agent_id = task.get("assigned_agent_id") if isinstance(task, dict) else None
 
         should_notify, why = _wait_notification_gate(
-            store=store, agent_id=agent_id, run_id=run_id
+            store=store, agent_id=agent_id, run_id=run_id, reason=reason
         )
         if not should_notify:
             _record_suppressed_notification(
@@ -3875,6 +3891,7 @@ def _notify_waiting_for_user_best_effort(
                 kind="waiting_for_user",
                 agent_id=agent_id,
                 why=why,
+                wait_reason=reason,
             )
             return
 
@@ -3903,6 +3920,10 @@ def _notify_waiting_for_user_best_effort(
             run_id=run_id,
             task_id=task.get("id") if isinstance(task, dict) else None,
             agent_id=agent_id,
+            # Stored so the next park of this kind can find *this* one. Without
+            # it the throttle can only ask "did this agent say anything today",
+            # which is what silenced a captcha behind a morning login notice.
+            reason=reason,
         )
         _push_notification_best_effort(
             notification=notification,
@@ -3996,6 +4017,7 @@ def _notify_run_failed_best_effort(
                 kind="failed",
                 agent_id=agent_id,
                 why=why,
+                wait_reason="run_failed",
             )
             return
 
@@ -4020,6 +4042,12 @@ def _notify_run_failed_best_effort(
             run_id=run_id,
             task_id=task.get("id") if isinstance(task, dict) else None,
             agent_id=agent_id,
+            # A run failure has no *type* — only a free-text error — and
+            # `_failure_notification_gate` explains why building a signature
+            # out of that throttles nothing. Stamped with one constant so the
+            # column means the same thing on every row rather than being null
+            # on half of them.
+            reason="run_failed",
         )
         _push_notification_best_effort(
             notification=notification,

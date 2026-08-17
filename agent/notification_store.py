@@ -50,6 +50,7 @@ class NotificationStore:
         run_id: str | None = None,
         task_id: str | None = None,
         agent_id: str | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         clean_title = str(title or "").strip()[:_MAX_TITLE]
         if not clean_title:
@@ -59,8 +60,8 @@ class NotificationStore:
             conn.execute(
                 """
                 INSERT INTO agent_notifications (
-                    id, run_id, task_id, agent_id, title, body, level
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, run_id, task_id, agent_id, title, body, level, reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     notification_id,
@@ -70,6 +71,7 @@ class NotificationStore:
                     clean_title,
                     (str(body).strip()[:_MAX_BODY] if body else None),
                     normalize_level(level),
+                    (str(reason).strip() or None) if reason else None,
                 ),
             )
             conn.commit()
@@ -88,6 +90,7 @@ class NotificationStore:
         unread_only: bool = False,
         agent_id: str | None = None,
         level: str | None = None,
+        reason: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -105,6 +108,11 @@ class NotificationStore:
             # agent.task_orchestrator.
             clauses.append("level = ?")
             values.append(normalize_level(level))
+        if reason:
+            # The throttle is per agent *and* per kind of trouble: an expired
+            # login this morning must not silence a captcha this afternoon.
+            clauses.append("reason = ?")
+            values.append(str(reason))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         values.append(max(1, min(int(limit), 200)))
         with get_db_connection(use_row_factory=True) as conn:
