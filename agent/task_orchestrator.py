@@ -41,6 +41,7 @@ from .configurator import is_builder_added_tool
 from .prompt_composer import compose_system_prompt
 from .cli_agent_runtime import find_cli_agent_source_path, resolve_cli_agent_definition
 from .cli_agent_sources import cli_agent_reference_prompt
+from .step_cursor import StepCursor
 from .workflow_v2 import WorkflowNormalizationError, normalize_workflow
 
 logger = logging.getLogger(__name__)
@@ -1346,12 +1347,12 @@ async def _drive_workflow_steps(
     permission_decision: str | None = None,
 ) -> None:
     store = get_agent_store()
-    step_index = 0
-    transitions = 0
-    max_transitions = max(10, len(steps) * 10)
-    while step_index < len(steps):
-        transitions += 1
-        if transitions > max_transitions:
+    # Every "which step runs next" decision below is the cursor's. The loop
+    # executes steps and records what happened; the cursor answers where
+    # execution goes (see agent/step_cursor.py — the T-B-07 delegation point).
+    cursor = StepCursor(steps)
+    while cursor.index < len(steps):
+        if not cursor.begin_transition():
             _finish_workflow_execution(
                 task_id=task_id,
                 run_id=run_id,
@@ -1360,14 +1361,13 @@ async def _drive_workflow_steps(
             )
             return
 
-        step = steps[step_index]
-        if step.get("status") == "completed":
-            step_index += 1
+        step = steps[cursor.index]
+        if cursor.should_skip(step):
+            cursor.index += 1
             continue
         step_input = step.get("input")
-        if not isinstance(step_input, dict) or not step_input.get("workflow_step_id"):
-            step_index += 1
-            continue
+        if not isinstance(step_input, dict):
+            step_input = {}
         # A user *message* completes a step that was waiting for a message. An
         # approval park is waiting for a decision on a specific tool call, and
         # marking it completed here would skip the tool call the run stopped
@@ -1386,13 +1386,17 @@ async def _drive_workflow_steps(
                     "message": "User response accepted; workflow step resumed.",
                 },
             )
-            steps[step_index] = store.get_task_step(step["id"]) or step
+            steps[cursor.index] = store.get_task_step(step["id"]) or step
             next_index = _apply_workflow_success_policy(
-                task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+                task_id=task_id,
+                run_id=run_id,
+                steps=steps,
+                completed_index=cursor.index,
+                cursor=cursor,
             )
             if next_index is None:
                 return
-            step_index = next_index
+            cursor.index = next_index
             continue
         workflow_type = str(step_input.get("workflow_type") or "llm")
         if workflow_type == "browser_action":
@@ -1411,7 +1415,8 @@ async def _drive_workflow_steps(
                     task_id=task_id,
                     run_id=run_id,
                     steps=steps,
-                    failed_index=step_index,
+                    failed_index=cursor.index,
+                    cursor=cursor,
                     error={
                         "message": f"Browser action step '{step.get('title')}' did not complete."
                     },
@@ -1419,15 +1424,19 @@ async def _drive_workflow_steps(
                 if next_index is None:
                     return
                 steps = _steps_for_run(store, task_id, run_id)
-                step_index = next_index
+                cursor.index = next_index
                 continue
-            steps[step_index] = store.get_task_step(step["id"]) or step
+            steps[cursor.index] = store.get_task_step(step["id"]) or step
             next_index = _apply_workflow_success_policy(
-                task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+                task_id=task_id,
+                run_id=run_id,
+                steps=steps,
+                completed_index=cursor.index,
+                cursor=cursor,
             )
             if next_index is None:
                 return
-            step_index = next_index
+            cursor.index = next_index
             continue
         if _is_app_action_workflow_type(workflow_type):
             completed = await _execute_app_action_workflow_step(
@@ -1445,7 +1454,8 @@ async def _drive_workflow_steps(
                     task_id=task_id,
                     run_id=run_id,
                     steps=steps,
-                    failed_index=step_index,
+                    failed_index=cursor.index,
+                    cursor=cursor,
                     error={
                         "message": f"App action step '{step.get('title')}' did not complete."
                     },
@@ -1453,15 +1463,19 @@ async def _drive_workflow_steps(
                 if next_index is None:
                     return
                 steps = _steps_for_run(store, task_id, run_id)
-                step_index = next_index
+                cursor.index = next_index
                 continue
-            steps[step_index] = store.get_task_step(step["id"]) or step
+            steps[cursor.index] = store.get_task_step(step["id"]) or step
             next_index = _apply_workflow_success_policy(
-                task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+                task_id=task_id,
+                run_id=run_id,
+                steps=steps,
+                completed_index=cursor.index,
+                cursor=cursor,
             )
             if next_index is None:
                 return
-            step_index = next_index
+            cursor.index = next_index
             continue
         if workflow_type == "shell":
             completed = await _execute_shell_workflow_step(
@@ -1476,7 +1490,8 @@ async def _drive_workflow_steps(
                     task_id=task_id,
                     run_id=run_id,
                     steps=steps,
-                    failed_index=step_index,
+                    failed_index=cursor.index,
+                    cursor=cursor,
                     error={
                         "message": f"Shell step '{step.get('title')}' did not complete."
                     },
@@ -1484,15 +1499,19 @@ async def _drive_workflow_steps(
                 if next_index is None:
                     return
                 steps = _steps_for_run(store, task_id, run_id)
-                step_index = next_index
+                cursor.index = next_index
                 continue
-            steps[step_index] = store.get_task_step(step["id"]) or step
+            steps[cursor.index] = store.get_task_step(step["id"]) or step
             next_index = _apply_workflow_success_policy(
-                task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+                task_id=task_id,
+                run_id=run_id,
+                steps=steps,
+                completed_index=cursor.index,
+                cursor=cursor,
             )
             if next_index is None:
                 return
-            step_index = next_index
+            cursor.index = next_index
             continue
         # The auto-advance loop dispatches separately from the single-step
         # path above. A type added to only one of them runs by hand and stalls
@@ -1506,7 +1525,8 @@ async def _drive_workflow_steps(
                     task_id=task_id,
                     run_id=run_id,
                     steps=steps,
-                    failed_index=step_index,
+                    failed_index=cursor.index,
+                    cursor=cursor,
                     error={
                         "message": f"Notify step '{step.get('title')}' did not send."
                     },
@@ -1514,15 +1534,19 @@ async def _drive_workflow_steps(
                 if next_index is None:
                     return
                 steps = _steps_for_run(store, task_id, run_id)
-                step_index = next_index
+                cursor.index = next_index
                 continue
-            steps[step_index] = store.get_task_step(step["id"]) or step
+            steps[cursor.index] = store.get_task_step(step["id"]) or step
             next_index = _apply_workflow_success_policy(
-                task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+                task_id=task_id,
+                run_id=run_id,
+                steps=steps,
+                completed_index=cursor.index,
+                cursor=cursor,
             )
             if next_index is None:
                 return
-            step_index = next_index
+            cursor.index = next_index
             continue
         if workflow_type == "mcp_tool":
             step_agent_id = _step_agent_id(store.get_task(task_id) or {})
@@ -1559,13 +1583,17 @@ async def _drive_workflow_steps(
                 run_id=run_id,
                 output={"result": "condition step completed without branching"},
             )
-            steps[step_index] = store.get_task_step(step["id"]) or step
+            steps[cursor.index] = store.get_task_step(step["id"]) or step
             next_index = _apply_workflow_success_policy(
-                task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+                task_id=task_id,
+                run_id=run_id,
+                steps=steps,
+                completed_index=cursor.index,
+                cursor=cursor,
             )
             if next_index is None:
                 return
-            step_index = next_index
+            cursor.index = next_index
             continue
 
         completed = await _execute_llm_workflow_step(
@@ -1597,21 +1625,26 @@ async def _drive_workflow_steps(
                 task_id=task_id,
                 run_id=run_id,
                 steps=steps,
-                failed_index=step_index,
+                failed_index=cursor.index,
                 error={"message": f"Workflow step '{step.get('title')}' did not complete."},
+                cursor=cursor,
             )
             if next_index is None:
                 return
             steps = _steps_for_run(store, task_id, run_id)
-            step_index = next_index
+            cursor.index = next_index
             continue
-        steps[step_index] = store.get_task_step(step["id"]) or step
+        steps[cursor.index] = store.get_task_step(step["id"]) or step
         next_index = _apply_workflow_success_policy(
-            task_id=task_id, run_id=run_id, steps=steps, completed_index=step_index
+            task_id=task_id,
+            run_id=run_id,
+            steps=steps,
+            completed_index=cursor.index,
+            cursor=cursor,
         )
         if next_index is None:
             return
-        step_index = next_index
+        cursor.index = next_index
 
     # A run that carried on past a failed step is not a clean run: reporting it
     # as completed would put a green dot on a night where a phone never ran.
@@ -3249,50 +3282,44 @@ def _apply_workflow_success_policy(
     run_id: str,
     steps: list[dict[str, Any]],
     completed_index: int,
+    cursor: StepCursor | None = None,
 ) -> int | None:
     """Where execution goes after a step succeeds.
 
     Returns the next index, or ``None`` when the workflow is finished here.
-    Default is the next step, which is what every workflow did before this
-    existed. ``end`` is what lets a diagnosis step be reachable only through
-    ``on_failure: goto_step`` instead of running on every clean night.
+    The *decision* — next step by default, ``goto_step``, or ``end`` — is the
+    cursor's (``StepCursor.advance_on_success``); this function records what
+    the route means for the run: the goto event, or finishing the workflow.
     """
-    store = get_agent_store()
-    step = steps[completed_index]
-    step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
-    policy = step_input.get("on_success")
-    if not isinstance(policy, dict):
-        return completed_index + 1
-    policy_type = str(policy.get("type") or "continue")
+    route = (cursor or StepCursor(steps)).advance_on_success(steps, completed_index)
 
-    if policy_type == "goto_step":
-        target = policy.get("target_step_id") or policy.get("step_id") or policy.get("target")
-        target_index = _workflow_step_index(steps, target) if isinstance(target, str) else None
-        if target_index is None:
-            _finish_workflow_execution(
-                task_id=task_id,
-                run_id=run_id,
-                status="failed",
-                error={"message": f"on_success goto_step target not found: {target}"},
-            )
-            return None
-        store.append_event(
+    if route.kind == "goto":
+        get_agent_store().append_event(
             run_id=run_id,
             event_type="task.step.goto",
             app_event={
                 "task_id": task_id,
-                "step_id": step["id"],
-                "target_step_id": target,
+                "step_id": steps[completed_index]["id"],
+                "target_step_id": route.target_step_id,
                 "reason": "on_success",
             },
         )
-        return target_index
+        return route.next_index
 
-    if policy_type == "end":
+    if route.kind == "end":
         _finish_workflow_from_steps(task_id=task_id, run_id=run_id)
         return None
 
-    return completed_index + 1
+    if route.kind == "abort":
+        _finish_workflow_execution(
+            task_id=task_id,
+            run_id=run_id,
+            status="failed",
+            error={"message": route.error_message},
+        )
+        return None
+
+    return route.next_index
 
 
 def _finish_workflow_from_steps(*, task_id: str, run_id: str) -> None:
@@ -3336,102 +3363,63 @@ def _apply_workflow_failure_policy(
     steps: list[dict[str, Any]],
     failed_index: int,
     error: dict[str, Any],
+    cursor: StepCursor | None = None,
 ) -> int | None:
+    """Where execution goes after a step fails.
+
+    The *decision* — retry, continue, goto, park, or abort — is the cursor's
+    (``StepCursor.route_on_failure``); this function records what the route
+    means for the run: re-queuing the step, the timeline events, parking on a
+    person, or finishing the run failed.
+    """
     store = get_agent_store()
     failed_step = steps[failed_index]
-    step_input = failed_step.get("input") if isinstance(failed_step.get("input"), dict) else {}
-    policy = step_input.get("on_failure")
-    if not isinstance(policy, dict):
-        policy = {"type": "abort"}
-    policy_type = str(policy.get("type") or "abort")
+    route = (cursor or StepCursor(steps)).route_on_failure(steps, failed_index)
 
-    if policy_type == "retry":
+    if route.kind == "retry":
+        step_input = (
+            failed_step.get("input") if isinstance(failed_step.get("input"), dict) else {}
+        )
         retry_state = step_input.get("retry_state")
         if not isinstance(retry_state, dict):
             retry_state = {}
-        attempts = int(retry_state.get("attempts") or 0)
-        max_attempts = int(policy.get("max_attempts") or policy.get("max_retries") or 1)
-        if attempts < max_attempts:
-            retry_state = {**retry_state, "attempts": attempts + 1}
-            next_input = {**step_input, "retry_state": retry_state}
-            output = dict(failed_step.get("output") or {})
-            output["last_retry_error"] = error
-            # A retry is a *fresh attempt*, so it starts with no denials against
-            # it. The record exists to survive a park inside one attempt (see
-            # `STEP_DENIED_TOOL_CALLS_KEY`); carrying it into the next attempt
-            # would fail an attempt in which nothing was refused, which is a lie
-            # in the other direction. The error it came from is preserved above
-            # in `last_retry_error`.
-            output.pop(STEP_DENIED_TOOL_CALLS_KEY, None)
-            failed_step["output"] = output
-            store.update_task_step(
-                failed_step["id"],
-                {
-                    "status": "queued",
-                    "input": next_input,
-                    "output": output,
-                },
-            )
-            store.append_event(
-                run_id=run_id,
-                event_type="task.step.retry_scheduled",
-                app_event={
-                    "task_id": task_id,
-                    "step_id": failed_step["id"],
-                    "attempt": attempts + 1,
-                    "max_attempts": max_attempts,
-                },
-            )
-            return failed_index
-        then_policy = policy.get("then")
-        if isinstance(then_policy, dict):
-            return _apply_terminal_or_branch_policy(
-                task_id=task_id,
-                run_id=run_id,
-                steps=steps,
-                failed_index=failed_index,
-                failed_step=failed_step,
-                policy=then_policy,
-                error=error,
-            )
-        _finish_workflow_execution(
-            task_id=task_id,
-            run_id=run_id,
-            status="failed",
-            error=error,
+        retry_state = {**retry_state, "attempts": route.attempt}
+        next_input = {**step_input, "retry_state": retry_state}
+        output = dict(failed_step.get("output") or {})
+        output["last_retry_error"] = error
+        # A retry is a *fresh attempt*, so it starts with no denials against
+        # it. The record exists to survive a park inside one attempt (see
+        # `STEP_DENIED_TOOL_CALLS_KEY`); carrying it into the next attempt
+        # would fail an attempt in which nothing was refused, which is a lie
+        # in the other direction. The error it came from is preserved above
+        # in `last_retry_error`.
+        output.pop(STEP_DENIED_TOOL_CALLS_KEY, None)
+        failed_step["output"] = output
+        store.update_task_step(
+            failed_step["id"],
+            {
+                "status": "queued",
+                "input": next_input,
+                "output": output,
+            },
         )
-        return None
+        store.append_event(
+            run_id=run_id,
+            event_type="task.step.retry_scheduled",
+            app_event={
+                "task_id": task_id,
+                "step_id": failed_step["id"],
+                "attempt": route.attempt,
+                "max_attempts": route.max_attempts,
+            },
+        )
+        return route.next_index
 
-    return _apply_terminal_or_branch_policy(
-        task_id=task_id,
-        run_id=run_id,
-        steps=steps,
-        failed_index=failed_index,
-        failed_step=failed_step,
-        policy=policy,
-        error=error,
-    )
-
-
-def _apply_terminal_or_branch_policy(
-    *,
-    task_id: str,
-    run_id: str,
-    steps: list[dict[str, Any]],
-    failed_index: int,
-    failed_step: dict[str, Any],
-    policy: dict[str, Any],
-    error: dict[str, Any],
-) -> int | None:
-    policy_type = str(policy.get("type") or "abort")
-    if policy_type == "goto":
-        policy_type = "goto_step"
-
-    if policy_type == "continue":
+    if route.kind == "continue":
         # The step stays failed — this is not a pass. The run carries on so
         # that work which does not depend on it still happens, and the failure
         # is visible on the step and in the timeline.
-        get_agent_store().append_event(
+        store.append_event(
             run_id=run_id,
             event_type="task.step.continued_after_failure",
             app_event={
@@ -3441,45 +3429,27 @@ def _apply_terminal_or_branch_policy(
                 "error": error,
             },
         )
-        return failed_index + 1
+        return route.next_index
 
-    if policy_type == "goto_step":
-        target = policy.get("target_step_id") or policy.get("step_id") or policy.get("target")
-        if not isinstance(target, str) or not target:
-            _finish_workflow_execution(
-                task_id=task_id,
-                run_id=run_id,
-                status="failed",
-                error={"message": "goto_step failure policy is missing target_step_id."},
-            )
-            return None
-        target_index = _workflow_step_index(steps, target)
-        if target_index is None:
-            _finish_workflow_execution(
-                task_id=task_id,
-                run_id=run_id,
-                status="failed",
-                error={"message": f"goto_step target not found: {target}"},
-            )
-            return None
-        get_agent_store().append_event(
+    if route.kind == "goto":
+        store.append_event(
             run_id=run_id,
             event_type="task.step.goto",
             app_event={
                 "task_id": task_id,
                 "step_id": failed_step["id"],
-                "target_step_id": target,
+                "target_step_id": route.target_step_id,
             },
         )
-        return target_index
+        return route.next_index
 
-    if policy_type in {"ask_user", "manual_handoff"}:
+    if route.kind == "park":
         _wait_for_user_step(
             task_id=task_id,
             run_id=run_id,
             step=failed_step,
-            reason=policy_type,
-            prompt=policy.get("prompt") if isinstance(policy.get("prompt"), str) else None,
+            reason=route.park_reason or "ask_user",
+            prompt=route.park_prompt,
         )
         return None
 
@@ -3487,18 +3457,8 @@ def _apply_terminal_or_branch_policy(
         task_id=task_id,
         run_id=run_id,
         status="failed",
-        error=error,
+        error={"message": route.error_message} if route.error_message else error,
     )
-    return None
-
-
-def _workflow_step_index(steps: list[dict[str, Any]], workflow_step_id: str) -> int | None:
-    for index, step in enumerate(steps):
-        step_input = step.get("input")
-        if not isinstance(step_input, dict):
-            continue
-        if step_input.get("workflow_step_id") == workflow_step_id:
-            return index
     return None
 
 
