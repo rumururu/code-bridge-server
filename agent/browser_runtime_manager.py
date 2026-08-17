@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from agent.browser_session_store import get_browser_session_store
-from system.browser_preferences import resolve_browser_launch_plan
+from system.browser_preferences import (
+    persistent_profile_launch_overrides,
+    resolve_browser_launch_plan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -496,6 +499,7 @@ class BrowserRuntimeManager:
             browser: Any = None
             if plan.persistent and plan.user_data_dir:
                 Path(plan.user_data_dir).expanduser().mkdir(parents=True, exist_ok=True)
+                launch_options.update(persistent_profile_launch_overrides(plan))
                 context = await playwright.chromium.launch_persistent_context(
                     plan.user_data_dir,
                     **launch_options,

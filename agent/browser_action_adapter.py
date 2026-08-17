@@ -7,6 +7,7 @@ Playwright-backed adapter when the runtime has a browser available.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from copy import deepcopy
@@ -18,6 +19,7 @@ from agent.tool_artifacts import ARTIFACT_ROOT
 from system.browser_preferences import (
     BrowserLaunchPlan,
     get_browser_preferences,
+    persistent_profile_launch_overrides,
     resolve_browser_launch_plan,
 )
 from system.browser_runtime_setup import (
@@ -27,6 +29,8 @@ from system.browser_runtime_setup import (
     detect_installed_chrome,
 )
 from .browser_runtime_manager import get_browser_runtime_manager, offscreen_window_args
+
+logger = logging.getLogger(__name__)
 
 # Derived from the interpreter that is actually running this server, not from a
 # guessed repo-relative path. The old literal ("server/.venv/bin/python …")
@@ -141,6 +145,17 @@ class PlaywrightBrowserActionAdapter:
         observations: list[dict[str, Any]] = []
         screenshots: list[str] = []
         extracted: list[dict[str, Any]] = []
+        # What the page told this run. A workflow is written before it runs, so
+        # runtime-only values (a cafe's numeric id, a row's link) can only get
+        # into a later action through here. Seeded from earlier steps of the
+        # same run: a flow naturally finds an id in one step and uses it in the
+        # next, and dropping the value at the step boundary parked every such
+        # flow on `{{...}}` it had already answered.
+        bindings: dict[str, str] = {
+            str(k): str(v)
+            for k, v in (context.get("bindings") or {}).items()
+            if isinstance(k, str) and v is not None
+        }
         run_id = str(context.get("run_id") or "run")
         step_id = str(context.get("step_id") or "step")
         # Tried in order, each candidate checked for itself. This used to be
@@ -224,6 +239,18 @@ class PlaywrightBrowserActionAdapter:
                 pages = list(getattr(browser_context, "pages", None) or [])
                 page = pages[0] if pages else await browser_context.new_page()
 
+            # Playwright dismisses dialogs by default, so a site rejecting the
+            # step — "내용을 입력해주세요" on an empty editor — used to vanish
+            # and the run reported `completed` while nothing was submitted.
+            # Recording them is what turns that into a visible refusal.
+            dialogs: list[str] = []
+            _attach_dialog_recorder(page, dialogs)
+
+            #: Where the step last pointed the browser. `None` until it points
+            #: somewhere, which is why a run resumed onto an already-open page
+            #: is judged on what the page is rather than on where it came from.
+            requested_url: str | None = None
+
             async def with_storage_state(
                 result: BrowserActionAdapterResult,
             ) -> BrowserActionAdapterResult:
@@ -241,6 +268,7 @@ class PlaywrightBrowserActionAdapter:
             try:
                 for index, action in enumerate(actions, start=1):
                     action_type = str(action.get("type") or "").strip().lower()
+                    action = bind_action(action, bindings)
                     if _requires_user_target(action, action_type):
                         return await with_storage_state(BrowserActionAdapterResult(
                             status="waiting_for_user",
@@ -270,7 +298,16 @@ class PlaywrightBrowserActionAdapter:
                     elif action_type in {"type", "fill"}:
                         selector = _selector(action)
                         text = str(action.get("text") or action.get("value") or action.get("source") or "")
-                        await page.fill(selector, text)
+                        if action_type == "type":
+                            # Real keypresses. A rich-text editor keeps its own
+                            # document model and only listens to input events,
+                            # so setting the DOM value leaves it empty: the
+                            # title (a textarea) filled, the body did not, and
+                            # the post was rejected for having no content.
+                            await page.click(selector)
+                            await page.keyboard.type(text)
+                        else:
+                            await page.fill(selector, text)
                     elif action_type == "press":
                         await page.press(_selector(action), str(action.get("key") or "Enter"))
                     elif action_type == "wait":
@@ -278,7 +315,10 @@ class PlaywrightBrowserActionAdapter:
                     elif action_type == "assert":
                         await _assert_page(page, action)
                     elif action_type == "extract":
-                        extracted.append(await _extract(page, action, index=index))
+                        found = await _extract(page, action, index=index)
+                        extracted.append(found)
+                        if found.get("name"):
+                            bindings[str(found["name"])] = str(found.get("value") or "")
                     elif action_type == "screenshot":
                         path = _screenshot_path(run_id=run_id, step_id=step_id, index=index)
                         await page.screenshot(path=str(path), full_page=True)
@@ -302,12 +342,34 @@ class PlaywrightBrowserActionAdapter:
                             extracted=extracted,
                         ))
 
+                    if dialogs:
+                        return await with_storage_state(BrowserActionAdapterResult(
+                            status="waiting_for_user",
+                            wait_reason="browser_dialog_appeared",
+                            prompt=(
+                                "사이트가 경고창으로 요청을 거절했습니다: "
+                                + " / ".join(dialogs)
+                            ),
+                            observations=observations,
+                            screenshots=screenshots,
+                            extracted=extracted,
+                            error={"dialogs": list(dialogs)},
+                        ))
+
                     observations.append(
                         await _observe(
                             page, action=action, index=index, http_status=http_status
                         )
                     )
-                    blocked = await _blocked_state(page)
+                    if action_type == "navigate":
+                        # Carried forward, not read per action: the check runs
+                        # after *every* action, and a `wait` right after a
+                        # deliberate trip to a login page would otherwise look
+                        # like a page nobody asked for and park the run.
+                        requested_url = str(
+                            action.get("url") or action.get("target") or ""
+                        ).strip()
+                    blocked = await _blocked_state(page, requested_url=requested_url)
                     if blocked is not None:
                         return await with_storage_state(BrowserActionAdapterResult(
                             status="waiting_for_user",
@@ -375,6 +437,7 @@ async def _launch_from_plan(
 
     if plan.persistent and plan.user_data_dir:
         Path(plan.user_data_dir).expanduser().mkdir(parents=True, exist_ok=True)
+        launch_options.update(persistent_profile_launch_overrides(plan))
         context = await playwright.chromium.launch_persistent_context(
             plan.user_data_dir,
             **launch_options,
@@ -557,6 +620,129 @@ async def _probe_browser_runtime_readiness() -> dict[str, Any]:
     return finish(chromium_present=chromium_exists, chromium_path=executable_path)
 
 
+#: Default and ceiling for how much of a page one `extract` puts on the record.
+#: The ceiling exists because this text is stored with the run. Defined above
+#: the vocabulary because that block quotes both numbers.
+_EXTRACT_DEFAULT_CHARS = 10_000
+_EXTRACT_MAX_CHARS = 200_000
+
+#: What a `browser_action` step can actually do, in the words the author of a
+#: workflow needs. It lives here, next to the code that dispatches these types,
+#: because the Configurator writes these actions from a description and cannot
+#: write what it was never told exists: the schema it saw said only
+#: "navigate, click, type, ...", so every browser step it produced was a
+#: `navigate` to a placeholder URL plus a screenshot — a step that parks.
+#:
+#: `test_browser_action_vocabulary.py` fails if this list and the dispatch below
+#: disagree, which is the only thing keeping documentation and behaviour from
+#: drifting apart.
+BROWSER_ACTION_VOCABULARY: tuple[tuple[str, str], ...] = (
+    ("navigate", 'go to a URL — {"type":"navigate","url":"https://..."}'),
+    ("click", 'click an element — {"type":"click","selector":"..."} (also "check"/"uncheck"). '
+              'Prefer an exact selector: :has-text("등록") also matches "임시등록"'),
+    ("type", 'real keystrokes — {"type":"type","selector":"...","text":"..."}. '
+             "Required for rich-text editors, which ignore a set value"),
+    ("fill", 'set a field value directly — {"type":"fill","selector":"input,textarea","text":"..."}. '
+             "Faster, but only works on plain inputs"),
+    ("press", 'send a key — {"type":"press","selector":"...","key":"Enter"}'),
+    ("wait", 'pause — {"type":"wait","timeout_ms":3000}'),
+    (
+        "assert",
+        'check the page — {"type":"assert","kind":"text_visible","value":"..."} | '
+        '{"kind":"url_contains","value":"..."} | {"kind":"url_not_contains","value":"..."}. '
+        "url_not_contains is how a step proves it was not bounced to a login page",
+    ),
+    (
+        "extract",
+        'read a value and name it for later actions — '
+        '{"type":"extract","name":"cafe_id","source":"html","pattern":"clubid=(\\\\d+)"}. '
+        'Also {"selector":"...","attribute":"href"} for a link. '
+        'Any later action may then use {{cafe_id}} inside url/selector/text — '
+        "including in a later *step* of the same run. "
+        "This is how a workflow reaches a page whose id only exists at runtime, "
+        "instead of hardcoding one account's id. "
+        f'Reading a whole page keeps {_EXTRACT_DEFAULT_CHARS} chars unless you '
+        f'raise "max_chars" (up to {_EXTRACT_MAX_CHARS})',
+    ),
+    ("screenshot", 'capture evidence — {"type":"screenshot"}'),
+)
+
+#: Named separately because the answer to "can I use it?" is no, and a model
+#: that is not told so will keep emitting them and keep parking the run.
+BROWSER_ACTIONS_NOT_EXECUTED: tuple[str, ...] = ("select", "evaluate")
+
+
+def browser_action_vocabulary_block() -> str:
+    """The vocabulary as prompt text, for whoever authors these actions."""
+    lines = ["browser_action `actions` — the full set:"]
+    lines += [f"  {name:<11} {note}" for name, note in BROWSER_ACTION_VOCABULARY]
+    lines.append(
+        "  " + "/".join(BROWSER_ACTIONS_NOT_EXECUTED)
+        + "   NOT executed — a step using these stops and asks the user"
+    )
+    lines.append(
+        "  A URL, selector or value left as a placeholder (configured_… ) or as an "
+        "unfilled {{name}} stops the step and asks, so name a real target or an "
+        "{{name}} some earlier extract fills."
+    )
+    return "\n".join(lines)
+
+
+def _attach_dialog_recorder(page: Any, sink: list[str]) -> None:
+    """Record `alert`/`confirm` text so a refusal cannot pass as success.
+
+    Playwright auto-dismisses dialogs, which is what keeps an unattended run
+    from hanging — but it also means the site's own words about why it refused
+    are thrown away. Measured: submitting a cafe post with an empty body raised
+    an alert, Playwright dismissed it, and the step reported `completed` with
+    nothing posted.
+
+    A fake page without `.on` is common in tests, so a missing hook is not an
+    error here.
+    """
+    on = getattr(page, "on", None)
+    if not callable(on):
+        return
+    try:
+        on("dialog", lambda dialog: sink.append(str(getattr(dialog, "message", "") or "")))
+    except Exception:  # noqa: BLE001 - diagnostics must never fail the step
+        logger.debug("dialog recorder could not be attached", exc_info=True)
+
+
+#: Fields an action carries values in. Substitution touches these and nothing
+#: else, so a `{{...}}` appearing anywhere else stays untouched and still parks
+#: the run rather than being silently swallowed.
+_BINDABLE_FIELDS: tuple[str, ...] = ("url", "selector", "target", "text", "value", "key")
+
+_BINDING_REF = re.compile(r"\{\{([a-zA-Z0-9_.-]+)\}\}")
+
+
+def bind_action(action: dict[str, Any], bindings: dict[str, str]) -> dict[str, Any]:
+    """Fill `{{name}}` references from values earlier actions extracted.
+
+    A workflow is authored before it is ever run, so it cannot contain the ids
+    a site only reveals at runtime — a Naver cafe's numeric id lives in the
+    page, not in the URL a person types. Without this the only way to reach
+    such a page is to hardcode the id, which makes the workflow work for one
+    cafe and no other.
+
+    Names that were never bound are left as they are, so
+    `_requires_user_target` still parks the run and asks. Guessing an empty
+    string there would navigate somewhere arbitrary and call it success.
+    """
+    if not bindings:
+        return action
+    bound = dict(action)
+    for field in _BINDABLE_FIELDS:
+        value = bound.get(field)
+        if not isinstance(value, str) or "{{" not in value:
+            continue
+        bound[field] = _BINDING_REF.sub(
+            lambda m: bindings.get(m.group(1), m.group(0)), value
+        )
+    return bound
+
+
 def _requires_user_target(action: dict[str, Any], action_type: str) -> bool:
     if action_type == "screenshot":
         return False
@@ -580,7 +766,11 @@ def _is_placeholder(value: str) -> bool:
     lowered = text.lower()
     return bool(
         re.fullmatch(r"configured_[a-z0-9_]+", lowered)
-        or re.fullmatch(r"\{\{[a-zA-Z0-9_.-]+\}\}", text)
+        # Anywhere in the string, not only as the whole of it. A reference
+        # embedded in a longer URL — `.../cafes/{{cafe_id}}/menus/0` — used to
+        # slip through, and the run navigated to the literal braces
+        # percent-encoded and reported success.
+        or _BINDING_REF.search(text) is not None
         or lowered.endswith("_required")
     )
 
@@ -657,6 +847,21 @@ async def _assert_page(page: Any, action: dict[str, Any]) -> None:
             raise ValueError("assert text_visible requires value")
         await page.get_by_text(value).first.wait_for(timeout=int(action.get("timeout_ms") or 5000))
         return
+    if kind in {"url_contains", "url_not_contains"}:
+        # Where a site *sent* you is often the only answer it gives. A page that
+        # quietly redirects to a login form still returns 200 and still has a
+        # title, so a step verifying "we are still signed in" has nothing else
+        # to assert on.
+        value = str(action.get("value") or action.get("text") or "").strip()
+        if not value:
+            raise ValueError(f"assert {kind} requires value")
+        current = str(getattr(page, "url", "") or "")
+        present = value in current
+        if present is (kind == "url_contains"):
+            return
+        raise AssertionError(
+            f"assert {kind} failed: value={value!r} url={current!r}"
+        )
     selector = _selector(action)
     if selector:
         await page.wait_for_selector(selector, timeout=int(action.get("timeout_ms") or 5000))
@@ -664,13 +869,76 @@ async def _assert_page(page: Any, action: dict[str, Any]) -> None:
     raise ValueError(f"unsupported assert kind: {kind}")
 
 
+def _extract_char_limit(action: dict[str, Any]) -> int:
+    raw = action.get("max_chars")
+    if raw is None:
+        return _EXTRACT_DEFAULT_CHARS
+    try:
+        requested = int(raw)
+    except (TypeError, ValueError):
+        return _EXTRACT_DEFAULT_CHARS
+    return max(1, min(requested, _EXTRACT_MAX_CHARS))
+
+
 async def _extract(page: Any, action: dict[str, Any], *, index: int) -> dict[str, Any]:
     selector = _selector(action)
-    if selector:
-        value = await page.locator(selector).first.inner_text(timeout=int(action.get("timeout_ms") or 5000))
+    attribute = str(action.get("attribute") or "").strip()
+    timeout = int(action.get("timeout_ms") or 5000)
+    source = str(action.get("source") or "").strip().lower()
+    if attribute:
+        # Reading an attribute is how a run follows a link it could not have
+        # known at authoring time — the href of "the cafe I am a member of".
+        target = page.locator(selector).first if selector else page.locator("body")
+        value = await target.get_attribute(attribute, timeout=timeout) or ""
+    elif source == "html":
+        # Visible text is not where a site keeps its identifiers. A cafe's id
+        # sits in link hrefs and script tags, so a run that can only read what
+        # a person can see cannot find it at all.
+        value = await page.content()
+    elif selector:
+        value = await page.locator(selector).first.inner_text(timeout=timeout)
     else:
-        value = await page.locator("body").inner_text(timeout=int(action.get("timeout_ms") or 5000))
-    return {"action_index": index, "selector": selector or "body", "text": value[:10000]}
+        value = await page.locator("body").inner_text(timeout=timeout)
+
+    # A cap so a page cannot put megabytes into the run record, but one the
+    # step can raise: the default silently cut a cafe's board listing in half,
+    # and a step whose job is "read the page and summarise it" got a truncated
+    # page with nothing saying so. Pattern matching below still runs against
+    # the whole document, so a named value is never lost to this.
+    limit = _extract_char_limit(action)
+    result: dict[str, Any] = {
+        "action_index": index,
+        "selector": selector or "body",
+        "text": value[:limit],
+    }
+    if len(value) > limit:
+        result["truncated"] = True
+        result["full_length"] = len(value)
+    if attribute:
+        result["attribute"] = attribute
+    if source:
+        result["source"] = source
+
+    captured = value
+    pattern = str(action.get("pattern") or "").strip()
+    if pattern:
+        # The page rarely holds the value alone: a cafe id arrives inside a URL
+        # or a script tag. Without a pattern the run can read the page but not
+        # name anything in it, which is the same as not reading it.
+        match = re.search(pattern, value)
+        if match is None:
+            result["pattern"] = pattern
+            result["matched"] = False
+            return result
+        captured = match.group(1) if match.groups() else match.group(0)
+        result["pattern"] = pattern
+        result["matched"] = True
+
+    name = str(action.get("name") or "").strip()
+    if name:
+        result["name"] = name
+        result["value"] = captured[:2000]
+    return result
 
 
 def _response_status(response: Any) -> int | None:
@@ -724,14 +992,80 @@ async def _observe(
     return observation
 
 
-async def _blocked_state(page: Any) -> str | None:
+def _same_destination(requested: str, landed: str) -> bool:
+    """Whether the browser ended up where the step pointed it.
+
+    Compared without the fragment and trailing slash, because a site adding
+    `#` or normalising `/` is not a redirect. A query string *is* significant:
+    `…/nidlogin.login?url=<where you were going>` is precisely the shape a
+    bounce takes.
+    """
+    def _norm(value: str) -> str:
+        text = str(value or "").split("#", 1)[0].casefold()
+        return text[:-1] if text.endswith("/") else text
+
+    return _norm(requested) == _norm(landed)
+
+
+#: Path words a sign-in page is reached through, in the languages these URLs
+#: are actually written in. Only consulted for a navigation that was *diverted*
+#: — on its own the word proves nothing, since a workflow may be visiting a
+#: login page on purpose.
+_LOGIN_URL_WORDS: tuple[str, ...] = (
+    "login", "signin", "sign_in", "sign-in", "auth", "sso", "account/login",
+)
+
+
+async def _looks_like_a_sign_in_page(page: Any) -> bool:
+    """Whether the page in front of us is asking somebody to sign in.
+
+    Judged by what every sign-in page has rather than by whose it is. The
+    check used to be the literal string `nid.naver.com/nidlogin`, which meant
+    exactly one site's expiry was noticed and every other site's looked like a
+    normal page: the step would read the login form, find its assertions
+    satisfied or not, and finish. A silently signed-out run reporting success
+    is the failure this exists to prevent, so it must not depend on which site
+    it happens to.
+
+    A visible password field is the strong signal. The URL wording is the weak
+    one, kept for the sites that ask for an identifier first and show no
+    password field yet — and the caller only offers it a redirected URL.
+    """
+    try:
+        password = page.locator("input[type='password']")
+        if await password.count() and await password.first.is_visible():
+            return True
+    except Exception:  # noqa: BLE001 - a probe must not fail the step
+        pass
+    return False
+
+
+def _url_reads_as_sign_in(url: str) -> bool:
+    lowered = str(url or "").casefold()
+    return any(word in lowered for word in _LOGIN_URL_WORDS)
+
+
+async def _blocked_state(page: Any, *, requested_url: str | None = None) -> str | None:
+    """Why this run cannot go on without a person, or None.
+
+    ``requested_url`` is the address the step asked for, when the last action
+    was a navigation. Landing somewhere else is what distinguishes a session
+    that expired from a workflow that meant to open a login page — parking on
+    the latter would break any flow whose job is to sign in.
+    """
     url = ""
     try:
-        url = str(page.url or "").casefold()
+        url = str(page.url or "")
     except Exception:
         url = ""
-    if "nid.naver.com/nidlogin" in url:
-        return "login_required"
+
+    diverted = bool(requested_url) and not _same_destination(requested_url, url)
+    asked_for_a_sign_in_page = _url_reads_as_sign_in(requested_url or "")
+    if not asked_for_a_sign_in_page and (requested_url is None or diverted):
+        if await _looks_like_a_sign_in_page(page):
+            return "login_required"
+        if diverted and _url_reads_as_sign_in(url):
+            return "login_required"
 
     try:
         text = await page.locator("body").inner_text(timeout=1000)

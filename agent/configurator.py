@@ -35,6 +35,7 @@ BUILDER_SESSION_IDLE_TTL = timedelta(minutes=30)
 # would need every one of those escaped and would break the moment someone
 # adds another example without remembering to double the braces.
 _WORKFLOW_STEP_SCHEMA_MARKER = "{{WORKFLOW_STEP_SCHEMA_BLOCK}}"
+_BROWSER_ACTION_VOCABULARY_MARKER = "{{BROWSER_ACTION_VOCABULARY_BLOCK}}"
 
 _DRAFT_BLOCK_RE = re.compile(
     r"```[ \t]*(draft|task_draft)[^\n]*\n(.*?)```",
@@ -74,6 +75,8 @@ ScriptRequest {
 }
 
 {{WORKFLOW_STEP_SCHEMA_BLOCK}}
+
+{{BROWSER_ACTION_VOCABULARY_BLOCK}}
 
 Rules:
 
@@ -464,9 +467,11 @@ def build_configurator_system_prompt(_unused: list[Any] | None = None) -> str:
     an empty one.
     """
 
+    from agent.browser_action_adapter import browser_action_vocabulary_block
+
     template = _SYSTEM_PROMPT_TEMPLATE.replace(
         _WORKFLOW_STEP_SCHEMA_MARKER, _workflow_step_schema_block()
-    )
+    ).replace(_BROWSER_ACTION_VOCABULARY_MARKER, browser_action_vocabulary_block())
     return template + _registered_projects_block() + _registered_scripts_block()
 
 

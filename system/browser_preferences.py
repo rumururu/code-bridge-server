@@ -144,6 +144,33 @@ def dedicated_profile_dir() -> Path:
     return runtime_dir("browser_profile", SERVER_DIR / "core" / "browser_profile")
 
 
+#: Playwright adds this to every Chromium launch so an automated run never
+#: waits on an OS keychain prompt. It also swaps the key Chrome encrypts
+#: cookies with, and Chrome *deletes* cookies it cannot decrypt — so a profile
+#: opened alternately by a person's Chrome (real keychain) and by Playwright
+#: (mock keychain) loses every cookie on each handover.
+MOCK_KEYCHAIN_ARG = "--use-mock-keychain"
+
+
+def persistent_profile_launch_overrides(plan: "BrowserLaunchPlan") -> dict[str, Any]:
+    """Launch options that let a persistent profile actually keep its logins.
+
+    Measured on this machine: with Playwright's default arguments, opening the
+    agent's profile wiped all 10 cookies a person's Chrome had just written;
+    dropping `--use-mock-keychain` preserved all 10, creation timestamps and
+    all. Without this the persistent profile is decorative — a person signs in,
+    the next run opens the same directory, and the login is already gone.
+
+    Scoped to an installed-Chrome channel: that binary already owns a keychain
+    entry the OS grants it without prompting. Playwright's bundled Chromium
+    does not, so leaving the mock keychain in place there is what keeps an
+    unattended run from blocking on a permission dialog.
+    """
+    if not (plan.persistent and plan.user_data_dir and plan.channel):
+        return {}
+    return {"ignore_default_args": [MOCK_KEYCHAIN_ARG]}
+
+
 def _coerce(value: Any, allowed: tuple[str, ...], default: str) -> str:
     text = str(value or "").strip().lower()
     return text if text in allowed else default

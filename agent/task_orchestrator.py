@@ -2732,6 +2732,50 @@ async def _execute_app_action_workflow_step(
     return False
 
 
+def _bindings_from_earlier_steps(
+    store: Any, *, run_id: str, task_id: str, step_id: str
+) -> dict[str, str]:
+    """Values earlier browser steps of this run named, for this step to use.
+
+    A workflow cannot contain the ids a site only reveals at runtime, so a flow
+    finds one in one step — "read the cafe id out of the page" — and uses it in
+    the next. Each step runs its own adapter call, so without this the value
+    died at the step boundary and the next step parked on the `{{name}}` the
+    run had already answered.
+
+    Same run only. Yesterday's id is not this run's evidence, and silently
+    reusing it would send the step somewhere nobody looked at.
+    """
+    bindings: dict[str, str] = {}
+    try:
+        steps = store.list_task_steps(task_id) or []
+    except Exception:  # noqa: BLE001 - a missing binding parks, it never crashes
+        logger.debug("could not read earlier steps for bindings", exc_info=True)
+        return bindings
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if step.get("run_id") != run_id or step.get("id") == step_id:
+            continue
+        output = step.get("output")
+        if not isinstance(output, dict):
+            continue
+        browser = output.get("browser_action")
+        if not isinstance(browser, dict):
+            continue
+        for found in browser.get("extracted") or []:
+            if not isinstance(found, dict):
+                continue
+            name = found.get("name")
+            value = found.get("value")
+            # Later steps win: a flow may re-read a value that changed, and the
+            # freshest reading is the one the run just made.
+            if isinstance(name, str) and name and value is not None:
+                bindings[name] = str(value)
+    return bindings
+
+
 async def _execute_browser_action_workflow_step(
     *,
     task_id: str,
@@ -2785,6 +2829,9 @@ async def _execute_browser_action_workflow_step(
             "workflow_step_id": step_input.get("workflow_step_id"),
             "project_name": project_name,
             "project_path": project_path,
+            "bindings": _bindings_from_earlier_steps(
+                store, run_id=run_id, task_id=task_id, step_id=step_id
+            ),
             **_browser_session_context(
                 browser_session=browser_session,
                 previous_session=previous_session,
@@ -3649,6 +3696,33 @@ def _failure_notification_gate(
     )
 
 
+#: Waits that block every later run of the agent until a person acts, and that
+#: a person clears in seconds. They are worth saying out loud, because the
+#: notification about them is the only one that will arrive for a day.
+_BLOCKING_WAIT_REASONS: frozenset[str] = frozenset(
+    {"login_required", "captcha_or_bot_challenge"}
+)
+
+
+def _wait_notification_body(body: str, *, reason: str) -> str:
+    """The park's own words, plus what the silence after them will mean.
+
+    The throttle keeps this to one notification per agent per day, which is
+    what the user asked for. What the notification never said is that it is
+    the only one coming: an expired login stops every scheduled run of that
+    agent, each one parks, each park is suppressed, and someone reading
+    "needs a login" has no way to know the agent stays dead until they act.
+    Saying so costs no extra push.
+    """
+    if reason not in _BLOCKING_WAIT_REASONS:
+        return body
+    note = (
+        "이 에이전트의 예약 실행은 처리하실 때까지 계속 멈춥니다. "
+        "같은 사유로는 24시간 동안 다시 알리지 않습니다."
+    )
+    return f"{body}\n{note}" if body else note
+
+
 def _wait_notification_gate(
     *, store: Any, agent_id: str | None, run_id: str
 ) -> tuple[bool, str]:
@@ -3818,7 +3892,9 @@ def _notify_waiting_for_user_best_effort(
         )
         reason_label = _wait_reason_label(reason)
         title = f"{agent_name or 'An agent'} needs you: {reason_label}"
-        body = prompt or f"{task_title} is waiting for you."
+        body = _wait_notification_body(
+            prompt or f"{task_title} is waiting for you.", reason=reason
+        )
 
         notification = get_notification_store().create(
             title=title,
