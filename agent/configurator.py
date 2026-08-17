@@ -447,6 +447,12 @@ def _workflow_step_schema_block() -> str:
         '                    // {type:"manual_handoff", resume:"same_step", prompt:"..."}\n'
         '                    // {type:"goto_step", target_step_id:"..."} or {type:"abort"}'
     )
+    lines.append(
+        '  on_success        // optional; default {type:"continue"} (run the next step):\n'
+        '                    // {type:"end"} stop the run here — steps placed after this one\n'
+        "                    // become reachable only via a goto_step policy\n"
+        '                    // {type:"goto_step", target_step_id:"..."} jump on success'
+    )
     lines.append("}")
     return "\n".join(lines)
 

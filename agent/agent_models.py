@@ -91,6 +91,11 @@ class WorkflowStep(BaseModel):
     actions: list[dict[str, Any]] = Field(default_factory=list)
     success_criteria: str = Field(default="", max_length=2000)
     on_failure: str | dict[str, Any] = Field(default="ask_user")
+    # Formal twin of ``on_failure``. The runtime always consulted it
+    # (``workflow_v2.normalize_success_policy``, COMMON_STEP_FIELDS) but this
+    # model only kept it alive through ``extra="allow"`` — an accident, not a
+    # contract. "continue" is the runtime's own default: run the next step.
+    on_success: str | dict[str, Any] = Field(default="continue")
 
 
 class ScriptRequestDraft(BaseModel):
