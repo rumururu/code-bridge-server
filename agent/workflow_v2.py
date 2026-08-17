@@ -75,7 +75,15 @@ WORKFLOW_STEP_SCHEMA: dict[str, frozenset[str]] = {
     "android_action": frozenset({"actions", "device_id", "android_device_id"}),
     "mobile_action": frozenset({"actions", "device_id", "android_device_id"}),
     "device_action": frozenset({"actions", "device_id", "android_device_id"}),
-    "mcp_tool": frozenset({"tool_hint"}),
+    # `tool_hint` names the server; the rest say what to do on it. Without
+    # them the step type was a label with nowhere to put the task — a flow
+    # containing one was rejected outright ("'instruction' is not a field of a
+    # mcp_tool step") and fell back to a generic plan, which is the deeper
+    # reason no `mcp_tool` step had ever run. Same fields as `llm` minus the
+    # memory pair: this executes as a turn scoped to one server.
+    "mcp_tool": frozenset(
+        {"tool_hint", "instruction", "observation", "success_criteria"}
+    ),
     "approval_gate": frozenset(),
     "manual_handoff": frozenset(),
     "condition": frozenset(),

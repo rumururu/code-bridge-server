@@ -852,7 +852,25 @@ async def _execute_single_workflow_task_step(
             "status": "completed" if completed else "failed",
         }
 
-    if workflow_type in {"manual_handoff", "mcp_tool", "approval_gate"}:
+    if workflow_type == "mcp_tool":
+        blocker = _mcp_step_blocker(step, store.get_agent(_step_agent_id(task or {})))
+        if blocker is not None:
+            _wait_for_user_step(
+                task_id=task_id,
+                run_id=run_id,
+                step=step,
+                reason=workflow_type,
+                prompt=blocker,
+            )
+            return {
+                "task": store.get_task(task_id),
+                "step": store.get_task_step(step_id),
+                "status": "waiting_for_user",
+            }
+        # Runs on the LLM path: that turn already has this agent's MCP servers
+        # injected, so "call this server's tool" is a turn like any other.
+
+    if workflow_type in {"manual_handoff", "approval_gate"}:
         _wait_for_user_step(
             task_id=task_id,
             run_id=run_id,
@@ -1506,9 +1524,25 @@ async def _drive_workflow_steps(
                 return
             step_index = next_index
             continue
+        if workflow_type == "mcp_tool":
+            step_agent_id = _step_agent_id(store.get_task(task_id) or {})
+            blocker = _mcp_step_blocker(
+                step, store.get_agent(step_agent_id) if step_agent_id else None
+            )
+            if blocker is not None:
+                _wait_for_user_step(
+                    task_id=task_id,
+                    run_id=run_id,
+                    step=step,
+                    reason=workflow_type,
+                    prompt=blocker,
+                )
+                return
+            # Falls through to the LLM path, which injects this agent's MCP
+            # servers before the turn.
+
         if workflow_type in {
             "manual_handoff",
-            "mcp_tool",
             "approval_gate",
         }:
             _wait_for_user_step(
@@ -1844,6 +1878,60 @@ def _declared_mcp_tools(agent: dict[str, Any] | None) -> dict[str, dict[str, Any
         if isinstance(mcp_id, str) and mcp_id.strip():
             entries.setdefault(mcp_id.strip(), tool)
     return entries
+
+
+def _mcp_step_server_id(step: dict[str, Any]) -> str:
+    """Which MCP server an ``mcp_tool`` step runs on, as the step names it."""
+    step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+    return str(step_input.get("tool_hint") or "").strip()
+
+
+def _mcp_step_blocker(step: dict[str, Any], agent: dict[str, Any] | None) -> str | None:
+    """Why this ``mcp_tool`` step cannot run yet, or None when it can.
+
+    Every `mcp_tool` step used to park unconditionally: the Configurator could
+    author one, the runtime could not run it, and a person had to finish the
+    step by hand every single firing — which for a scheduled agent means it
+    never ran unattended at all. The servers were already being injected into
+    the session (see `_apply_declared_mcp_servers`), so the capability was
+    present and only the dispatch was missing.
+
+    Parking is still right for the two cases where running would be a lie:
+    a step that does not say which server it needs, and a server that is not
+    configured on this machine. Both are things a person fixes, and neither
+    is something a model can be asked to work around.
+    """
+    server_id = _mcp_step_server_id(step)
+    if not server_id:
+        return (
+            "이 MCP 스텝에 사용할 서버가 지정되어 있지 않습니다. "
+            "Builder에서 tool_hint에 MCP 서버 이름을 지정한 뒤 재개하세요."
+        )
+
+    declared = {value.casefold() for value in _declared_mcp_ids(agent)}
+    if declared and server_id.casefold() not in declared:
+        # A step naming a server the agent never declared would run on
+        # whatever the CLI happens to have configured — the exact silent
+        # mismatch `_apply_declared_mcp_servers` exists to end.
+        return (
+            f"이 스텝이 사용하는 MCP 서버 '{server_id}'가 에이전트에 선언되어 있지 않습니다. "
+            "Builder에서 도구로 추가한 뒤 재개하세요."
+        )
+
+    try:
+        available = {name.casefold() for name in detected_mcp_server_configs()}
+    except Exception:  # noqa: BLE001 - an unreadable config parks, never crashes
+        logger.exception("could not read MCP server configs for step gating")
+        return (
+            "이 기기의 MCP 서버 설정을 읽을 수 없어 MCP 스텝을 실행하지 못했습니다. "
+            "설정을 확인한 뒤 재개하세요."
+        )
+    if server_id.casefold() not in available:
+        return (
+            f"MCP 서버 '{server_id}'가 이 기기에 설정되어 있지 않습니다. "
+            "설치·설정한 뒤 재개하세요."
+        )
+    return None
 
 
 def _declared_mcp_ids(agent: dict[str, Any] | None) -> list[str]:
@@ -4176,6 +4264,17 @@ def _workflow_step_message(
         lines.append(f"- memory write: {memory_write}")
     if tool_hint:
         lines.append(f"- tool_hint: {tool_hint}")
+    if str(step_input.get("workflow_type") or "") == "mcp_tool" and tool_hint:
+        # An `mcp_tool` step exists because the author wanted *that* server
+        # used. Left as a hint the turn could satisfy the instruction some
+        # other way — a shell command, its own knowledge — and report success
+        # having never touched the server the step is named after.
+        lines.append(
+            f"- This is an mcp_tool step: complete it using the '{tool_hint}' "
+            "MCP server's tools. If that server's tools are unavailable or "
+            "cannot do it, say so plainly and fail the step rather than "
+            "achieving it another way."
+        )
     if actions:
         lines.append(f"- actions: {actions}")
     evidence = _workflow_previous_evidence(previous_steps or [])

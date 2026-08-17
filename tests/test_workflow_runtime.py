@@ -147,6 +147,75 @@ class WorkflowRuntimeTest(unittest.TestCase):
             [event["event_type"] for event in events],
         )
 
+    def test_mcp_tool_step_runs_when_its_server_is_configured(self):
+        """`mcp_tool` used to park unconditionally, so an agent containing one
+        never ran unattended. It executes as a turn scoped to that server —
+        which is where its MCP servers are already injected."""
+        _agent, task, result = self._prepare(
+            [
+                {
+                    "id": "call_it",
+                    "type": "mcp_tool",
+                    "name": "Run the workflow",
+                    "tool_hint": "n8n",
+                    "instruction": "Trigger the daily digest.",
+                }
+            ]
+        )
+
+        async def fake_create_chat_session(**_kwargs):
+            return object()
+
+        async def fake_stream(_sink, _session, **_kwargs):
+            return True
+
+        with patch(
+            "agent.task_orchestrator.create_chat_session",
+            fake_create_chat_session,
+        ), patch(
+            "agent.task_orchestrator.stream_claude_turn",
+            fake_stream,
+        ), patch(
+            "agent.task_orchestrator.detected_mcp_server_configs",
+            return_value={"n8n": {"type": "stdio"}},
+        ):
+            asyncio.run(execute_task_orchestration(result["execution"]))
+
+        run = self.store.get_run(result["run"]["id"])
+        steps = self.store.list_task_steps(task["id"])
+        assert run is not None
+        self.assertEqual(steps[0]["status"], "completed")
+        self.assertEqual(run["status"], "completed")
+
+    def test_mcp_tool_step_asks_when_its_server_is_not_installed(self):
+        """Running would mean reporting success on a server that is not there.
+        The prompt has to name it, or the person cannot tell what to install."""
+        _agent, task, result = self._prepare(
+            [
+                {
+                    "id": "call_it",
+                    "type": "mcp_tool",
+                    "name": "Run the workflow",
+                    "tool_hint": "n8n",
+                    "instruction": "Trigger the daily digest.",
+                }
+            ]
+        )
+
+        with patch(
+            "agent.task_orchestrator.detected_mcp_server_configs",
+            return_value={},
+        ):
+            asyncio.run(execute_task_orchestration(result["execution"]))
+
+        run = self.store.get_run(result["run"]["id"])
+        steps = self.store.list_task_steps(task["id"])
+        checkpoint = self.store.get_task_checkpoint(task["id"])
+        assert run is not None and checkpoint is not None
+        self.assertEqual(run["status"], "waiting_for_user")
+        self.assertEqual(steps[0]["status"], "waiting_for_user")
+        self.assertIn("n8n", checkpoint["checkpoint"]["prompt"])
+
     def test_llm_step_message_includes_extended_workflow_fields(self):
         _agent, task, result = self._prepare(
             [
