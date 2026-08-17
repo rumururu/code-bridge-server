@@ -42,6 +42,15 @@
 #   dependency block below now ends with the same --ensure the installers run:
 #   it probes first and downloads nothing when Chromium is already there.
 #
+# Flow kernel:
+#   The agent-flow-core kernel lives in a separate local repository and is not
+#   on any package index, so requirements.txt cannot name it — a local path
+#   there would break every install on a machine without that checkout (the
+#   public mirror installs from the same file). When the checkout is present
+#   (default ~/VSCodeProject/agent-flow-core, override with
+#   CODE_BRIDGE_FLOW_CORE_DIR) it is pip-installed into the venv as a
+#   NON-editable snapshot; when absent the step logs one line and skips.
+#
 # Usage:
 #   ./install/sync-local-install.sh                 # dry run (default)
 #   ./install/sync-local-install.sh --apply         # actually copy
@@ -71,7 +80,7 @@ else
 fi
 
 usage() {
-    sed -n '3,53p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,62p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -262,11 +271,53 @@ sync_requirements() {
     echo "${GREEN}dependencies updated and marker refreshed${NC}"
 }
 
+# --- agent-flow-core kernel -------------------------------------------------
+# The flow kernel is a separate local git repository, not a package on any
+# index, so requirements.txt cannot name it: a local path there would break
+# every install on a machine without that checkout — the public mirror
+# installs from the same requirements.txt. Shipping the kernel with public
+# installs is a separate decision (G1 follow-up, tarball route); until then
+# this deploy script is the only path that puts it into the venv, and only
+# when the checkout exists on this machine. Anywhere else the step logs one
+# line and skips, which is harmless.
+#
+# The install is deliberately NOT editable (no -e / --editable): a deployment
+# must be a snapshot taken at deploy time. An editable install would point the
+# live server at the kernel repo's working tree, so every half-finished edit
+# there would reach the running server immediately — the exact partial-deploy
+# accident this script exists to prevent for server/ code. Re-running with
+# --apply after a kernel change is how a new version reaches the venv.
+sync_flow_core() {
+    local kernel_dir="${CODE_BRIDGE_FLOW_CORE_DIR:-$HOME/VSCodeProject/agent-flow-core}"
+    local pip="$INSTALL_DIR/venv/bin/pip"
+
+    if [ ! -d "$kernel_dir" ]; then
+        echo "flow kernel checkout not found at $kernel_dir — skipped (expected on machines without it)"
+        return 0
+    fi
+
+    if [ "$APPLY" -ne 1 ]; then
+        echo "  would run: $pip install --quiet $kernel_dir  (non-editable snapshot)"
+        return 0
+    fi
+    [ -x "$pip" ] || { echo "${RED}venv pip not found at $pip — install the flow kernel manually${NC}" >&2; return 1; }
+    "$pip" install --quiet "$kernel_dir"
+    echo "${GREEN}flow kernel installed into venv from $kernel_dir${NC}"
+}
+
 echo "${CYAN}--- dependencies${NC}"
 if [ "$SKIP_PIP" -eq 1 ]; then
     echo "skipped (--no-pip)"
 else
     sync_requirements
+fi
+echo ""
+
+echo "${CYAN}--- flow kernel${NC}"
+if [ "$SKIP_PIP" -eq 1 ]; then
+    echo "skipped (--no-pip)"
+else
+    sync_flow_core
 fi
 echo ""
 

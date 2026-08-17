@@ -819,6 +819,105 @@ def _normalize_agent_workflow(flow_json: Any) -> list[dict[str, Any]]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _flow_input_conflict_response() -> JSONResponse:
+    """The refusal for a body that carries both ``flow_json`` and ``flow_graph``.
+
+    Such a request is ambiguous about which representation is authoritative,
+    and picking one silently would mean the other — something the caller
+    explicitly wrote — is discarded without a word. The refusal names both
+    fields so the fix is obvious: send exactly one.
+    """
+    detail = (
+        "Request carries both flow_json and flow_graph. They are two"
+        " representations of the same workflow, so sending both makes it"
+        " ambiguous which one is meant — send exactly one of them."
+    )
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "flow_input_conflict",
+            "detail": detail,
+            "message": detail,
+        },
+    )
+
+
+def _fold_flow_graph_input(
+    flow_graph: Any,
+) -> tuple[list[dict[str, Any]] | None, JSONResponse | None]:
+    """Fold a request's kernel-wire graph into the canonical linear flow_json.
+
+    Returns ``(normalized_steps, None)`` on success or ``(None, refusal)``
+    when the request must be refused — the same shape as
+    ``_check_workflow_contract``, so the routes read the two gates alike.
+
+    Three refusals, each explicit (agent-flow-core T-B-05):
+
+    * **Kernel absent** — ``422`` with ``reason: kernel_not_installed``. The
+      read view degrades to ``flow_graph_unavailable`` in this situation
+      (see :func:`_flow_graph_view`), but a *write* cannot degrade: quietly
+      dropping or half-storing a graph the user sent would lose their work.
+      The imports are lazy for the same reason ``_flow_graph_view``'s are —
+      the deployed venv has no ``agent_flow_core``, and a module-level import
+      would stop the whole server, flow_json writes included.
+    * **Not a kernel Flow** — ``400 invalid_flow_graph``: the dict does not
+      validate as the wire form ``GET /agents/{id}`` serves.
+    * **Outside the linear subset** — ``400 unsupported_topology`` carrying
+      ``from_graph``'s *full* ``linear.*`` issue list verbatim, so the caller
+      sees every violation at once, not just that folding failed.
+    """
+    try:
+        from agent.flow_graph import UnsupportedTopologyError, from_graph
+    except ImportError as exc:  # kernel absent — the deployed-venv case
+        detail = (
+            "This server's Python environment has no agent-flow-core kernel,"
+            " so a flow_graph request body cannot be folded into flow_json."
+            " Nothing was saved. Send the workflow as flow_json instead —"
+            " that is the stored canon and needs no kernel."
+        )
+        return None, JSONResponse(
+            status_code=422,
+            content={
+                "error": "kernel_not_installed",
+                "reason": "kernel_not_installed",
+                "detail": detail,
+                "message": detail,
+                "exception": str(exc),
+            },
+        )
+
+    # Importable iff the import above succeeded; kept lazy for the same
+    # deployed-venv reason.
+    from agent_flow_core.model import Flow
+    from pydantic import ValidationError as _KernelValidationError
+
+    try:
+        flow = Flow.model_validate(flow_graph)
+    except _KernelValidationError as exc:
+        detail = f"flow_graph does not validate as a kernel Flow: {exc}"
+        return None, JSONResponse(
+            status_code=400,
+            content={
+                "error": "invalid_flow_graph",
+                "detail": detail,
+                "message": detail,
+            },
+        )
+
+    try:
+        return from_graph(flow), None
+    except UnsupportedTopologyError as exc:
+        return None, JSONResponse(
+            status_code=400,
+            content={
+                "error": "unsupported_topology",
+                "detail": exc.detail["message"],
+                "message": exc.detail["message"],
+                "issues": exc.detail["issues"],
+            },
+        )
+
+
 class BuilderCommitBody(BuilderCommitRequest):
     """The commit request, plus the one answer only this gate ever asks for.
 
@@ -833,9 +932,19 @@ class BuilderCommitBody(BuilderCommitRequest):
 
 
 class AgentCreateBody(AgentCreate):
-    """``AgentCreate`` with the same deliberate-incomplete escape hatch."""
+    """``AgentCreate`` with the same deliberate-incomplete escape hatch.
+
+    ``flow_graph`` is the graph-shaped way to say what ``flow_json`` says
+    (agent-flow-core T-B-05): a kernel wire-form ``Flow`` dict, exactly the
+    shape ``GET /agents/{id}`` serves as ``flow_graph``. It is a route-level
+    *input representation*, not a column — the route folds it into the linear
+    ``flow_json`` before anything is stored, so the stored canon never
+    changes shape. The two fields are mutually exclusive: a request carrying
+    both is refused rather than one being silently preferred.
+    """
 
     commit_incomplete: bool = False
+    flow_graph: dict[str, Any] | None = None
 
 
 class AgentUpdateBody(AgentUpdate):
@@ -844,9 +953,14 @@ class AgentUpdateBody(AgentUpdate):
     ``update_agent`` builds its patch with ``exclude_unset=True`` and hands it
     to the store, so this field must be popped there before it reaches a column
     that does not exist.
+
+    ``flow_graph`` (see :class:`AgentCreateBody`) is popped the same way: it
+    is folded into a ``flow_json`` patch entry before the patch reaches the
+    store, and never travels as its own column.
     """
 
     commit_incomplete: bool = False
+    flow_graph: dict[str, Any] | None = None
 
 
 def _flow_has_browser_step(flow: Any) -> bool:
@@ -1864,7 +1978,18 @@ async def create_agent(body: AgentCreateBody) -> dict[str, Any] | JSONResponse:
             status_code=409,
             content={"error": "agent_id_conflict"},
         )
-    flow_json = _normalize_agent_workflow(body.flow_json)
+    if body.flow_graph is not None and body.flow_json is not None:
+        return _flow_input_conflict_response()
+    if body.flow_graph is not None:
+        # Graph input is folded to the linear canon *before* the contract
+        # gate below, so a workflow arriving as a graph faces exactly the
+        # same judgement as one arriving as flow_json — a different request
+        # shape is not a different door.
+        flow_json, fold_refusal = _fold_flow_graph_input(body.flow_graph)
+        if fold_refusal is not None:
+            return fold_refusal
+    else:
+        flow_json = _normalize_agent_workflow(body.flow_json)
     contract_report, refusal = await _check_workflow_contract(
         flow_json,
         commit_incomplete=body.commit_incomplete,
@@ -2051,6 +2176,18 @@ async def update_agent(
     # Route-level field, never a column: strip it before the patch reaches the
     # store or the origin guard.
     commit_incomplete = bool(patch.pop("commit_incomplete", False))
+    # Same for flow_graph: an input representation, not a column. Folding it
+    # into a flow_json patch entry *here* means the branch below — the
+    # normalize step and the contract gate — sees a graph-shaped update on
+    # exactly the terms of a flow_json one.
+    flow_graph = patch.pop("flow_graph", None)
+    if flow_graph is not None:
+        if "flow_json" in patch:
+            return _flow_input_conflict_response()
+        folded, fold_refusal = _fold_flow_graph_input(flow_graph)
+        if fold_refusal is not None:
+            return fold_refusal
+        patch["flow_json"] = folded
     contract_report: ContractReport | None = None
     if "flow_json" in patch:
         patch["flow_json"] = _normalize_agent_workflow(patch["flow_json"])
