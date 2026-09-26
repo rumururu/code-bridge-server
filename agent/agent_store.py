@@ -8,6 +8,7 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime
+from collections.abc import Sequence
 from typing import Any
 
 from core.database import get_db_connection, init_db
@@ -665,8 +666,17 @@ class AgentStore(
         agent_id: str | None = None,
         task_id: str | None = None,
         status: str | None = None,
+        statuses: Sequence[str] | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
+        """Durable runs, newest first.
+
+        ``statuses`` is the set form of ``status`` and wins when both are
+        given. It exists because "runs waiting for a person" is three statuses
+        (``agent/task_orchestrator.py`` ``_WAITING_RUN_STATUSES``), and asking
+        for them one at a time returns three lists a caller then has to merge
+        and re-sort — losing the ordering this query is written to produce.
+        """
         clauses: list[str] = []
         values: list[Any] = []
         if workspace_id:
@@ -681,7 +691,11 @@ class AgentStore(
         if task_id:
             clauses.append("task_id = ?")
             values.append(task_id)
-        if status:
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            clauses.append(f"status IN ({placeholders})")
+            values.extend(statuses)
+        elif status:
             clauses.append("status = ?")
             values.append(status)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -1122,6 +1136,27 @@ class AgentStore(
             ).fetchall()
         return [_row_to_task_step(row) for row in rows]
 
+    def list_run_steps(self, run_id: str) -> list[dict[str, Any]]:
+        """Steps recorded for one run, oldest first.
+
+        An agent owns exactly one task, and every run of that agent writes
+        its steps into that same task — so reading a run's detail through
+        ``list_task_steps`` returned every step of every run ever made
+        (measured: 386 steps from 193 runs behind a single click). ``run_id``
+        was already stored on each row; only the read path scoped to it was
+        missing.
+        """
+        with get_db_connection(use_row_factory=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM agent_task_steps
+                WHERE run_id = ?
+                ORDER BY sequence ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_row_to_task_step(row) for row in rows]
+
     def get_task_step(self, step_id: str) -> dict[str, Any] | None:
         with get_db_connection(use_row_factory=True) as conn:
             row = conn.execute(
@@ -1149,7 +1184,9 @@ class AgentStore(
         status = updates.get("status")
         if status in {"running", "in_progress"}:
             assignments.append("started_at = COALESCE(started_at, CURRENT_TIMESTAMP)")
-        if status in {"completed", "done", "failed", "blocked", "cancelled"}:
+        # ``skipped`` is terminal too (RUNNER_BRANCHING_SPEC 8): the arm was
+        # not taken, so the row is finished with the run, not pending in it.
+        if status in {"completed", "done", "failed", "blocked", "cancelled", "skipped"}:
             assignments.append("ended_at = COALESCE(ended_at, CURRENT_TIMESTAMP)")
         if not assignments:
             with get_db_connection(use_row_factory=True) as conn:

@@ -30,6 +30,7 @@ already carry keep normalizing.
 
 from __future__ import annotations
 
+import copy
 import sys
 import unittest
 from pathlib import Path
@@ -38,7 +39,9 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from agent.workflow_v2 import (  # noqa: E402
+from agent.task_orchestrator import _plan_workflow_steps  # noqa: E402
+from code_bridge_core.workflow_v2 import (  # noqa: E402
+    WORKFLOW_STEP_SCHEMA,
     WorkflowNormalizationError,
     normalize_workflow,
     normalize_workflow_step,
@@ -365,3 +368,107 @@ class RealWorldAgentShapeStillNormalizesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SchemaFieldsReachTheRunRowTest(unittest.TestCase):
+    """Every field the schema advertises survives into the run's step row.
+
+    ``_plan_workflow_steps`` builds each row's ``input`` from a **hand-written
+    key list**, and a hand-written list drops fields silently. ``branches``
+    spent T-H-04 through T-H-09 in exactly that state: the normalizer
+    accepted it, the canvas could author it, and the run's rows never carried
+    it — so ``derive_run_graph`` drew a branching condition as a straight
+    line and nothing failed. Reviewing the list by eye is what let that
+    through, so the list is checked mechanically here instead: a new
+    ``WORKFLOW_STEP_SCHEMA`` field that nobody adds to the planner fails this
+    test rather than shipping as a field that quietly does nothing at run
+    time.
+    """
+
+    #: One authoring value per schema field, valid for every type that
+    #: declares it. ``actions`` is left empty on purpose — its contents are
+    #: per-executor vocabulary, and this test is about the key surviving the
+    #: planner, not about action validation.
+    SAMPLES: dict[str, object] = {
+        "script_id": "sync_devices",
+        "script_args": ["--now"],
+        "instruction": "do the thing",
+        "observation": "what to look at",
+        "memory_read": "read this",
+        "memory_write": "write this",
+        "success_criteria": "it worked",
+        "tool_hint": "playwright",
+        "notify": {"title": "t", "body": "b", "level": "info"},
+        "actions": [],
+        "device_id": "device_1",
+        "android_device_id": "android_1",
+        "branches": [
+            {
+                "label": "arm",
+                "when": {"left": "{{x}}", "op": "equals", "right": "1"},
+                "target_step_id": "anchor",
+            }
+        ],
+    }
+
+    def _planned_input(self, step_type: str) -> dict:
+        fields = WORKFLOW_STEP_SCHEMA[step_type]
+        missing = fields - set(self.SAMPLES)
+        self.assertFalse(
+            missing,
+            f"{step_type} declares {sorted(missing)}, which this test has no "
+            "sample value for — add one, then make sure the planner carries it",
+        )
+        step = {"id": "under_test", "type": step_type, "name": "Under test"}
+        for field in fields:
+            step[field] = copy.deepcopy(self.SAMPLES[field])
+        flow = normalize_workflow(
+            [{"id": "anchor", "type": "llm", "name": "Anchor"}, step]
+        )
+        return _plan_workflow_steps(flow, [])[1]["input"]
+
+    def test_every_schema_field_is_carried_into_the_row(self) -> None:
+        for step_type, fields in WORKFLOW_STEP_SCHEMA.items():
+            if not fields:
+                continue
+            with self.subTest(step_type=step_type):
+                planned = self._planned_input(step_type)
+                for field in sorted(fields):
+                    self.assertIn(
+                        field,
+                        planned,
+                        f"{step_type}.{field} is a schema field the run row "
+                        "never receives; _plan_workflow_steps has to carry it",
+                    )
+
+    def test_a_condition_row_carries_the_branches_verbatim(self) -> None:
+        # The specific field the guard above was written for: the run graph's
+        # only source of arms (RUNNER_BRANCHING_SPEC 9.2).
+        planned = self._planned_input("condition")
+        self.assertEqual(
+            planned["branches"],
+            [
+                {
+                    "label": "arm",
+                    "when": {"left": "{{x}}", "op": "equals", "right": "1"},
+                    "target_step_id": "anchor",
+                }
+            ],
+        )
+
+    def test_a_condition_without_branches_leaves_the_key_off_the_row(self) -> None:
+        # Absent and empty route differently (spec 1.5), so the row must be
+        # able to tell them apart: no key at all is the pre-branching
+        # condition step that still honours on_success.
+        flow = normalize_workflow(
+            [{"id": "bare", "type": "condition", "name": "Bare"}]
+        )
+        self.assertNotIn("branches", _plan_workflow_steps(flow, [])[0]["input"])
+
+    def test_an_empty_branches_list_reaches_the_row_as_an_empty_list(self) -> None:
+        flow = normalize_workflow(
+            [{"id": "half", "type": "condition", "name": "Half", "branches": []}]
+        )
+        self.assertEqual(
+            _plan_workflow_steps(flow, [])[0]["input"]["branches"], []
+        )

@@ -332,6 +332,54 @@ async def _fire_schedule(schedule: dict[str, Any]) -> None:
             )
 
 
+async def refire_after_shutdown(
+    interrupted_runs: list[dict[str, Any]],
+    *,
+    fire=None,
+) -> list[dict[str, Any]]:
+    """Fire again the schedules whose runs the last shutdown cut short.
+
+    ``reconcile_interrupted_runs`` closes a run the previous process left
+    mid-flight so the schedule stops skipping — but closing it is not
+    running it. A restart during the 08:00 morning check left that day
+    with no check at all, its steps marked failed, its notification never
+    sent; a 20-minute device cycle was killed at minute 19 and simply
+    lost. Every schedule owning one of those runs fires once here, at
+    start, through the same path a due tick uses (so ``skip_if_active``
+    and the fire record apply). Runs nobody scheduled — a person pressed
+    Run — are left closed: re-running a manual run unasked is a surprise.
+
+    Returns the schedules fired, for logging and tests.
+    """
+    fire = fire or _fire_schedule
+    store = get_schedule_store()
+    fired: list[dict[str, Any]] = []
+    seen_tasks: set[str] = set()
+    for run in interrupted_runs:
+        task_id = run.get("task_id")
+        if not isinstance(task_id, str) or not task_id or task_id in seen_tasks:
+            continue
+        seen_tasks.add(task_id)
+        try:
+            schedules = [s for s in store.list_for_task(task_id) if s.get("enabled")]
+        except Exception:
+            logger.exception("scheduler: could not list schedules for task %s", task_id)
+            continue
+        for schedule in schedules:
+            logger.warning(
+                "scheduler: re-firing schedule %s — its run %s was interrupted"
+                " by the previous shutdown",
+                schedule.get("id"), run.get("id"),
+            )
+            try:
+                await fire(schedule)
+            except Exception:
+                logger.exception("scheduler: re-fire of schedule %s failed", schedule.get("id"))
+                continue
+            fired.append(schedule)
+    return fired
+
+
 class TaskScheduler:
     """Singleton background loop. Owned by the FastAPI lifespan."""
 
@@ -405,10 +453,22 @@ class TaskScheduler:
         # still being wound down.
         await self._sweep_expired_approvals()
         await self._sweep_stalled_parks()
+        await self._sweep_expired_repair_proposals()
         for schedule in due:
             await _fire_schedule(schedule)
         await self._sweep_cli_agents_if_due()
         return len(due)
+
+    async def _sweep_expired_repair_proposals(self) -> None:
+        """A proposal nobody looked at for seven days stops asking (spec §2.4)."""
+        try:
+            from agent.repair_proposals import get_repair_proposal_store
+
+            expired = await asyncio.to_thread(get_repair_proposal_store().expire_stale)
+            if expired:
+                logger.info("repair: expired %d proposal(s) nobody answered", len(expired))
+        except Exception:
+            logger.exception("repair proposal expiry sweep failed")
 
     async def _sweep_stalled_parks(self) -> None:
         """End every park nobody answered, schedule or no schedule.

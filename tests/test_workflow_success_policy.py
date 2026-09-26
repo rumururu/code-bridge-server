@@ -19,7 +19,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 from agent import task_orchestrator
-from agent.workflow_v2 import WorkflowNormalizationError, normalize_workflow
+from code_bridge_core.workflow_v2 import WorkflowNormalizationError, normalize_workflow
 
 
 class SuccessNormalizationTest(unittest.TestCase):

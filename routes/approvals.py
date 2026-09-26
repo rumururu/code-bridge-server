@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from agent.approval_resume import maybe_resume_run_for_decision
 from approvals.approval_models import ApprovalDecisionCreate, ApprovalRequestCreate
+from approvals.approval_notifier import notify_runless_approval_best_effort
 from approvals.approval_service import (
     decide_approval,
     get_policy_snapshot,
@@ -33,7 +34,31 @@ async def request_approval(body: ApprovalRequestCreate) -> dict[str, Any] | JSON
     )
     if result.get("error"):
         return JSONResponse(status_code=403, content=result)
+    # A request that came in over HTTP with no run behind it has nobody parked
+    # on it, so nothing else will ring the phone for it.
+    if result.get("approval_required"):
+        notify_runless_approval_best_effort(result.get("approval"))
     return result
+
+
+def get_approval_with_decision(approval_id: str) -> dict[str, Any]:
+    """One approval request plus the decision that resolved it, for pollers.
+
+    An external agent that filed a request through ``POST /request`` has to
+    find out later whether someone approved it. ``/pending`` cannot answer
+    that — a resolved request is by definition no longer pending — and the
+    alternative that existed before this route was the agent reading the
+    server's SQLite file directly, which is how the feedback agent ended up
+    bypassing the policy engine entirely (its standing "always allow" rules
+    could never fire because no request ever passed through the gate).
+    """
+    request = get_approval_store().get_request(approval_id)
+    if request is None:
+        raise HTTPException(status_code=404, detail=f"Approval '{approval_id}' not found")
+    return {
+        "approval": request,
+        "decision": get_approval_store().get_latest_decision(approval_id),
+    }
 
 
 @router.get("/pending", dependencies=[Depends(verify_api_key)], response_model=None)
@@ -109,3 +134,12 @@ async def create_approval_decision(
 async def list_policies() -> dict[str, Any]:
     """Return built-in policy classes."""
     return get_policy_snapshot()
+
+
+# Declared last on purpose: a path parameter here would otherwise swallow the
+# fixed paths above (`/pending`, `/policies`) — FastAPI matches in declaration
+# order, and `/{approval_id}` matches anything.
+@router.get("/{approval_id}", dependencies=[Depends(verify_api_key)], response_model=None)
+async def get_approval(approval_id: str) -> dict[str, Any]:
+    """Status of one approval request, with its resolving decision if any."""
+    return get_approval_with_decision(approval_id)

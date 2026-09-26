@@ -211,6 +211,50 @@ class KernelMissingTest(FlowGraphApiTestBase):
         # workflow itself is fine.
         self.assertIn("flow_json", unavailable["message"])
 
+    def test_the_message_says_how_to_install_the_kernel(self):
+        """Naming the missing package is not enough to act on.
+
+        `agent-flow-core` is on no package index, so the reader's first move —
+        `pip install agent-flow-core` — fails. A diagnostic that only reports
+        absence leaves a server permanently missing a feature it ships, which
+        is how this one stayed off. The answer has to carry the route back.
+        """
+
+        agent_id = self._store_agent(LINEAR_FLOW)
+
+        with kernel_uninstalled():
+            payload = self.client.get(f"/api/agent/agents/{agent_id}").json()
+
+        unavailable = payload["flow_graph_unavailable"]
+        message = unavailable["message"]
+        # The declaration that names the dependency...
+        self.assertIn("requirements-kernel.txt", message)
+        # ...and the command that installs it.
+        self.assertIn("sync-local-install.sh", message)
+        self.assertIn("CODE_BRIDGE_FLOW_CORE_DIR", message)
+        # Machine-readable too, so a client can show the command verbatim
+        # instead of scraping an English sentence for it.
+        self.assertIn("pip install", unavailable["remedy"])
+        self.assertIn("requirements-kernel.txt", unavailable["remedy"])
+
+    def test_only_the_kernel_absent_reason_offers_an_install(self):
+        """The install hint answers "there is no kernel". Attaching it to a
+        malformed workflow or a converter crash would send the reader to fix
+        an environment that is already correct."""
+
+        agent_id = self._store_agent(LINEAR_FLOW)
+
+        def _explode(_steps):
+            raise RuntimeError("converter blew up")
+
+        with mock.patch("agent.flow_graph.to_graph", _explode):
+            unavailable = self.client.get(
+                f"/api/agent/agents/{agent_id}"
+            ).json()["flow_graph_unavailable"]
+
+        self.assertNotIn("remedy", unavailable)
+        self.assertNotIn("requirements-kernel.txt", unavailable["message"])
+
     def test_the_rest_of_the_agent_is_untouched(self):
         agent_id = self._store_agent(LINEAR_FLOW)
 
@@ -370,3 +414,43 @@ class DashboardMirrorTest(FlowGraphApiTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KernelGateIssuesTest(unittest.TestCase):
+    """The read publishes the kernel gate's verdict next to the graph.
+
+    ``validate_flow`` has reported ``step.unreachable`` for a step with no
+    way in since it was written; nothing in the product called it, so the
+    morning-check agent's ``analyze_failure`` drew as a second root for weeks
+    with the kernel ready to say so on the first read.
+    """
+
+    def _view(self, flow):
+        return agents._flow_graph_view(flow)
+
+    def test_a_clean_graph_publishes_an_empty_list_not_no_key(self):
+        view = self._view(LINEAR_FLOW)
+        self.assertIn("flow_graph", view)
+        self.assertEqual(view["flow_graph_issues"], [])
+
+    def test_a_step_nothing_leads_to_is_named(self):
+        # `tell` ends the run; nothing routes into `after`. The graph still
+        # draws — `after` is simply a second root — and the gate says so.
+        # (Three steps, not two: the gate skips an edgeless flow, which by
+        # convention runs in list order.)
+        flow = [
+            LINEAR_FLOW[0],
+            {**LINEAR_FLOW[1], "on_success": {"type": "end"}},
+            {**LINEAR_FLOW[1], "id": "after", "name": "After"},
+        ]
+        view = self._view(flow)
+        self.assertIn("flow_graph", view)
+        self.assertEqual(
+            [(i["code"], i["severity"], i.get("stepId")) for i in view["flow_graph_issues"]],
+            [("step.unreachable", "warning", "after")],
+        )
+
+    def test_the_canvas_graph_view_carries_it_too(self):
+        from routes import canvas_api
+
+        self.assertIn("flow_graph_issues", canvas_api._GRAPH_VIEW_KEYS)

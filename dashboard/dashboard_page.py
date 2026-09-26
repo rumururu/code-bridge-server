@@ -34,5 +34,8 @@ def render_agents_html() -> str:
     """
     global _AGENTS_HTML
     if _AGENTS_HTML is None:
-        _AGENTS_HTML = (_TEMPLATE_DIR / "agents.html").read_text(encoding="utf-8")
+        _AGENTS_HTML = (_TEMPLATE_DIR / "agents.html").read_text(encoding="utf-8").replace(
+            "/* APPROVAL_REVIEW_MODULE */",
+            (_TEMPLATE_DIR / "approval_review.js").read_text(encoding="utf-8"),
+        )
     return _AGENTS_HTML

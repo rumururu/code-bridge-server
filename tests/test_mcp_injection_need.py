@@ -29,7 +29,7 @@ if str(SERVER_DIR) not in sys.path:
 from agent import agent_store, browser_session_store  # noqa: E402
 from agent import capability_registry  # noqa: E402
 from agent.agent_models import AgentDraft  # noqa: E402
-from agent.configurator import (  # noqa: E402
+from code_bridge_core.configurator import (  # noqa: E402
     BUILDER_ADDED_TOOL_TEMPLATES,
     _ensure_app_action_tool,
     _ensure_playwright_tool,

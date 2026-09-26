@@ -361,6 +361,65 @@ def _expire_pending_approvals_for_run(run_id: str) -> list[str]:
     return expired
 
 
+async def _release_browser_sessions_for_run(run_id: str) -> int:
+    """Close the browsers a park left running, once nobody is coming for them.
+
+    A browser step that parks on a person deliberately keeps its browser alive:
+    the handoff exists so they can finish the login, or look at what stopped,
+    and the resume continues in that same window
+    (`task_orchestrator._execute_browser_action_workflow_step`). Completing and
+    failing both close it; parking is the one ending that does not, and that is
+    correct while the run is still waiting.
+
+    It stops being correct the moment the run is given up on. Nothing closed
+    the handoff then, and every browser step on this machine launches a
+    persistent context against **one** profile directory
+    (`~/.code-bridge/core/browser_profile`), which Chromium allows exactly one
+    live instance of. So one abandoned park blocked every later run of every
+    agent with
+
+        BrowserType.launch_persistent_context: Failed to create a
+        ProcessSingleton for your profile directory.
+
+    Measured three times in one session, each needing a browser killed by hand
+    before anything could run again.
+
+    Best-effort by the same rule as the rest of this module: abandonment is
+    cleanup and must not raise. A runtime that is already gone still gets its
+    store row closed, so the record does not keep claiming a live session.
+    """
+
+    from agent.browser_runtime_manager import get_browser_runtime_manager
+    from agent.browser_session_store import get_browser_session_store
+
+    store = get_browser_session_store()
+    try:
+        sessions = store.list_for_run(run_id)
+    except Exception:
+        logger.exception("could not list browser sessions for run %s", run_id)
+        return 0
+
+    released = 0
+    for session in sessions:
+        session_id = session.get("id")
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        if session.get("status") == "closed":
+            continue
+        try:
+            await get_browser_runtime_manager().close_session(session_id)
+        except Exception:
+            logger.exception(
+                "could not close browser runtime for session %s", session_id
+            )
+        try:
+            store.close(session_id)
+            released += 1
+        except Exception:
+            logger.exception("could not close browser session row %s", session_id)
+    return released
+
+
 async def abandon_waiting_run(
     run: dict[str, Any],
     *,
@@ -427,8 +486,15 @@ async def abandon_waiting_run(
         )
         if abandoned is None:
             return {"run_id": run_id, "abandoned": False, "reason": "no_longer_waiting"}
+        released = await _release_browser_sessions_for_run(run_id)
         logger.warning("abandoning run %s: nobody answered its park", run_id)
-        return {"run_id": run_id, "abandoned": True, "path": "abandon", **abandoned}
+        return {
+            "run_id": run_id,
+            "abandoned": True,
+            "path": "abandon",
+            **abandoned,
+            **({"browser_sessions_released": released} if released else {}),
+        }
     except Exception:
         logger.exception("failed to abandon waiting run %s", run_id)
         return None

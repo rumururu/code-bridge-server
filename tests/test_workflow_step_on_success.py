@@ -27,11 +27,11 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 from agent.agent_models import WorkflowStep  # noqa: E402
-from agent.configurator import (  # noqa: E402
+from code_bridge_core.configurator import (  # noqa: E402
     build_configurator_system_prompt,
     create_builder_session,
 )
-from agent.workflow_v2 import normalize_workflow  # noqa: E402
+from code_bridge_core.workflow_v2 import normalize_workflow  # noqa: E402
 
 
 class WorkflowStepOnSuccessModelTest(unittest.TestCase):

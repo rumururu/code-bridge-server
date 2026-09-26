@@ -113,7 +113,7 @@ class AnMcpStepCanSayWhatToDoTest(unittest.TestCase):
     """
 
     def test_a_usable_step_survives_normalization(self) -> None:
-        from agent.workflow_v2 import normalize_workflow
+        from code_bridge_core.workflow_v2 import normalize_workflow
 
         steps = normalize_workflow(
             [
@@ -134,7 +134,7 @@ class AnMcpStepCanSayWhatToDoTest(unittest.TestCase):
     def test_the_published_schema_offers_those_fields(self) -> None:
         """Authoring surfaces render from the published schema; a field the
         normalizer accepts but no client can enter is not reachable."""
-        from agent.workflow_v2 import WORKFLOW_STEP_SCHEMA
+        from code_bridge_core.workflow_v2 import WORKFLOW_STEP_SCHEMA
 
         self.assertIn("instruction", WORKFLOW_STEP_SCHEMA["mcp_tool"])
         self.assertIn("tool_hint", WORKFLOW_STEP_SCHEMA["mcp_tool"])

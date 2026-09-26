@@ -306,11 +306,29 @@ def _get_antigravity_models() -> list[dict[str, Any]]:
     if result.returncode != 0:
         _antigravity_models_cache = (now, cached[1] if cached is not None else fallback)
         return _antigravity_models_cache[1]
-    models = [
-        {"id": line.strip(), "label": line.strip(), "source": "cli"}
-        for line in (result.stdout or "").splitlines()
-        if line.strip() and not line.strip().startswith(("Usage", "Available", "-"))
-    ]
+    # `agy` prints `<slug>\t<display name>` per line, and the **display name**
+    # is what `--model` accepts — passing the slug is refused with "not
+    # recognized as a known model". Splitting on the tab was missed here, so
+    # the whole line became the id: the picker offered
+    # `gemini-3.7-flash-high\tGemini 3.7 Flash (High)`, and selecting it made
+    # every builder turn fail on the spot. Measured against the live CLI on
+    # 2026-08-24. A line with no tab keeps its whole text for both, which is
+    # what the older output looked like.
+    models = []
+    for raw in (result.stdout or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("Usage", "Available", "-")):
+            continue
+        slug, sep, display = line.partition("\t")
+        if not sep:
+            # No tab: a status line like "Fetching available models...", not a
+            # model. The old code kept these because it never looked at the
+            # shape — only at the prefixes it happened to know.
+            continue
+        name = display.strip()
+        if not name:
+            continue
+        models.append({"id": name, "label": name, "source": "cli"})
     resolved = models or fallback
     _antigravity_models_cache = (now, resolved)
     return resolved
@@ -681,6 +699,51 @@ def get_llm_options_snapshot() -> dict[str, Any]:
         },
         "companies": companies,
     }
+
+
+def list_alternative_chat_providers(
+    exclude_company_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Providers that could answer a chat turn right now, minus one.
+
+    "Could answer right now" is deliberately the same `selectable` the model
+    pickers use — CLI installed, chat capable, and not switched off — plus
+    "has a model to name", because :func:`set_selected_llm` refuses a
+    selection without one. Anything looser would offer the user a switch that
+    then fails, which is worse than not offering it.
+
+    Written for the moment a turn fails on an exhausted allowance: the answer
+    to "what else is on this machine" has to come from the same probe that
+    decides what the settings screen shows, or the offer and the settings
+    would disagree about what is installed.
+    """
+    normalized_exclude = (exclude_company_id or "").strip().lower()
+    alternatives: list[dict[str, Any]] = []
+    for snapshot in (_build_provider_snapshot(p) for p in PROVIDERS):
+        if snapshot["id"] == normalized_exclude:
+            continue
+        if not snapshot.get("selectable"):
+            continue
+        model_ids = snapshot.get("all_model_ids") or []
+        if not model_ids:
+            continue
+        alternatives.append(
+            {
+                "company_id": snapshot["id"],
+                "name": snapshot["name"],
+                "command": snapshot["command"],
+                "model": model_ids[0],
+            }
+        )
+    return alternatives
+
+
+def get_llm_provider_name(company_id: str | None) -> str | None:
+    """Human-readable name for a provider id, or ``None`` if it is not one."""
+    if not company_id:
+        return None
+    provider = _get_provider(company_id)
+    return provider.name if provider else None
 
 
 def set_selected_llm(company_id: str, model: str) -> dict[str, Any]:

@@ -12,7 +12,7 @@ from fastapi import FastAPI
 logger = logging.getLogger(__name__)
 
 from agent.run_reconciliation import reconcile_interrupted_runs
-from agent.scheduler import get_scheduler
+from agent.scheduler import get_scheduler, refire_after_shutdown
 from core.config import get_config
 from core.database import migrate_accessible_folders_from_projects
 from system.lifecycle_service import (
@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # process left mid-flight. They are stale by definition — orchestration
     # runs in this interpreter — and a run stuck "running" makes its schedule
     # skip every fire from here on, with no grace period to rescue it.
-    reconcile_interrupted_runs()
+    interrupted = reconcile_interrupted_runs()
 
     scheduler = None
     if os.environ.get("CODEBRIDGE_DISABLE_SCHEDULER") == "1":
@@ -61,6 +61,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     else:
         scheduler = get_scheduler()
         await scheduler.start()
+        if interrupted:
+            # Closing an interrupted run is not running it (see
+            # refire_after_shutdown): the schedules it belonged to fire
+            # once now, so a restart costs a run a few minutes, not a day.
+            await refire_after_shutdown(interrupted)
 
     yield
 

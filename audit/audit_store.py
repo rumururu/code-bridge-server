@@ -169,6 +169,61 @@ class AuditStore:
             ).fetchall()
         return [_row_to_audit_event(row) for row in rows]
 
+    def gated_operations_seen(self) -> set[str]:
+        """Operation names the policy gate has actually been asked about.
+
+        Only the decisions the gate itself records count — ``allowed``,
+        ``approval_requested`` and ``forbidden`` (see
+        ``approvals.approval_service.request_approval_for_operation``). A
+        human's approve/deny is recorded under the same operation name, but
+        that only proves a request row existed, not that it came through the
+        gate: the feedback agent used to insert its requests straight into the
+        table and the decisions on those were audited like any other.
+        """
+        with get_db_connection(use_row_factory=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT operation FROM audit_events
+                WHERE decision IN ('allowed', 'approval_requested', 'forbidden')
+                  AND operation IS NOT NULL AND operation != ''
+                """
+            ).fetchall()
+        return {str(row["operation"]) for row in rows}
+
+    def rule_match_stats(self) -> dict[str, dict[str, Any]]:
+        """How often each standing policy rule has actually decided something.
+
+        Keyed by rule id. Every gated operation records an audit event whose
+        payload carries the policy decision, and when a persistent rule was
+        the reason (``decide_policy_with_rules`` attaches it as
+        ``policy.rule``), the rule's id is in ``payload.policy.rule.id``.
+        Counting those rows is the only evidence a rule has ever been
+        consulted — the rules table itself says nothing about use, and a rule
+        for an operation no code path gates looks identical to one that fires
+        every night. The dashboard shows this next to each rule for exactly
+        that reason.
+        """
+        with get_db_connection(use_row_factory=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    json_extract(payload_redacted_json, '$.policy.rule.id') AS rule_id,
+                    COUNT(*) AS matched_count,
+                    MAX(timestamp) AS last_matched_at
+                FROM audit_events
+                WHERE json_extract(payload_redacted_json, '$.policy.rule.id') IS NOT NULL
+                GROUP BY rule_id
+                """
+            ).fetchall()
+        return {
+            str(row["rule_id"]): {
+                "matched_count": int(row["matched_count"] or 0),
+                "last_matched_at": row["last_matched_at"],
+            }
+            for row in rows
+            if row["rule_id"]
+        }
+
     def get_event(self, event_id: str) -> dict[str, Any] | None:
         with get_db_connection(use_row_factory=True) as conn:
             row = conn.execute(

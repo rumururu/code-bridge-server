@@ -1,9 +1,19 @@
-"""Linear flow_json <-> kernel graph converters (agent-flow-core T-B-02/T-B-03).
+"""Runnable flow_json <-> kernel graph converters (agent-flow-core T-B-02/T-B-03).
+
+The subset this module accepts is the one the Code Bridge runner can execute:
+a linear list, ``goto_step`` jumps, and — since T-H-10 — a ``condition``
+step's branches. "Linear subset" is what the earlier drafts called it, and
+the name survives in the ``linear.*`` issue codes and the private
+identifiers below **on purpose**: those codes are a wire contract
+(``routes/agents.py`` passes them through verbatim), and renaming them to
+match a widened vocabulary would break every client reading them to say
+nothing new. Read "linear" in an identifier as "the subset this runner can
+execute one step at a time".
 
 Contract (spec: agent-flow-core ``docs/LINEAR_FLOW_MAPPING.md``, T-B-01):
 
 * **The linear flow_json is, and stays, the canon.** ``agents.flow_json``
-  (as normalized by :func:`agent.workflow_v2.normalize_workflow`) is the
+  (as normalized by :func:`code_bridge_core.workflow_v2.normalize_workflow`) is the
   single source of truth for an agent's workflow. The kernel
   :class:`agent_flow_core.model.Flow` produced by :func:`to_graph` is a
   *derived view*: edges are a pure function of the step policies
@@ -16,10 +26,21 @@ Contract (spec: agent-flow-core ``docs/LINEAR_FLOW_MAPPING.md``, T-B-01):
   stored shapes (legacy string policies etc.) are not accepted here;
   normalization is ``normalize_workflow``'s job alone (spec section 1).
 
-* ``from_graph`` rejects every graph outside the linear+goto subset with
+* ``from_graph`` rejects every graph outside that subset with
   :class:`UnsupportedTopologyError`, carrying the *full* issue list in the
-  kernel ``FlowIssue`` shape with the ``linear.*`` codes of spec section 6.3
-  (all violations at once, never fail-fast on the first).
+  kernel ``FlowIssue`` shape with the ``linear.*`` / ``branch.*`` codes of
+  spec section 6.3 (all violations at once, never fail-fast on the first).
+
+* **A condition's arms replace its sequential successor** (E5, spec 3.0). A
+  ``condition`` step with a non-empty ``branches`` list draws one
+  ``kind="branch"`` edge per arm and *no* ``seq`` edge, because control
+  leaves it only through an arm. Before T-H-10 both directions were blind to
+  ``branches`` in the same way, so a two-armed condition was drawn as a
+  straight line into whichever step happened to be next — and the round trip
+  passed, because a blind fold agrees with a blind unfold. That is why the
+  branch tests assert the ``kind`` and count of the edges leaving a
+  condition node directly, and never rest on ``from_graph(to_graph(L)) == L``
+  alone.
 
 .. warning::
    **Do not import this module from any existing runner/route path yet**
@@ -67,7 +88,8 @@ from agent_flow_core.policy import (
 )
 from agent_flow_core.validate import FlowIssue
 
-from .workflow_v2 import (
+from code_bridge_core.edge_rules import UNVERIFIABLE, EdgeEntry, derive_control_edges
+from code_bridge_core.workflow_v2 import (
     ALLOWED_STEP_TYPES,
     WorkflowNormalizationError,
     normalize_workflow,
@@ -89,8 +111,14 @@ _FOLDED_STEP_KEYS = frozenset(
 # ``linear.config_field_collision``. ``step_type`` exempted (deviation note).
 _CONFIG_COLLISION_KEYS = _FOLDED_STEP_KEYS
 
-_ALLOWED_EDGE_KINDS = frozenset({"seq", "goto"})
+_ALLOWED_EDGE_KINDS = frozenset({"seq", "goto", "branch"})
 _ANNOTATION_KEYS = frozenset({"on", "via"})  # edge-level codeBridgeLinear
+# Edge-level extensions namespaces. ``codeBridgeBranch`` is E5-only display
+# metadata (arm label + default marker) — the predicate itself stays on the
+# node, because flow_json is a step list and anything hung on an edge is lost
+# in the fold (spec 3.3, "no dual representation").
+_EDGE_EXTENSION_KEYS = frozenset({"codeBridgeLinear", "codeBridgeBranch"})
+_BRANCH_ANNOTATION_KEYS = frozenset({"index", "label", "default"})
 _EDGE_META_KEYS = frozenset({"on", "via", "kind"})  # legacy flow-level meta
 _ALLOWED_ON = frozenset({"success", "failure"})
 _ALLOWED_VIA = frozenset({"retry_then"})
@@ -139,102 +167,103 @@ def _issue(
 # ---------------------------------------------------------------------------
 
 
-def _terminal_retry_goto(policy: dict[str, Any]) -> str | None:
-    """Follow a ``retry`` policy's ``then`` chain to a terminal ``goto_step``.
+def _branch_arms(step_type: str, source: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """The condition arms a step declares (E5), ``[]``, or ``None``.
 
-    ``then`` is a single (recursively normalized) policy, so a
-    retry -> retry -> goto escalation still ends in at most one jump
-    (spec E4). Returns the target step id, or ``None`` when the chain ends
-    in a non-goto policy (abort/ask_user/...).
+    ``source`` is the normalized step dict (``to_graph``) or a
+    :class:`FlowStep`'s ``config`` (``from_graph``) — ``branches`` rides in
+    ``config`` verbatim, being none of the six folded common keys.
+
+    * a list of well-formed arms — the step branches;
+    * ``[]`` — no branching: the key is absent (a pre-branching condition
+      step, which still honours ``on_success``), the step is not a
+      ``condition``, or the list is empty (a half-authored step, reported as
+      ``branch.empty`` and drawing no arm);
+    * ``None`` — the value is there but not a shape arms can be read from.
+      The caller derives nothing for that step and lets ``normalize_workflow``
+      name it in the fold, rather than inventing a second vocabulary for
+      malformed input.
     """
 
-    current: Any = policy
-    while isinstance(current, dict) and current.get("type") == "retry":
-        current = current.get("then")
-    if isinstance(current, dict) and current.get("type") == "goto_step":
-        target = current.get("target_step_id")
-        return target if isinstance(target, str) else None
-    return None
+    if step_type != "condition":
+        return []
+    raw = source.get("branches")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return None
+    arms: list[dict[str, Any]] = []
+    for arm in raw:
+        if not isinstance(arm, dict):
+            return None
+        target = arm.get("target_step_id")
+        if not isinstance(target, str) or not target.strip():
+            return None
+        arms.append(arm)
+    return arms
+
+
+def _is_default_arm(arm: dict[str, Any]) -> bool:
+    """An arm with no ``when`` is the default — the one taken when nothing
+    matched. Mirrors ``workflow_v2.is_default_branch``; there is deliberately
+    no second ``"default": true`` marker on the stored arm."""
+
+    return arm.get("when") is None
 
 
 def _derive_edges(
-    entries: list[tuple[str, dict[str, Any] | None, dict[str, Any] | None]],
+    entries: list[
+        tuple[
+            str,
+            dict[str, Any] | None,
+            dict[str, Any] | None,
+            list[dict[str, Any]] | None,
+        ]
+    ],
 ) -> list[dict[str, Any]]:
-    """Derive the control-transfer edges from normalized step policies.
+    """Derive the control-transfer edges from step policies and branches.
 
-    ``entries`` is ``[(step_id, on_success, on_failure), ...]`` in linear
-    order; a ``None`` policy pair member means "unverifiable, derive
+    ``entries`` is ``[(step_id, on_success, on_failure, arms), ...]`` in
+    linear order; a ``None`` policy pair member means "unverifiable, derive
     nothing for this step" (from_graph uses that for steps whose policies
-    failed normalization — they already carry a ``policy.invalid`` error).
+    failed normalization — they already carry a ``policy.invalid`` error),
+    and ``arms`` is the condition's branch list (see :func:`_branch_arms`).
 
-    Emission order is canonical (spec 7): step-list order, success edge
-    before failure edge per step.
+    The rules themselves (E1–E6) live in :mod:`code_bridge_core.edge_rules`,
+    shared with the run graph and the authoring reachability check; this
+    is the step-id keyed reading of them. Targets are kept unresolved on
+    purpose — a goto to a step that does not exist is still an edge here,
+    so the kernel gate can name the missing step (``edge.target_missing``)
+    instead of the edge quietly vanishing.
+
+    Emission order is canonical (spec 7): step-list order, success edges
+    (arms in array order) before the failure edge per step.
     """
 
-    derived: list[dict[str, Any]] = []
-    for index, (step_id, on_success, on_failure) in enumerate(entries):
-        if on_success is not None:
-            success_type = on_success.get("type")
-            if success_type == "continue" and index + 1 < len(entries):
-                # E1 — sequential progression to the next list index.
-                derived.append(
-                    {
-                        "from": step_id,
-                        "to": entries[index + 1][0],
-                        "on": "success",
-                        "kind": "seq",
-                        "via": None,
-                        "matched": False,
-                    }
-                )
-            elif success_type == "goto_step":
-                # E2 — success jump.
-                derived.append(
-                    {
-                        "from": step_id,
-                        "to": on_success.get("target_step_id"),
-                        "on": "success",
-                        "kind": "goto",
-                        "via": None,
-                        "matched": False,
-                    }
-                )
-            # "end" (and a trailing continue) derive no edge — natural
-            # termination lives in the node policy only (spec section 5).
-        if on_failure is not None:
-            failure_type = on_failure.get("type")
-            if failure_type == "goto_step":
-                # E3 — failure jump.
-                derived.append(
-                    {
-                        "from": step_id,
-                        "to": on_failure.get("target_step_id"),
-                        "on": "failure",
-                        "kind": "goto",
-                        "via": None,
-                        "matched": False,
-                    }
-                )
-            elif failure_type == "retry":
-                # E4 — retry escalation chain ending in a jump.
-                target = _terminal_retry_goto(on_failure)
-                if target is not None:
-                    derived.append(
-                        {
-                            "from": step_id,
-                            "to": target,
-                            "on": "failure",
-                            "kind": "goto",
-                            "via": "retry_then",
-                            "matched": False,
-                        }
-                    )
-            # retry-without-goto / ask_user / manual_handoff / abort /
-            # failure-continue: no edge (spec section 3, "엣지가 나오지 않는
-            # 경우") — failure-continue moves to the same next step E1
-            # already draws, and the "step stays failed" meaning lives in
-            # the policy alone.
-    return derived
+    core_entries: list[EdgeEntry] = [
+        (
+            UNVERIFIABLE if on_success is None else on_success,
+            UNVERIFIABLE if on_failure is None else on_failure,
+            arms,
+        )
+        for _step_id, on_success, on_failure, arms in entries
+    ]
+    return [
+        {
+            "from": entries[edge.source][0],
+            "to": edge.target,
+            "on": edge.on,
+            "kind": edge.kind,
+            "via": edge.via,
+            "branch": edge.branch,
+            "matched": False,
+        }
+        for edge in derive_control_edges(
+            core_entries,
+            resolve=lambda target: target,
+            next_key=lambda index: entries[index + 1][0] if index + 1 < len(entries) else None,
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -246,10 +275,11 @@ def to_graph(steps: list[dict[str, Any]]) -> Flow:
     """Represent a normalized linear workflow as a kernel :class:`Flow`.
 
     ``steps`` must be the output of
-    :func:`agent.workflow_v2.normalize_workflow` (spec section 1). The
-    result is a derived view: node policies stay the canon, every edge is
-    re-derivable from them, and edge ids are deterministic
-    (``{from_step_id}:success`` / ``{from_step_id}:failure``, spec 3.1).
+    :func:`code_bridge_core.workflow_v2.normalize_workflow` (spec section 1). The
+    result is a derived view: node policies (and a condition's ``branches``)
+    stay the canon, every edge is re-derivable from them, and edge ids are
+    deterministic (``{from_step_id}:success`` / ``{from_step_id}:failure`` /
+    ``{from_step_id}:branch:{index}``, spec 3.1).
 
     Flow ``name``/``description``/``triggers`` are left empty (schedules
     live in ``task_schedules``, outside flow_json) and ``Flow.extensions``
@@ -281,20 +311,33 @@ def to_graph(steps: list[dict[str, Any]]) -> Flow:
         )
 
     entries = [
-        (step["id"], step["on_success"], step["on_failure"]) for step in steps
+        (
+            step["id"],
+            step["on_success"],
+            step["on_failure"],
+            _branch_arms(step["type"], step),
+        )
+        for step in steps
     ]
     edges: list[FlowEdge] = []
     for derived in _derive_edges(entries):
         annotation: dict[str, Any] = {"on": derived["on"]}
         if derived["via"] is not None:
             annotation["via"] = derived["via"]
+        extensions: dict[str, Any] = {"codeBridgeLinear": annotation}
+        edge_id = f"{derived['from']}:{derived['on']}"
+        if derived["branch"] is not None:
+            # E5 edge ids carry the arm index: a condition has N success
+            # edges, so `{step}:success` would not be unique (spec 3.1).
+            edge_id = f"{derived['from']}:branch:{derived['branch']['index']}"
+            extensions["codeBridgeBranch"] = dict(derived["branch"])
         edges.append(
             FlowEdge(
-                id=f"{derived['from']}:{derived['on']}",
+                id=edge_id,
                 from_step_id=derived["from"],
                 to_step_id=derived["to"],
                 kind=derived["kind"],
-                extensions={"codeBridgeLinear": annotation},
+                extensions=extensions,
             )
         )
 
@@ -383,6 +426,7 @@ def from_graph(flow: Flow) -> list[dict[str, Any]]:
                     )
 
     # --- step ids (kernel codes, spec 6.1 rule 1) -------------------------
+    step_types_by_id = {step.id: step.step_type for step in flow.steps}
     seen_ids: set[str] = set()
     for index, step in enumerate(flow.steps):
         sid = step.id.strip()
@@ -453,6 +497,7 @@ def from_graph(flow: Flow) -> list[dict[str, Any]]:
         tuple[dict[str, Any] | None, dict[str, Any] | None]
     ] = []
     unverifiable_steps: set[str] = set()
+    step_branch_arms: list[list[dict[str, Any]] | None] = []
     for index, step in enumerate(flow.steps):
         location = step.id.strip() or f"#{index}"
         step_ok = True
@@ -480,13 +525,74 @@ def from_graph(flow: Flow) -> list[dict[str, Any]]:
                     step_id=location,
                 )
             )
+        arms = _branch_arms(step.step_type, step.config)
+        if arms is None:
+            # `branches` is there but unreadable as arms. Deriving E1 for it
+            # would report the graph's own branch edges as unbacked and point
+            # a person at the edges instead of the malformed field; the fold
+            # below names the field itself (`linear.normalize_failed`).
+            step_ok = False
+        elif arms:
+            if sum(_is_default_arm(arm) for arm in arms) > 1:
+                issues.append(
+                    _issue(
+                        "branch.duplicate_default",
+                        f"step {location!r} declares more than one default"
+                        " branch (a branch with no 'when'); there is no order"
+                        " in which both can run",
+                        step_id=location,
+                    )
+                )
+            for arm_index, arm in enumerate(arms):
+                target = str(arm.get("target_step_id"))
+                if target not in seen_ids:
+                    issues.append(
+                        _issue(
+                            "branch.target_missing",
+                            f"branch {arm_index} of step {location!r} targets"
+                            f" {target!r}, which is not a known step id",
+                            step_id=location,
+                            detail={
+                                "branchIndex": arm_index,
+                                "targetStepId": target,
+                            },
+                        )
+                    )
+            if success_policy is not None and success_policy.get("type") != "continue":
+                issues.append(
+                    _issue(
+                        "branch.on_success_conflict",
+                        f"step {location!r} has branches and an on_success of"
+                        f" {success_policy.get('type')!r}; two rules would"
+                        " claim where a successful condition goes and the run"
+                        " record could not say which one sent it",
+                        step_id=location,
+                        detail={"onSuccess": success_policy.get("type")},
+                    )
+                )
+        elif step.step_type == "condition" and isinstance(
+            step.config.get("branches"), list
+        ):
+            # An empty list, which normalization deliberately passes through
+            # so that "no branching" stays tellable from "a condition step
+            # dropped on the canvas and not filled in" (spec 1.5).
+            issues.append(
+                _issue(
+                    "branch.empty",
+                    f"step {location!r} has an empty branches list; a"
+                    " condition with no branches has nowhere to send the run",
+                    step_id=location,
+                )
+            )
         if not step_ok:
             # Edge backing for this step is unverifiable; do not stack
             # speculative unbacked/missing issues on a known error.
             unverifiable_steps.add(step.id)
             normalized_policies.append((None, None))
+            step_branch_arms.append(None)
             continue
         normalized_policies.append((success_policy, failure_policy))
+        step_branch_arms.append(arms)
         for attr, policy in (
             ("on_success", success_policy),
             ("on_failure", failure_policy),
@@ -504,8 +610,10 @@ def from_graph(flow: Flow) -> list[dict[str, Any]]:
 
     # --- edge-vs-policy verification (spec section 4 / 6.1 rules 3+4) ----
     entries = [
-        (step.id, policies[0], policies[1])
-        for step, policies in zip(flow.steps, normalized_policies)
+        (step.id, policies[0], policies[1], arms)
+        for step, policies, arms in zip(
+            flow.steps, normalized_policies, step_branch_arms
+        )
     ]
     expected = _derive_edges(entries)
     known_edge_ids = {edge.id for edge in flow.edges}
@@ -538,7 +646,7 @@ def from_graph(flow: Flow) -> list[dict[str, Any]]:
         # Edge-level annotation namespace (spec 3.3 / 6.1 rule 4).
         annotation: dict[str, Any] = {}
         for key in edge.extensions:
-            if key != "codeBridgeLinear":
+            if key not in _EDGE_EXTENSION_KEYS:
                 issues.append(
                     _issue(
                         "linear.flow_extensions_unsupported",
@@ -572,6 +680,66 @@ def from_graph(flow: Flow) -> list[dict[str, Any]]:
                                 detail={"key": key},
                             )
                         )
+
+        # E5 display annotation. Read with the same rule as
+        # ``codeBridgeLinear``: absent is fine, present must not contradict
+        # the arm the derivation produced.
+        branch_annotation: dict[str, Any] = {}
+        raw_branch_annotation = edge.extensions.get("codeBridgeBranch")
+        if raw_branch_annotation is not None:
+            if not isinstance(raw_branch_annotation, dict):
+                issues.append(
+                    _issue(
+                        "linear.edge_meta_mismatch",
+                        f"edge {edge.id!r} codeBridgeBranch annotation must"
+                        " be an object",
+                        edge_id=edge.id,
+                    )
+                )
+            else:
+                branch_annotation = raw_branch_annotation
+                for key in branch_annotation:
+                    if key not in _BRANCH_ANNOTATION_KEYS:
+                        issues.append(
+                            _issue(
+                                "linear.edge_meta_mismatch",
+                                f"edge {edge.id!r} branch annotation key"
+                                f" {key!r} is not derivable from any branch",
+                                edge_id=edge.id,
+                                detail={"key": f"codeBridgeBranch.{key}"},
+                            )
+                        )
+                if edge.kind != "branch":
+                    issues.append(
+                        _issue(
+                            "linear.edge_meta_mismatch",
+                            f"edge {edge.id!r} carries a codeBridgeBranch"
+                            f" annotation but its kind is {edge.kind!r};"
+                            " only a condition's arm is a branch edge",
+                            edge_id=edge.id,
+                            detail={"key": "codeBridgeBranch"},
+                        )
+                    )
+
+        # An arm can only leave a condition step. A "branch" edge from any
+        # other step type is the one branching shape still refused, and it is
+        # named rather than folded into `linear.edge_unbacked` — the author
+        # drew a branch, so the message should be about branches.
+        if edge.kind == "branch":
+            source_type = step_types_by_id.get(edge.from_step_id)
+            if source_type is not None and source_type != "condition":
+                issues.append(
+                    _issue(
+                        "branch.edge_on_non_condition",
+                        f"edge {edge.id!r} is a branch leaving step"
+                        f" {edge.from_step_id!r}, which is a"
+                        f" {source_type!r} step; only a condition step"
+                        " branches",
+                        step_id=edge.from_step_id or None,
+                        edge_id=edge.id,
+                        detail={"fromStepId": edge.from_step_id},
+                    )
+                )
 
         # Legacy flow-level meta for this edge (backward compat, spec 3.3).
         meta = legacy_edge_meta.get(edge.id)
@@ -685,6 +853,13 @@ def from_graph(flow: Flow) -> list[dict[str, Any]]:
         claimed_kind = (
             next(iter(kind_claims)) if len(kind_claims) == 1 else None
         )
+        # `index` is read but never compared: `normalize_workflow` moves a
+        # default branch to the end of the list (spec 1.4), so a canvas that
+        # drew the default first sends an annotation whose index legitimately
+        # disagrees with the re-derived one. `label` and `default` survive
+        # that move, so they are what a contradiction is measured on.
+        claimed_label = branch_annotation.get("label")
+        claimed_default = branch_annotation.get("default")
         chosen = None
         if claims_valid:
             for derived in candidates:
@@ -694,6 +869,17 @@ def from_graph(flow: Flow) -> list[dict[str, Any]]:
                     continue
                 if claimed_kind is not None and derived["kind"] != claimed_kind:
                     continue
+                if claimed_label is not None or claimed_default is not None:
+                    arm = derived["branch"]
+                    if arm is None:
+                        continue
+                    if claimed_label is not None and arm["label"] != claimed_label:
+                        continue
+                    if (
+                        claimed_default is not None
+                        and arm["default"] != claimed_default
+                    ):
+                        continue
                 chosen = derived
                 break
             if chosen is None:
@@ -701,7 +887,9 @@ def from_graph(flow: Flow) -> list[dict[str, Any]]:
                     _issue(
                         "linear.edge_meta_mismatch",
                         f"edge {edge.id!r} annotations (on={claimed_on!r},"
-                        f" via={claimed_via!r}, kind={claimed_kind!r})"
+                        f" via={claimed_via!r}, kind={claimed_kind!r},"
+                        f" label={claimed_label!r},"
+                        f" default={claimed_default!r})"
                         " contradict the edge derived from the step"
                         " policies",
                         edge_id=edge.id,
@@ -710,6 +898,7 @@ def from_graph(flow: Flow) -> list[dict[str, Any]]:
                                 "on": candidates[0]["on"],
                                 "via": candidates[0]["via"],
                                 "kind": candidates[0]["kind"],
+                                "branch": candidates[0]["branch"],
                             }
                         },
                     )
@@ -721,10 +910,15 @@ def from_graph(flow: Flow) -> list[dict[str, Any]]:
     for derived in expected:
         if derived["matched"] or derived["from"] in unverifiable_steps:
             continue
+        requirement = (
+            f"branch {derived['branch']['index']}"
+            if derived["branch"] is not None
+            else "policy"
+        )
         issues.append(
             _issue(
                 "linear.edge_missing",
-                f"step {derived['from']!r} policy requires the"
+                f"step {derived['from']!r} {requirement} requires the"
                 f" {derived['on']} edge {derived['from']} ->"
                 f" {derived['to']}; the graph does not draw it",
                 step_id=derived["from"],

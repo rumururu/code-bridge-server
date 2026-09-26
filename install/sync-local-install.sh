@@ -43,13 +43,11 @@
 #   it probes first and downloads nothing when Chromium is already there.
 #
 # Flow kernel:
-#   The agent-flow-core kernel lives in a separate local repository and is not
-#   on any package index, so requirements.txt cannot name it — a local path
-#   there would break every install on a machine without that checkout (the
-#   public mirror installs from the same file). When the checkout is present
-#   (default ~/VSCodeProject/agent-flow-core, override with
-#   CODE_BRIDGE_FLOW_CORE_DIR) it is pip-installed into the venv as a
-#   NON-editable snapshot; when absent the step logs one line and skips.
+#   The private compiled wheel and manifest are deployed under
+#   server/vendor/agent-flow-core. The verifier selects only macOS ARM64 /
+#   CPython 3.13, checks the approved source commit and SHA-256, installs with
+#   no package index, and executes the compiled topology. Missing or source
+#   kernels fail deployment; a local checkout is never a release fallback.
 #
 # Usage:
 #   ./install/sync-local-install.sh                 # dry run (default)
@@ -272,37 +270,23 @@ sync_requirements() {
 }
 
 # --- agent-flow-core kernel -------------------------------------------------
-# The flow kernel is a separate local git repository, not a package on any
-# index, so requirements.txt cannot name it: a local path there would break
-# every install on a machine without that checkout — the public mirror
-# installs from the same requirements.txt. Shipping the kernel with public
-# installs is a separate decision (G1 follow-up, tarball route); until then
-# this deploy script is the only path that puts it into the venv, and only
-# when the checkout exists on this machine. Anywhere else the step logs one
-# line and skips, which is harmless.
-#
-# The install is deliberately NOT editable (no -e / --editable): a deployment
-# must be a snapshot taken at deploy time. An editable install would point the
-# live server at the kernel repo's working tree, so every half-finished edit
-# there would reach the running server immediately — the exact partial-deploy
-# accident this script exists to prevent for server/ code. Re-running with
-# --apply after a kernel change is how a new version reaches the venv.
+# Release input is a reviewed wheel+manifest pair. There is no checkout lookup,
+# no editable install and no source allowance in this path.
 sync_flow_core() {
-    local kernel_dir="${CODE_BRIDGE_FLOW_CORE_DIR:-$HOME/VSCodeProject/agent-flow-core}"
-    local pip="$INSTALL_DIR/venv/bin/pip"
+    local python="$INSTALL_DIR/venv/bin/python"
+    local installer="$REPO_ROOT/scripts/install_closed_kernel.py"
+    local artifacts="$INSTALL_DIR/vendor/agent-flow-core"
 
-    if [ ! -d "$kernel_dir" ]; then
-        echo "flow kernel checkout not found at $kernel_dir — skipped (expected on machines without it)"
-        return 0
-    fi
+    [ -x "$python" ] || { echo "${RED}venv python not found at $python${NC}" >&2; return 1; }
+    [ -f "$installer" ] || { echo "${RED}kernel verifier not found at $installer${NC}" >&2; return 1; }
+    [ -d "$artifacts" ] || { echo "${RED}kernel artifacts missing at $artifacts${NC}" >&2; return 1; }
 
     if [ "$APPLY" -ne 1 ]; then
-        echo "  would run: $pip install --quiet $kernel_dir  (non-editable snapshot)"
+        echo "  would run: $python $installer $artifacts"
         return 0
     fi
-    [ -x "$pip" ] || { echo "${RED}venv pip not found at $pip — install the flow kernel manually${NC}" >&2; return 1; }
-    "$pip" install --quiet "$kernel_dir"
-    echo "${GREEN}flow kernel installed into venv from $kernel_dir${NC}"
+    "$python" "$installer" "$artifacts"
+    echo "${GREEN}verified compiled flow kernel installed into venv${NC}"
 }
 
 echo "${CYAN}--- dependencies${NC}"
@@ -314,11 +298,10 @@ fi
 echo ""
 
 echo "${CYAN}--- flow kernel${NC}"
-if [ "$SKIP_PIP" -eq 1 ]; then
-    echo "skipped (--no-pip)"
-else
-    sync_flow_core
-fi
+# --no-pip suppresses public dependency resolution only. The reviewed wheel is
+# an offline release input, and allowing this step to skip it would permit a
+# stale, missing, or source kernel into an otherwise successful deployment.
+sync_flow_core
 echo ""
 
 # The step this script was missing. See sync_browser_runtime above for why a

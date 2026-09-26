@@ -13,7 +13,8 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from agent import agent_store, configurator
+from agent import agent_store
+from code_bridge_core import configurator
 from agent.tool_artifacts import ARTIFACT_ROOT
 from approvals import approval_store
 from approvals.approval_service import decide_approval
@@ -636,7 +637,7 @@ class AgentRoutesTest(unittest.TestCase):
             "READY_TO_COMMIT"
         )
 
-        async def fake_turn(_session, *, timeout=120.0):
+        async def fake_turn(_session, *, timeout=120.0, job=None):
             return raw_response
 
         with patch("routes.agents.run_configurator_turn", fake_turn):

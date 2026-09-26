@@ -16,7 +16,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from agent.step_cursor import StepCursor, workflow_step_index
+from code_bridge_core.step_cursor import StepCursor, workflow_step_index
 
 
 def _steps(first_input=None, *, first_status="completed"):

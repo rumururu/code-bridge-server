@@ -362,7 +362,7 @@ def _teach_session_about_script(
 ) -> AgentDraft | None:
     if not script:
         return None
-    from agent.configurator import get_builder_session
+    from code_bridge_core.configurator import get_builder_session
 
     session = get_builder_session(proposal.session_id)
     if session is None:

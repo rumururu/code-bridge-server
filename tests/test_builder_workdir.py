@@ -32,7 +32,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 from agent.agent_models import TaskDraft  # noqa: E402
-from agent.configurator import (  # noqa: E402
+from code_bridge_core.configurator import (  # noqa: E402
     build_configurator_system_prompt,
     create_builder_session,
     resolve_task_draft_workdir,

@@ -39,6 +39,37 @@ def _extract_usage_percent_from_text(text: str) -> float | None:
         return None
 
     normalized = _strip_ansi(text)
+
+    # The CLI states the limits on their own labelled lines:
+    #   Current session: 63% used · resets ...
+    #   Current week (all models): 51% used · resets ...
+    #   Current week (Fable): 53% used · resets ...
+    # and then explains the usage in sentences that are full of other
+    # percentages ("91% of your usage was at >150k context"). The generic
+    # patterns below used to run first and picked that 91 — a share of
+    # requests, not a share of the limit. The weekly all-models line is the
+    # number this function is for; a per-model week line is the next best, and
+    # only a line that says "% used" is ever trusted before falling back.
+    labelled_patterns = (
+        r"current\s+week\s*\(\s*all\s+models\s*\)[^\n]*?(\d{1,3}(?:\.\d+)?)\s*%\s*used",
+        r"current\s+week[^\n]*?(\d{1,3}(?:\.\d+)?)\s*%\s*used",
+        r"week[^\n]*?(\d{1,3}(?:\.\d+)?)\s*%\s*used",
+    )
+    for pattern in labelled_patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if match is not None:
+            try:
+                return round(float(match.group(1)), 2)
+            except (TypeError, ValueError):
+                pass
+
+    # Everything below is the older, looser matching, kept for CLI versions
+    # that do not print labelled lines. Explanatory "N% of your usage ..."
+    # sentences are removed first so they can never be mistaken for a limit.
+    normalized = "\n".join(
+        line for line in normalized.splitlines()
+        if not re.search(r"%\s+of\s+your\s+usage", line, flags=re.IGNORECASE)
+    )
     prioritized_patterns = (
         r"(?:used|usage|weekly|limit)[^\n]{0,80}?(\d{1,3}(?:\.\d+)?)\s*%",
         r"(\d{1,3}(?:\.\d+)?)\s*%[^\n]{0,80}?(?:weekly|limit|usage)",

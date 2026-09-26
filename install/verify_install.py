@@ -7,11 +7,19 @@ Compares the repository sources against the deployed install directory
   1. MISSING FROM INSTALL   — source file has no counterpart deployed
   2. HASH MISMATCH          — deployed file differs from the source
   3. PRESENT ONLY IN INSTALL — orphan candidates (reported, never removed)
+  4. CANVAS BUNDLE FRESHNESS — is the committed bundle built from the
+     kernel source we have? (see canvas_bundle_freshness.py)
 
 This script NEVER writes, moves or deletes anything. It only reads and
-hashes files. Sections 1 and 2 set a non-zero exit status; section 3 is
+hashes files. Sections 1, 2 and 4 set a non-zero exit status; section 3 is
 informational because the install directory legitimately accumulates
 leftovers from the old flat layout, and deleting them is a human decision.
+
+Section 4 exists because sections 1 and 2 cannot see the problem it catches:
+they compare repository bytes to install bytes, and a canvas bundle that is
+weeks behind its source is byte-identical on both sides. The deploy passes
+and the screen is old. That check needs the flow kernel checkout, and says
+so explicitly when it is absent rather than passing.
 
 This module is also the single source of truth for the transfer rules used
 by ``sync-local-install.sh``: that script obtains its rsync filters from
@@ -31,6 +39,11 @@ import hashlib
 import os
 import sys
 from pathlib import Path
+
+# Sibling script, not a package: `install/` is deliberately never deployed
+# (it is in PROTECTED_TARGETS below), so there is nothing to import normally.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import canvas_bundle_freshness  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Transfer rules
@@ -76,6 +89,26 @@ SOURCE_EXCLUDES: tuple[str, ...] = (
     # deployed .server.pid would point the launcher's liveness check at a pid
     # that means nothing on that host. It is runtime state, never source.
     "/.server.pid",
+    # Frontend build leftovers under server/webui/. Neither exists there today,
+    # and that is exactly why they are listed: server/webui/canvas/ is a build
+    # artifact copied in from another repository by hand (T-I1-07, see
+    # docs/guide/CANVAS_BUNDLE.md), so the accident these guard against is one
+    # careless `cp -r` away. A copied node_modules/ is tens of thousands of
+    # files rsynced onto every deployment; a copied .map is the bulk of the
+    # payload (in the kernel's sibling build the .map files are most of a 25MB
+    # dist/) and it hands a readable copy of the source to anyone who opens the
+    # page.
+    #
+    # Anchored to /webui/ rather than written as bare "node_modules/" and
+    # "*.map", and that is not fussiness. server/scrcpy/ is a bundled node app
+    # that ships WITH its dependencies, opt-in via --with-scrcpy, and this list
+    # has no re-include mechanism: a bare "node_modules/" would strip every
+    # dependency out of that opt-in transfer and deploy an unrunnable app with
+    # no error anywhere. Excluding what should never exist is free; excluding
+    # what something needs is a silent breakage of exactly the kind this ticket
+    # exists to prevent.
+    "/webui/*node_modules/*",
+    "/webui/*.map",
 )
 
 # scrcpy/ is a bundled node app: large, rarely changed, opt-in via --with-scrcpy.
@@ -279,12 +312,19 @@ def main(argv: list[str] | None = None) -> int:
             print("    (none)")
         print()
 
+    canvas = canvas_bundle_freshness.check(repo_root)
+    if not args.quiet:
+        print("[4] CANVAS BUNDLE FRESHNESS")
+        for line in canvas.report().splitlines():
+            print(f"    {line}")
+        print()
+
     drift = len(missing) + len(mismatched)
     print(
         f"summary: {len(missing)} missing, {len(mismatched)} mismatched, "
-        f"{len(orphans)} orphan candidate(s)"
+        f"{len(orphans)} orphan candidate(s), canvas bundle {canvas.status}"
     )
-    if drift or (args.strict and orphans):
+    if drift or canvas.failed or (args.strict and orphans):
         return 1
     return 0
 

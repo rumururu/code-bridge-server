@@ -5,7 +5,7 @@ Why this file exists
 
 Code Bridge's safety model for agent workflows is deliberately migration-free:
 `agents.flow_json` is stored exactly as the author saved it, and
-`normalize_workflow` (agent/workflow_v2.py) re-normalizes that stored shape
+`normalize_workflow` (code_bridge_core/workflow_v2.py) re-normalizes that stored shape
 from scratch on every task run — nothing ever writes the normalized shape back
 (see the `_UNRESTRICTED_LEGACY_FIELDS` comment, workflow_v2.py:106-124, and
 `_workflow_steps_for_task` in task_orchestrator.py). That means the *stored*
@@ -52,7 +52,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from agent.workflow_v2 import normalize_workflow  # noqa: E402
+from code_bridge_core.workflow_v2 import normalize_workflow  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

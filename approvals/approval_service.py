@@ -99,7 +99,14 @@ def expire_stale_approvals() -> list[dict[str, Any]]:
     rest of the sweep.
     """
     try:
-        stale = get_approval_store().list_expired_pending()
+        store = get_approval_store()
+        stale = store.list_expired_pending()
+        seconds = approval_expiry_seconds()
+        if seconds > 0:
+            # A row with no deadline of its own gets the default one, counted
+            # from its creation — otherwise it is pending forever.
+            cutoff = (datetime.now(tz=timezone.utc) - timedelta(seconds=seconds)).isoformat()
+            stale.extend(store.list_pending_without_deadline(created_before=cutoff))
     except Exception:
         logger.exception("could not list expired approvals")
         return []
@@ -292,6 +299,16 @@ def decide_approval(
             "approval": request,
         }
 
+    reply_override = (constraints or {}).get("reply_body")
+    if reply_override is not None and (
+        request.get("operation") != "feedback.reply.send"
+        or not decision.startswith("approve")
+        or not isinstance(reply_override, str)
+        or not reply_override.strip()
+        or len(reply_override) > 20000
+    ):
+        return {"error": "Invalid feedback reply override", "approval": request}
+
     result = store.create_decision(
         approval_id=approval_id,
         decision=decision,
@@ -334,6 +351,17 @@ def decide_approval(
     payload: dict[str, Any] = {"approval": request, "decision": result}
     if standing_rule is not None:
         payload["rule"] = standing_rule
+    # A device permission a person just approved is applied here, on the
+    # decision path every client shares (agent/device_permissions.py).
+    try:
+        from agent.device_permissions import on_approval_decided
+
+        applied = on_approval_decided(request, decision)
+    except Exception:
+        logger.exception("device permission: applying the approved request failed")
+        applied = None
+    if applied is not None:
+        payload["device_permission"] = applied
     return payload
 
 

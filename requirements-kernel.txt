@@ -1,0 +1,15 @@
+# agent-flow-core 0.1.0 is a mandatory compiled deployment dependency.
+#
+# It is intentionally not a normal pip requirement: the private kernel is not
+# published, and its wheel is tied to macOS ARM64 + CPython 3.13. The product
+# build input lives in vendor/agent-flow-core beside its generated manifest.
+#
+# Release/local deployment must use the verifier, which selects the exact
+# platform/ABI target, pins source commit 017ca72f1da20fd6416e8fb92b34c267c709f44c,
+# checks the wheel SHA-256 and contents, installs without an index, and executes
+# real topology code from the compiled extension:
+#
+#   python scripts/install_closed_kernel.py server/vendor/agent-flow-core
+#
+# A source checkout or editable install remains valid for explicit development
+# work, but scripts/build_desktop_server_app.py refuses it for packaging.

@@ -154,6 +154,38 @@ class ApprovalStore:
             if not is_request_expired(_row_to_request(row))
         ]
 
+    def list_pending_without_deadline(self, *, created_before: str) -> list[dict[str, Any]]:
+        """Pending rows that carry no ``expires_at`` and predate ``created_before``.
+
+        Rows written before approvals had deadlines (or while expiry was
+        switched off) have ``expires_at = NULL``, and :meth:`list_expired_pending`
+        never sees them: one such row — an agent asking to read ``~/.ssh/id_rsa``
+        on 2026-08-16, for a run that no longer exists — sat in the pending list
+        for eighteen days, nagging the dashboard that "its schedule skips until
+        answered". The sweep reads these through the default deadline instead.
+
+        Both sides go through SQLite's ``datetime()`` because they are not
+        written in the same format: ``created_at`` defaults to
+        ``CURRENT_TIMESTAMP`` (``2026-09-15 23:19:32``) while the cutoff is a
+        Python ISO string (``2026-09-15T00:00:05+00:00``). Compared as text,
+        the space sorts before the ``T``, so every row created on the cutoff's
+        calendar day read as older than it regardless of the hour — a request
+        lived until the next UTC midnight instead of for the default 24 hours.
+        One filed at 23:19 was expired 41 minutes later, and nine feedback
+        replies were dropped that way before anyone saw their cards.
+        """
+        with get_db_connection(use_row_factory=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM approval_requests
+                WHERE status = 'pending' AND expires_at IS NULL
+                  AND datetime(created_at) < datetime(?)
+                ORDER BY datetime(created_at) ASC
+                """,
+                (created_before,),
+            ).fetchall()
+        return [_row_to_request(row) for row in rows]
+
     def list_expired_pending(self) -> list[dict[str, Any]]:
         """Pending rows whose ``expires_at`` has already passed.
 
@@ -231,6 +263,20 @@ class ApprovalStore:
             )
             conn.commit()
         return self.get_decision(decision_id)
+
+    def get_latest_decision(self, approval_id: str) -> dict[str, Any] | None:
+        """The most recent decision recorded against ``approval_id``, if any."""
+        with get_db_connection(use_row_factory=True) as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM approval_decisions
+                WHERE approval_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (approval_id,),
+            ).fetchone()
+        return _row_to_decision(row) if row else None
 
     def get_decision(self, decision_id: str) -> dict[str, Any] | None:
         with get_db_connection(use_row_factory=True) as conn:

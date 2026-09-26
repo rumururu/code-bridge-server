@@ -41,6 +41,11 @@ _MANAGED_SCRIPTS_DIR = runtime_dir(
     "generated_scripts", Path.home() / ".code-bridge" / "generated_scripts"
 )
 
+# How long the model gets to write one script. Matches the builder's own
+# reading budget in spirit: long enough for a real draft, short enough that a
+# wedged provider does not hold the request open.
+_SCRIPT_DRAFT_TIMEOUT_SECONDS = 180.0
+
 _SCRIPT_PROMPT = """Write a single {interpreter} script for this job:
 
 {intent}
@@ -51,6 +56,11 @@ Rules:
 - `set -euo pipefail` near the top unless the job genuinely needs to continue past errors.
 - Exit non-zero with a clear message on stderr when the job fails — the exit code and stderr are what a later step reads to diagnose it.
 - Do not invent paths, device ids or credentials. Take them as arguments ($1, $2, ...) or environment variables, and fail loudly with usage if they are missing.
+- Declare EVERY argument in a machine-readable block just under the shebang, one line each, exactly:
+    # @param NAME required <one line saying what it is>
+    # @param NAME optional <one line saying what it is>
+  This is read by the server, not by a person: a `usage()` message is prose and cannot be. An argument you take and do not declare here is an argument nobody will be asked for, and the scheduled run stops in the middle of the night waiting for it.
+- Only take an argument the job genuinely cannot do without. This script is run unattended, and every required argument is one more thing a person has to be asked for before it can be scheduled at all.
 - No destructive commands (rm -rf, disk formatting, killing unrelated processes).
 """
 
@@ -115,6 +125,13 @@ async def register_script(body: ScriptRegister) -> dict[str, Any]:
             description=body.description,
             interpreter=body.interpreter,
             default_args=body.default_args,
+            # None here is "I am not stating an interface", not "there is
+            # none": the store then reads the script's own `@param` block.
+            parameters=(
+                None
+                if body.parameters is None
+                else [item.model_dump() for item in body.parameters]
+            ),
             timeout_seconds=body.timeout_seconds,
             created_by=body.created_by,
         )
@@ -169,8 +186,11 @@ async def draft_script(body: ScriptDraftRequest) -> dict[str, Any]:
         "script-writer", str(_MANAGED_SCRIPTS_DIR), selection
     )
     try:
-        raw = await asyncio.wait_for(
-            _collect_llm_response_text(llm_session, prompt), timeout=180.0
+        # The reader owns its own deadline: it has to answer any tool call the
+        # script writer makes along the way, and an outer `wait_for` would kill
+        # the turn mid-answer instead of letting it refuse and carry on.
+        raw = await _collect_llm_response_text(
+            llm_session, prompt, timeout=_SCRIPT_DRAFT_TIMEOUT_SECONDS
         )
     except asyncio.TimeoutError as exc:
         with suppress(Exception):

@@ -283,3 +283,83 @@ class PairedAccountTokenRefreshTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PermanentRefreshRejectionTest(unittest.IsolatedAsyncioTestCase):
+    """A refresh token securetoken has rejected for good is not asked again.
+
+    One live account (an Apple private-relay user that no longer exists)
+    answered ``USER_NOT_FOUND`` on every heartbeat and every start, an ERROR
+    pair each time, for weeks. The answer never changes; the log should not
+    keep changing either.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.storage = Path(self._tmp.name) / "paired_accounts.json"
+        self.manager = pa.PairedAccountsManager(
+            storage_path=self.storage,
+            firebase_config={"projectId": PROJECT, "apiKey": API_KEY},
+        )
+        self.manager.add_or_update_account("uid-gone", "gone@example.com", token_expiring_in(-60), "r-gone")
+
+    def _securetoken(self, status_code, body):
+        response = unittest.mock.MagicMock()
+        response.status_code = status_code
+        response.json.return_value = body
+        response.text = str(body)
+        client = unittest.mock.MagicMock()
+        client.post = AsyncMock(return_value=response)
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        return client
+
+    async def test_user_not_found_is_remembered_and_not_retried(self):
+        client = self._securetoken(400, {"error": {"code": 400, "message": "USER_NOT_FOUND", "status": "INVALID_ARGUMENT"}})
+        with patch.object(pa.httpx, "AsyncClient", return_value=client):
+            first = await self.manager.refresh_account_token("uid-gone", API_KEY)
+            second = await self.manager.refresh_account_token("uid-gone", API_KEY)
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(client.post.await_count, 1, "the second call must not ask securetoken again")
+        account = self.manager.get_account("uid-gone")
+        self.assertEqual(account.refresh_rejected, "USER_NOT_FOUND")
+        self.assertIsNotNone(account.refresh_rejected_at)
+
+    async def test_the_rejection_survives_a_restart(self):
+        client = self._securetoken(400, {"error": {"message": "USER_DISABLED"}})
+        with patch.object(pa.httpx, "AsyncClient", return_value=client):
+            await self.manager.refresh_account_token("uid-gone", API_KEY)
+        reloaded = pa.PairedAccountsManager(storage_path=self.storage, firebase_config={"projectId": PROJECT, "apiKey": API_KEY})
+        self.assertEqual(reloaded.get_account("uid-gone").refresh_rejected, "USER_DISABLED")
+
+    async def test_a_transient_failure_is_still_retried(self):
+        client = self._securetoken(503, {"error": {"message": "Backend Error"}})
+        with patch.object(pa.httpx, "AsyncClient", return_value=client):
+            await self.manager.refresh_account_token("uid-gone", API_KEY)
+            await self.manager.refresh_account_token("uid-gone", API_KEY)
+        self.assertEqual(client.post.await_count, 2)
+        self.assertIsNone(self.manager.get_account("uid-gone").refresh_rejected)
+
+    async def test_a_re_pair_clears_the_rejection(self):
+        client = self._securetoken(400, {"error": {"message": "USER_NOT_FOUND"}})
+        with patch.object(pa.httpx, "AsyncClient", return_value=client):
+            await self.manager.refresh_account_token("uid-gone", API_KEY)
+        self.manager.add_or_update_account("uid-gone", "gone@example.com", token_expiring_in(3600), "r-new")
+        self.assertIsNone(self.manager.get_account("uid-gone").refresh_rejected)
+
+    async def test_a_rejected_account_is_skipped_by_the_url_update_without_a_warning(self):
+        client = self._securetoken(400, {"error": {"message": "USER_NOT_FOUND"}})
+        with patch.object(pa.httpx, "AsyncClient", return_value=client):
+            await self.manager.refresh_account_token("uid-gone", API_KEY)
+        register = AsyncMock(return_value=True)
+        with patch.object(pa.device_registration, "register_device", new=register), \
+             self.assertNoLogs(pa.logger, level="WARNING"):
+            results = await self.manager.update_url_for_all_accounts(
+                project_id=PROJECT, server_id=SERVER_ID, api_key=API_KEY,
+                tunnel_url="https://t", local_url="http://l",
+            )
+        self.assertEqual(results, {"uid-gone": False})
+        register.assert_not_awaited()
+        self.assertEqual(client.post.await_count, 1)

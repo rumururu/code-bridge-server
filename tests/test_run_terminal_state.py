@@ -187,7 +187,7 @@ class ShellFailureEndsTheRunTest(_RunTerminalStateTestBase):
 
     def test_the_default_policy_parks_the_run_rather_than_wedging_it(self):
         # A step written with no `on_failure` at all normalizes to `ask_user`
-        # (agent/workflow_v2.py::normalize_failure_policy), which is a resting
+        # (code_bridge_core/workflow_v2.py::normalize_failure_policy), which is a resting
         # place, not a terminal one — deliberately, because the common case is
         # a human who can unstick it. What must never happen is the third
         # option: still `running`, driven by nobody. So this asserts the two

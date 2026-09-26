@@ -10,7 +10,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from agent.workflow_v2 import (  # noqa: E402
+from code_bridge_core.workflow_v2 import (  # noqa: E402
     WorkflowNormalizationError,
     normalize_failure_policy,
     normalize_workflow,

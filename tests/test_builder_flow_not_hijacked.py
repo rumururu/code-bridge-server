@@ -46,7 +46,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 from agent import agent_store, schedule_store  # noqa: E402
-from agent.configurator import create_builder_session  # noqa: E402
+from code_bridge_core.configurator import create_builder_session  # noqa: E402
 from core import database  # noqa: E402
 from routes import agents  # noqa: E402
 from routes.deps import verify_api_key  # noqa: E402
@@ -149,7 +149,7 @@ class BuilderFlowNotHijackedTest(unittest.TestCase):
         # Fault 2 is only dangerous because the injected tool's own examples
         # are user-visible text that later gets re-read. Even where the tool is
         # legitimately injected, its examples must stay neutral.
-        from agent.configurator import _ensure_playwright_tool  # noqa: PLC0415
+        from code_bridge_core.configurator import _ensure_playwright_tool  # noqa: PLC0415
         from agent.agent_models import AgentDraft  # noqa: PLC0415
 
         tool = _ensure_playwright_tool(AgentDraft()).tools[0]
@@ -162,7 +162,7 @@ class BuilderFlowNotHijackedTest(unittest.TestCase):
         # Fault 3: `_raw_intent_text` is what the keyword classifiers see. A
         # tool the pass itself injected must not appear there, or the pass
         # confirms its own guess on the next call.
-        from agent.configurator import _raw_intent_text  # noqa: PLC0415
+        from code_bridge_core.configurator import _raw_intent_text  # noqa: PLC0415
         from agent.agent_models import AgentDraft, AgentToolDraft  # noqa: PLC0415
         from agent.agent_models import MCPCategory, MCPRiskTier  # noqa: PLC0415
 
@@ -191,7 +191,7 @@ class BuilderFlowNotHijackedTest(unittest.TestCase):
         # the most Naver-cafe wording there is and the flow comes back exactly
         # as it went in -- including when it is empty, which is the case the
         # templates used to fill in.
-        from agent.configurator import enrich_draft_from_user_intent  # noqa: PLC0415
+        from code_bridge_core.configurator import enrich_draft_from_user_intent  # noqa: PLC0415
 
         session = self._converse()
         approved = session.current_draft

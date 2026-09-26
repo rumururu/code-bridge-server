@@ -604,7 +604,7 @@ class CommitGateStaysHonestTest(unittest.TestCase):
     FLOW = [{"id": "s1", "type": "browser_action"}]
 
     def _findings(self, readiness):
-        from agent.workflow_contract import _check_browser_runtime
+        from code_bridge_core.workflow_contract import _check_browser_runtime
 
         return _check_browser_runtime(self.FLOW, readiness)
 
@@ -640,7 +640,7 @@ class CommitGateStaysHonestTest(unittest.TestCase):
         # `commit_readiness_views.dart` renders a copyable install command
         # whenever one is present, so carrying it for a setting problem would
         # put a wrong instruction on the phone.
-        from agent.workflow_contract import ContractReport
+        from code_bridge_core.workflow_contract import ContractReport
         from routes.agents import _contract_readiness_fact
 
         findings = self._findings(

@@ -36,6 +36,9 @@ from .files import router as files_router
 from .devices import router as devices_router
 from .scrcpy_proxy import router as scrcpy_proxy_router
 from .secrets import router as secrets_router
+from .canvas_static import router as canvas_static_router
+from .canvas_api import router as canvas_api_router
+from .canvas_api import session_router as canvas_session_router
 
 
 # Routers shared by both apps (Dashboard and API). Ordered so that the
@@ -76,6 +79,18 @@ _SHARED_ROUTERS = (
     # approval that registers one is dashboard-only, like every other write on
     # the script registry (see routes/dashboard_agents.py).
     script_proposals_router,
+    # The workflow canvas: a credential-free static bundle under ``/canvas/``
+    # and the four-route ``/api/canvas`` front it talks to. Shared rather than
+    # dashboard-only because the requirement is a phone, which reaches this
+    # server through the tunnel. It does not belong to the "local-management
+    # surfaces" the tuple below keeps off that listener: the bundle carries no
+    # authority, and the API front cannot be reached without first presenting
+    # a paired API key to ``/api/agent/canvas/session``. Moving these three
+    # lines into ``_DASHBOARD_ONLY_ROUTERS`` is the whole of reverting that
+    # judgement — see tests/test_canvas_static_routes.py.
+    canvas_static_router,
+    canvas_session_router,
+    canvas_api_router,
 )
 
 # Routers that must NEVER be reachable on the tunnel-exposed API listener,

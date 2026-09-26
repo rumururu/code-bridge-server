@@ -36,7 +36,7 @@ from agent.capability_registry import (  # noqa: E402
     detected_mcp_server_configs,
     verify_declared_mcp_ids,
 )
-from agent.configurator import (  # noqa: E402
+from code_bridge_core.configurator import (  # noqa: E402
     _drop_unverifiable_tools,
     create_builder_session,
 )

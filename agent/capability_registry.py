@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any
 
 from llm.llm_settings import get_llm_options_snapshot
+from system.mcp_registry import (
+    REGISTRY_LOCATION as MCP_REGISTRY_LOCATION,
+    REGISTRY_ORIGIN as MCP_REGISTRY_ORIGIN,
+)
 
 from .agent_store import get_agent_store
 from .browser_action_adapter import (
@@ -165,7 +169,12 @@ class ToolVerification:
 
 
 def _mcp_config_paths() -> list[tuple[Path, str]]:
-    """Config files that declare MCP servers, least specific first."""
+    """Config files that declare MCP servers, least specific first.
+
+    Both belong to *other* tools — `~/.claude.json` is the Claude Code CLI's
+    own settings file. Servers a Code Bridge user registered in the app itself
+    do not live in a file at all; see :func:`_code_bridge_registered_servers`.
+    """
     paths: list[tuple[Path, str]] = []
     try:
         paths.append((Path.home() / ".claude.json", "claude_cli_config"))
@@ -176,6 +185,27 @@ def _mcp_config_paths() -> list[tuple[Path, str]]:
     except Exception:  # pragma: no cover - cwd deleted underneath us
         pass
     return paths
+
+
+def _code_bridge_registered_servers() -> dict[str, Any]:
+    """MCP servers registered through Code Bridge itself.
+
+    Reading these must never be the thing that breaks detection — every agent
+    run and every catalog refresh comes through here — so a failure degrades to
+    "none registered" exactly the way an unreadable config file does.
+    """
+    try:
+        from system.mcp_registry import list_registered_servers
+
+        return list_registered_servers()
+    except Exception:  # noqa: BLE001 - detection degrades, it does not crash
+        logger.warning("Cannot read the Code Bridge MCP registry", exc_info=True)
+        return {}
+
+
+def _mcp_lookup_locations() -> list[str]:
+    """Every place a server could have been declared, for "we looked in …"."""
+    return [str(path) for path, _origin in _mcp_config_paths()] + [MCP_REGISTRY_LOCATION]
 
 
 def _read_mcp_servers(path: Path) -> dict[str, Any]:
@@ -216,9 +246,15 @@ def _mcp_catalog_entry(
     name: str,
     config: Any,
     *,
-    path: Path,
+    path: Path | None,
     origin: str,
 ) -> dict[str, Any]:
+    """One catalog row. ``path`` is ``None`` for a Code Bridge registration.
+
+    Nothing here reads ``env`` or ``headers``: a catalog row is written to the
+    database and rendered in pickers, and those two fields are where an MCP
+    entry's credentials live.
+    """
     settings = config if isinstance(config, dict) else {}
     command = settings.get("command")
     url = settings.get("url")
@@ -226,34 +262,52 @@ def _mcp_catalog_entry(
     transport = settings.get("type")
     if not isinstance(transport, str) or not transport:
         transport = "http" if isinstance(url, str) and url else "stdio" if command else None
+    if path is not None:
+        description = f'MCP server "{name}" configured on this machine ({path.name}).'
+    else:
+        description = f'MCP server "{name}" registered in Code Bridge.'
     return {
         "type": "mcp_server",
         "name": name,
         "status": "available",
-        "description": f'MCP server "{name}" configured on this machine ({path.name}).',
+        "description": description,
         "permission_level": "approval",
         "metadata": {
             "command": command if isinstance(command, str) else None,
             "args": [str(arg) for arg in args] if isinstance(args, list) else [],
             "url": url if isinstance(url, str) else None,
             "transport": transport,
-            "config_path": str(path),
+            "config_path": str(path) if path is not None else None,
             "config_origin": origin,
             "detected": True,
         },
     }
 
 
-def _merged_mcp_servers() -> dict[str, tuple[Any, Path, str]]:
-    """Every MCP server declared in a local config, most specific last.
+def _merged_mcp_servers() -> dict[str, tuple[Any, Path | None, str]]:
+    """Every MCP server this machine knows about, most specific last.
 
-    One read of the config files, shared by the catalog entries, the
-    declaration check, and the SDK launch configs, so the three can never
-    disagree about which servers exist.
+    One read, shared by the catalog entries, the declaration check, and the SDK
+    launch configs, so the three can never disagree about which servers exist.
+
+    Order is precedence, and Code Bridge's own registry comes last on purpose.
+    The two files ahead of it belong to other tools — `~/.claude.json` is the
+    Claude Code CLI's settings — and were written for those tools' own reasons.
+    The registry holds what the user of *this* product typed into *this*
+    product, naming the same server, which is as explicit as an instruction
+    gets. If the file won instead, registering a server in the app to correct a
+    stale CLI entry would appear to succeed and change nothing, with no surface
+    anywhere saying it had been overruled — a silent no-op, which is the same
+    class of failure as the fabricated catalog row this module was written to
+    end. An entry a user wants to stop overriding can be removed.
     """
-    merged: dict[str, tuple[Any, Path, str]] = {}
-    for path, origin in _mcp_config_paths():
-        for name, config in _read_mcp_servers(path).items():
+    merged: dict[str, tuple[Any, Path | None, str]] = {}
+    sources: list[tuple[dict[str, Any], Path | None, str]] = [
+        (_read_mcp_servers(path), path, origin) for path, origin in _mcp_config_paths()
+    ]
+    sources.append((_code_bridge_registered_servers(), None, MCP_REGISTRY_ORIGIN))
+    for servers, path, origin in sources:
+        for name, config in servers.items():
             if name == BROWSER_RUNTIME_CAPABILITY_NAME:
                 # The name is taken by the built-in runtime entry below; a
                 # configured server of the same name would silently change
@@ -262,7 +316,7 @@ def _merged_mcp_servers() -> dict[str, tuple[Any, Path, str]]:
                     "Ignoring MCP server named %r in %s: the name is reserved "
                     "for the built-in browser runtime capability.",
                     name,
-                    path,
+                    path if path is not None else MCP_REGISTRY_LOCATION,
                 )
                 continue
             merged[name] = (config, path, origin)
@@ -344,6 +398,28 @@ def detected_mcp_server_configs() -> dict[str, dict[str, Any]]:
     return configs
 
 
+def detected_mcp_server_names() -> list[dict[str, str]]:
+    """The servers an ``mcp_tool`` step may name, as picker rows.
+
+    Exactly the set ``task_orchestrator._mcp_step_blocker`` accepts — the
+    same merge, the same launchable filter as
+    :func:`detected_mcp_server_configs` — because a dropdown offering a server
+    the gate then parks on is worse than the free-text box it replaced.
+    Names and origins only: the launch configs beside these names carry
+    ``env`` and ``headers``, and this list is published on API responses.
+    ``id`` duplicates ``name`` on purpose — an MCP server's id *is* its name,
+    and picker adapters (flow-canvas ``readOptionChoices``, the dashboard's
+    value/label rule) key the stored value off ``id`` while deliberately
+    skipping id-less rows.
+    """
+    rows: list[dict[str, str]] = []
+    for name, (config, _path, origin) in sorted(_merged_mcp_servers().items()):
+        if _sdk_mcp_server_config(config) is None:
+            continue
+        rows.append({"id": name, "name": name, "origin": origin})
+    return rows
+
+
 def verify_declared_mcp_ids(mcp_ids: Iterable[str]) -> list[ToolVerification]:
     """Check declared tool ids against what actually exists on this machine.
 
@@ -385,18 +461,21 @@ def verify_declared_mcp_ids(mcp_ids: Iterable[str]) -> list[ToolVerification]:
         if entry is not None:
             metadata = entry.get("metadata") or {}
             config_path = metadata.get("config_path")
+            # A Code Bridge registration has no file behind it, so the sentence
+            # names the registry instead of printing "configured in None".
+            location = str(config_path) if config_path else MCP_REGISTRY_LOCATION
             results.append(
                 ToolVerification(
                     mcp_id=mcp_id,
                     verified=True,
                     source="mcp_config",
-                    detail=f'MCP server "{mcp_id}" is configured in {config_path}.',
+                    detail=f'MCP server "{mcp_id}" is configured in {location}.',
                     config_path=str(config_path) if config_path else None,
                 )
             )
             continue
 
-        looked_in = ", ".join(str(path) for path, _origin in _mcp_config_paths()) or "no MCP config file"
+        looked_in = ", ".join(_mcp_lookup_locations()) or "no MCP config file"
         results.append(
             ToolVerification(
                 mcp_id=mcp_id,

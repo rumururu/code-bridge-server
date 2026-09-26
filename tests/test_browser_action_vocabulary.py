@@ -48,7 +48,7 @@ def _dispatched_action_types() -> set[str]:
 
 class VocabularyMatchesTheAdapterTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.documented = {name for name, _ in BROWSER_ACTION_VOCABULARY}
+        self.documented = {action.type for action in BROWSER_ACTION_VOCABULARY}
         self.dispatched = _dispatched_action_types()
 
     def test_the_loop_was_found(self) -> None:
@@ -105,7 +105,7 @@ class TheBlockTellsTheAuthorWhatMattersTest(unittest.TestCase):
 
 class TheConfiguratorPromptCarriesItTest(unittest.TestCase):
     def test_the_marker_is_replaced_not_left_in_the_prompt(self) -> None:
-        from agent.configurator import build_configurator_system_prompt
+        from code_bridge_core.configurator import build_configurator_system_prompt
 
         prompt = build_configurator_system_prompt()
         self.assertNotIn("{{BROWSER_ACTION_VOCABULARY_BLOCK}}", prompt)

@@ -35,9 +35,10 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from agent import agent_store, configurator, script_store  # noqa: E402
+from agent import agent_store, script_store
+from code_bridge_core import configurator  # noqa: E402
 from agent.agent_models import WorkflowStep  # noqa: E402
-from agent.workflow_v2 import ALLOWED_STEP_TYPES, normalize_workflow_step  # noqa: E402
+from code_bridge_core.workflow_v2 import ALLOWED_STEP_TYPES, normalize_workflow_step  # noqa: E402
 from core import database  # noqa: E402
 from routes import agents, dashboard_agents, script_proposals, scripts  # noqa: E402
 from routes.deps import verify_api_key  # noqa: E402
@@ -154,7 +155,13 @@ class ScriptProposalTest(unittest.TestCase):
         async def fake_configurator_turn(_session, *, timeout=120.0):
             return CONFIGURATOR_TURN_WITH_SCRIPT_REQUEST
 
-        async def fake_script_writer(_llm_session, _prompt):
+        # Keyword-for-keyword with the real reader. A stand-in written to fit
+        # the *call site* rather than the function is how a required `timeout`
+        # reached production missing: these tests stayed green while the live
+        # proposal card read "Script drafting failed: ... missing 1 required
+        # keyword-only argument: 'timeout'".
+        async def fake_script_writer(_llm_session, _prompt, *, timeout, job=None):
+            assert timeout > 0, "the drafting turn must carry a deadline"
             if script_writer_returns is None:
                 raise RuntimeError("provider returned an error")
             return script_writer_returns

@@ -387,7 +387,10 @@ class NonApprovalParkIsAbandonedSanelyTest(_AbandonmentTestBase):
         # The timeline ends somewhere instead of stopping mid-air.
         event_types = self._event_types(run_id)
         self.assertEqual(event_types.count("task.run.abandoned"), 1)
-        self.assertEqual(event_types[-1], "task.execution.failed")
+        # The run's diagnosis (run.diagnosis, AGENT_SELF_REPAIR_SPEC §3) is
+        # recorded after the terminal event; the terminal event itself is
+        # still the last thing the *execution* wrote.
+        self.assertEqual([t for t in event_types if t != "run.diagnosis"][-1], "task.execution.failed")
 
     async def test_an_earlier_refusal_survives_being_abandoned_later(self):
         """The refusal is the useful half of the story; abandonment must not erase it.

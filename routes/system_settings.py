@@ -2,8 +2,11 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
+
+from audit.route_audit import record_api_action
 from auth.firebase_auth import get_firebase_auth
 from llm.llm_commands import execute_llm_command, get_llm_command_snapshot
 from models import (
@@ -12,7 +15,9 @@ from models import (
     LlmAccessUpdate,
     LlmProviderInstallRequest,
     LlmSelectionUpdate,
+    McpServerUpsert,
 )
+from system import mcp_registry
 from system.system_settings_service import (
     cancel_llm_provider_install_job_for_current_server,
     get_codex_settings_for_current_server,
@@ -82,7 +87,18 @@ async def execute_llm_command_route(payload: dict[str, Any] = Body(...)) -> dict
     )
 
 
-@router.put("/llm/selection", dependencies=[Depends(verify_api_key)], response_model=None)
+# Same dependency, and the same reason, as `/llm/access` below: the dashboard
+# is one of the places this is set, and it talks from localhost with no API
+# key. It used to be key-only, which left the agents page able to *report* that
+# the selected provider was out of quota but unable to do anything about it —
+# an offer to switch that could not switch. `verify_api_key_or_localhost`
+# refuses tunnel traffic explicitly (routes/deps.py), so widening this does not
+# widen the external surface.
+@router.put(
+    "/llm/selection",
+    dependencies=[Depends(verify_api_key_or_localhost)],
+    response_model=None,
+)
 async def update_llm_selection(payload: LlmSelectionUpdate) -> dict[str, Any] | Response:
     """Select active LLM provider and model for chat."""
     result = update_llm_selection_for_current_server(payload.company_id, payload.model)
@@ -91,6 +107,71 @@ async def update_llm_selection(payload: LlmSelectionUpdate) -> dict[str, Any] | 
 
 # The dashboard is the place this is set, and it talks from localhost with no
 # API key — the same reason ip-login uses this dependency.
+class BuilderMcpToggle(BaseModel):
+    """Whether the Agent Builder conversation may ask to use an MCP tool."""
+
+    enabled: bool
+
+
+@router.get(
+    "/builder/mcp-tools",
+    dependencies=[Depends(verify_api_key_or_localhost)],
+    response_model=None,
+)
+async def get_builder_mcp_tools() -> dict[str, Any]:
+    """Report the setting, and what it would reach.
+
+    The server names are part of the answer, not decoration: "allow the
+    design conversation to use MCP tools" means nothing until the reader can
+    see *which* servers this machine has. Same registry an agent run reads,
+    so the two can never disagree.
+    """
+
+    from agent.builder_tool_policy import builder_mcp_enabled
+    from agent.capability_registry import detected_mcp_server_configs
+
+    return {
+        "enabled": builder_mcp_enabled(),
+        "servers": sorted(detected_mcp_server_configs()),
+    }
+
+
+@router.put(
+    "/builder/mcp-tools",
+    dependencies=[Depends(verify_api_key_or_localhost)],
+    response_model=None,
+)
+async def update_builder_mcp_tools(payload: BuilderMcpToggle) -> dict[str, Any]:
+    """Switch the asking on or off.
+
+    Off is the default and the safe direction: with it off the servers are not
+    even attached to the builder session, so a design conversation cannot see
+    a tool, and a call it invents anyway is refused without troubling anyone.
+
+    On does not grant anything by itself — each call is still put to the
+    person, one at a time. Shell and file tools stay refused either way; that
+    boundary is drawn by prefix in `builder_tool_policy` and is not a setting.
+    """
+
+    from agent.builder_tool_policy import set_builder_mcp_enabled
+    from agent.capability_registry import detected_mcp_server_configs
+
+    set_builder_mcp_enabled(payload.enabled)
+    record_api_action(
+        operation="provider.tool",
+        details={
+            "surface": "agent_builder_settings",
+            "builder_mcp_enabled": payload.enabled,
+        },
+        success=True,
+        status_code=200,
+    )
+    return {
+        "enabled": payload.enabled,
+        "servers": sorted(detected_mcp_server_configs()),
+    }
+
+
 @router.put(
     "/llm/access",
     dependencies=[Depends(verify_api_key_or_localhost)],
@@ -139,6 +220,92 @@ async def update_codex_settings(payload: CodexSettingsUpdate) -> dict[str, Any] 
     """Update Codex-specific settings."""
     result = update_codex_settings_for_current_server(payload.sandbox_mode)
     return as_route_response(result)
+
+
+# --- MCP servers registered with Code Bridge ---------------------------------
+# Before these existed, attaching an MCP server to an agent meant installing the
+# Claude Code CLI and hand-editing its `~/.claude.json`
+# (`agent/capability_registry.py::_mcp_config_paths`), which a phone app cannot
+# ask anyone to do. These write to Code Bridge's own store instead; detection,
+# the tool picker, and `mcp_tool` step gating all pick them up from there.
+#
+# `verify_api_key`, not `verify_api_key_or_localhost`: the phone app is the
+# caller, and unlike ip-login and llm/access there is no dashboard form behind
+# this. A registration body carries credentials, so the weaker dependency would
+# widen where they can be posted from for no one's benefit.
+#
+# No response on any of these returns a stored secret: the registry hands back
+# `public_server_view`, which reduces `env` and `headers` to key names.
+
+
+@router.get("/mcp-servers", dependencies=[Depends(verify_api_key)], response_model=None)
+async def list_mcp_servers() -> dict[str, Any]:
+    """List the MCP servers registered with Code Bridge, with secrets masked."""
+    return {"items": mcp_registry.public_registry()}
+
+
+@router.get(
+    "/mcp-servers/detected",
+    dependencies=[Depends(verify_api_key)],
+    response_model=None,
+)
+async def list_detected_mcp_servers() -> dict[str, Any]:
+    """The MCP servers a workflow step can actually run on — names only.
+
+    Wider than the registry listing above: this is the *merged* set (CLI
+    configs plus Code Bridge's registry, launchable entries only), which is
+    exactly what the ``mcp_tool`` runtime gate accepts. It backs the step
+    schema's ``mcp-servers`` option source, so the picker and the gate can
+    never disagree about which servers exist. Names and origins only — never
+    the entries themselves, whose ``env``/``headers`` carry credentials.
+    """
+    from agent.capability_registry import detected_mcp_server_names
+
+    return {"items": detected_mcp_server_names()}
+
+
+@router.post("/mcp-servers", dependencies=[Depends(verify_api_key)], response_model=None)
+async def upsert_mcp_server(payload: McpServerUpsert) -> dict[str, Any]:
+    """Register or replace one MCP server.
+
+    Rejected with 400 when the entry cannot actually be launched from what it
+    declares. Storing it anyway would list a server in the app that the launch
+    path silently drops, so the failure surfaces days later as a parked step
+    naming the server as missing.
+    """
+    try:
+        view = mcp_registry.upsert_server(payload.name, payload.config)
+    except mcp_registry.McpRegistryError as exc:
+        _audit_mcp("system.mcp_servers.upsert", payload.name, success=False, status_code=400)
+        raise HTTPException(status_code=400, detail=str(exc))
+    _audit_mcp("system.mcp_servers.upsert", payload.name, success=True, status_code=200)
+    return view
+
+
+@router.delete("/mcp-servers/{name}", dependencies=[Depends(verify_api_key)], response_model=None)
+async def delete_mcp_server(name: str) -> dict[str, Any]:
+    """Remove one Code Bridge MCP registration."""
+    removed = mcp_registry.remove_server(name)
+    if not removed:
+        _audit_mcp("system.mcp_servers.delete", name, success=False, status_code=404)
+        raise HTTPException(status_code=404, detail=f"MCP server '{name}' is not registered")
+    _audit_mcp("system.mcp_servers.delete", name, success=True, status_code=200)
+    return {"name": name, "deleted": True}
+
+
+def _audit_mcp(operation: str, name: str, *, success: bool, status_code: int) -> None:
+    """Audit with the server name only — never the entry.
+
+    The same discipline `routes/secrets.py::_audit` applies, and for the same
+    reason: the entry holds `env` and `headers`, and an audit row is a durable
+    copy of whatever it is handed.
+    """
+    record_api_action(
+        operation=operation,
+        details={"name": name},
+        success=success,
+        status_code=status_code,
+    )
 
 
 @router.post("/firebase/logout", dependencies=[Depends(verify_api_key)])

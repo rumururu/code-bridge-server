@@ -75,6 +75,11 @@ class ClaudeSession(LlmSession):
     #: :meth:`set_mcp_servers`. ``None`` means "say nothing", which leaves the
     #: CLI's own configuration in force — not "no servers".
     mcp_servers: dict[str, Any] | None = None
+    #: Refuse the filesystem settings the CLI would otherwise load
+    #: (``~/.claude/settings.json`` and the project's), so this session's
+    #: permission decisions are made here and nowhere else. See
+    #: :meth:`_apply_setting_sources`.
+    isolate_filesystem_settings: bool = False
     _claude_path: str = field(default="", init=False)
     _session_id: str | None = field(default=None, init=False)
     _client: ClaudeSDKClient | None = field(default=None, init=False)
@@ -229,9 +234,39 @@ class ClaudeSession(LlmSession):
             options.model = self.model.strip()
         if self._session_id:
             options.resume = self._session_id
+        self._apply_setting_sources(options)
         self._apply_mcp_servers(options)
         self._apply_cli_agent(options)
         return options
+
+    def _apply_setting_sources(self, options: ClaudeAgentOptions) -> None:
+        """Stop this session inheriting the user's own permission allowlist.
+
+        ``setting_sources=None`` means "load everything the CLI would", which
+        includes ``~/.claude/settings.json``. A ``permissions.allow`` entry
+        there — ``"mcp__playwright"``, say — pre-approves the tool inside the
+        CLI, before any of this module runs. The callback in
+        :meth:`_on_can_use_tool` is then never consulted: no control request is
+        published, no card is shown, nothing is written to the audit trail, and
+        the tool simply runs.
+
+        Measured, not theorised: with that entry present and
+        ``defaultMode: auto``, a design conversation given the Playwright
+        server drove a browser through four navigations to an external site
+        with no approval asked. The setting that was supposed to gate it
+        (``builder.allow_mcp_tools``) documents the opposite — "each call is
+        still put to the person, one at a time" — so the user is told there is
+        a gate that is not there.
+
+        ``allowed_tools`` is left empty for exactly this reason
+        (:meth:`_apply_mcp_servers`); a settings file achieves the same
+        pre-approval from outside the process, and only this flag closes that
+        door. Set for the Agent Builder, whose session belongs to no project
+        and has no business reading a person's editor preferences to decide
+        what it may do on their behalf.
+        """
+        if self.isolate_filesystem_settings:
+            options.setting_sources = []
 
     def _apply_mcp_servers(self, options: ClaudeAgentOptions) -> None:
         """Hand the declared MCP servers to the SDK, if there are any.
@@ -252,6 +287,20 @@ class ClaudeSession(LlmSession):
         if not servers:
             return
         options.mcp_servers = dict(servers)
+
+    async def set_setting_isolation(self, enabled: bool) -> None:
+        """Turn filesystem-settings isolation on or off for later turns.
+
+        Same shape as :meth:`set_mcp_servers`, and for the same reason:
+        options are built once per connection, so a live client is closed when
+        the answer changes rather than left running under settings it was not
+        started with.
+        """
+        if enabled == self.isolate_filesystem_settings:
+            return
+        self.isolate_filesystem_settings = enabled
+        if self.is_running:
+            await self.close()
 
     async def set_mcp_servers(self, servers: dict[str, Any] | None) -> None:
         """Set the MCP servers for subsequent turns.

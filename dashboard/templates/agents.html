@@ -44,6 +44,19 @@
             --shadow: none;
         }
 
+        .approval-card { padding: 18px 0; border-bottom: 1px solid var(--seam); min-width: 0; }
+        .approval-card h3 { margin: 0 0 10px; font: 600 16px var(--sans); }
+        .approval-target { white-space: pre-wrap; overflow-wrap: anywhere; }
+        .approval-card summary { cursor: pointer; padding: 12px 0; color: var(--link); font-weight: 600; }
+        .approval-review { font: 14px/1.65 var(--sans); }
+        .approval-risk { color: var(--fault); }
+        .approval-review dt { font-weight: 600; margin-top: 16px; }
+        .approval-review dd { margin: 6px 0 0; padding: 12px; border: 1px solid var(--seam); border-radius: 8px; }
+        .approval-review pre, .approval-technical pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+        .approval-technical pre { font-family: var(--mono); max-height: 300px; overflow: auto; }
+        .approval-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+        .approval-actions .btn { white-space: normal; }
+
         @media (prefers-color-scheme: dark) {
             :root {
                 --ink: #0E1216;
@@ -326,7 +339,11 @@
             font-size: 13px; color: var(--text-secondary);
         }
         .note.blocking { border-left-color: var(--danger-color); background: var(--fault-bg); }
-        .note a, .note button.linklike {
+        /* `button.linklike` is unscoped on purpose: the same affordance is now
+           used outside a .note (the empty-steps state offers the canvas), and
+           a link that only looks like a link inside one container is how you
+           get a button nobody reads as clickable. */
+        .note a, button.linklike {
             color: var(--accent-color); background: none; border: 0; padding: 0;
             font: inherit; cursor: pointer; text-decoration: underline;
         }
@@ -516,6 +533,9 @@
             border-bottom: 1px solid var(--border-color);
             vertical-align: middle;
         }
+        /* A rule's plain-language line sits directly under its row; no divider between the two. */
+        table.sched tr:has(+ tr.rule-desc) td { border-bottom: none; padding-bottom: 2px; }
+        table.sched td .badge { white-space: nowrap; }
         table.sched th { font-size: 11px; text-transform: uppercase; color: var(--text-muted); font-weight: 600; }
 
         /* The interval is editable in place; the dotted underline is what says
@@ -747,10 +767,20 @@
 
                             <div id="paneSteps">
                                 <div id="stepsSummary"></div>
+                                <!-- The canvas edits the same workflow this pane
+                                     just drew, so it belongs here beside "Edit
+                                     definition" — the two editors of one thing —
+                                     and not on the page header, which is not
+                                     about any particular agent. It opens as a
+                                     full view rather than an inline frame: the
+                                     canvas is a full-screen editor carrying its
+                                     own save bar, and this pane is the narrow
+                                     half of a two-column layout. -->
                                 <div class="actions">
                                     <button class="btn btn-secondary" onclick="simulateSelectedAgent()" data-i18n="agent_simulate_btn">Simulate</button>
                                     <button class="btn btn-secondary" onclick="runSelectedAgentOnce()" data-i18n="agent_run_once_btn">Run once now</button>
                                     <button class="btn btn-secondary" onclick="editSelectedAgent()" data-i18n="edit_definition">Edit definition</button>
+                                    <button class="btn btn-secondary" id="canvasBtn" onclick="openWorkflowCanvas()" data-i18n="open_canvas" data-i18n-title="open_canvas_title">Open canvas</button>
                                     <button class="btn btn-danger" id="archiveBtn" onclick="archiveAgent()" data-i18n="archive">Archive</button>
                                     <span id="agentRunStatus" class="status"></span>
                                 </div>
@@ -1135,6 +1165,24 @@
                 tab_what: 'What it does', tab_schedule: 'Schedule', tab_runs: 'Runs',
                 detail_empty: 'Pick an agent on the left, or create one.',
                 edit_definition: 'Edit definition', archive: 'Archive',
+                open_canvas: 'Open canvas',
+                open_canvas_title: 'Draw this agent’s workflow. Opens the full-screen canvas in a new tab; this page refreshes when you come back.',
+                open_canvas_empty: 'Draw the first step on the canvas',
+                open_canvas_toast: 'The canvas opened in a new tab. Save there, then come back — this page reloads the agent.',
+                open_canvas_blocked: 'The browser blocked the new tab. Allow pop-ups for this page, then press Open canvas again.',
+                quota_title: '{provider} is out of quota — nothing was drafted',
+                perm_title: 'The Configurator wants to use a tool',
+                perm_body: 'It asked for {tool}. Nothing runs until you answer, and the exact input is below. Only tools from MCP servers you configured can be asked for here — shell commands and file writes are never available to a design conversation.',
+                perm_allow: 'Allow once',
+                perm_deny: 'Do not allow',
+                perm_waiting: 'Waiting for your answer…',
+                perm_allowed_note: 'Allowed the tool call.',
+                perm_denied_note: 'Declined the tool call.',
+                quota_offer: 'These are installed on this server and ready to use. Switching changes which model writes your agents, here and everywhere else, and resends this same message.',
+                quota_no_alternative: 'No other LLM provider is installed on this server. Install one in Settings, or try again once the limit resets.',
+                quota_switch_btn: 'Switch to {provider} and retry',
+                quota_switched: 'Switched to {provider}. The rest of this conversation is written by it.',
+                quota_switch_failed: 'Could not change the provider. Check Settings › LLM.',
                 roster_empty: 'No agents yet.', roster_create_first: 'Create your first agent',
 
                 flow_purpose: 'Purpose', flow_steps: 'Steps', flow_review: 'Review',
@@ -1186,6 +1234,31 @@
                 hint_permissions: 'A scheduled run has nobody to tap "approve", so the first time it wants a terminal, a file or the browser it stops and waits — and because a schedule skips while its task is still active, every later run is skipped too. Standing rules below let named operations through without prompting. Grant the narrowest scope that works.',
                 operation: 'Operation', scope: 'Scope', expires: 'Expires (optional)',
                 allow_no_prompt: 'Allow without prompting', revoke: 'Revoke',
+                col_usage: 'Applied', rule_never_applied: 'never applied',
+                rule_passed_n: '{n} passed', rule_applied_n: '{n} applied', rule_last: 'last {when}',
+                rule_inert: 'no effect',
+                rule_inert_note: 'Nothing on this server asks for approval under this operation name, so this rule lets nothing through and the prompt it was meant to silence keeps appearing. Safe to revoke.',
+                rule_duplicate_note: 'one of {n} identical rules — they all do the same thing, one is enough',
+                rule_scope_global: 'Every chat and every agent on this server',
+                rule_scope_project: 'Anything in project "{name}"',
+                rule_scope_workspace: 'Anything in workspace "{name}"',
+                rule_scope_agent: 'The agent "{name}"',
+                rule_scope_run: 'Only run "{name}" (a single past run)',
+                rule_effect_allow: '{scope} may {op} without a prompt.',
+                rule_effect_forbidden: '{scope} is blocked from trying to {op}.',
+                rule_effect_confirm: '{scope} must get "{effect}" approval before it can {op}.',
+                rule_op_terminal: 'run shell commands',
+                rule_op_file_write: 'edit or create files',
+                rule_op_file_read: 'read files',
+                rule_op_network: 'reach the network (WebFetch, WebSearch)',
+                rule_op_git_commit: 'commit or push with git',
+                rule_op_git_push: 'push with git',
+                rule_op_provider_tool: 'use any other tool (Read, Grep, MCP tools, …)',
+                rule_op_device: 'act on a connected phone',
+                rule_op_file_delete: 'delete files', rule_op_file_move: 'move or rename files',
+                rule_op_file_copy: 'copy files', rule_op_file_upload: 'upload files',
+                rule_op_devserver: 'start a dev server',
+                rule_op_unknown: 'perform "{op}"',
                 waiting_approval: 'Waiting for approval', nothing_waiting: 'Nothing waiting.',
                 hint_approvals: 'A run that stopped for permission. Until it is answered, its schedule keeps skipping.',
 
@@ -1200,6 +1273,21 @@
                 warn_no_script_link: 'Register a script first',
                 unnamed_agent: 'Unnamed agent',
                 approval_banner_one: '1 run is stopped waiting for permission. Its schedule skips until answered.',
+                chip_repair_proposal: 'Repair proposal',
+                repair_title: 'Repair proposal',
+                repair_apply: 'Apply',
+                repair_apply_and_run: 'Apply and run once',
+                repair_reject: 'Reject',
+                repair_reject_reason: 'Why not? (goes into the next proposal)',
+                repair_human_only: 'This one is for a person to do:',
+                repair_kind_workflow: 'workflow change',
+                repair_kind_generated_script: 'generated script',
+                repair_kind_script_change: 'script change needed',
+                repair_kind_environment: 'environment',
+                repair_kind_unknown: 'unclassified',
+                repair_seen_runs: 'seen in {n} failed run(s)',
+                repair_applied: 'Proposal applied.',
+                repair_rejected: 'Proposal rejected.',
                 approval_banner_many: '{n} runs are stopped waiting for permission. Their schedules skip until answered.',
                 review: 'Review',
                 just_now: 'just now', paused: 'paused', due: 'due',
@@ -1242,9 +1330,19 @@
                 s_type_shell: 'Script — runs a registered script, no tokens',
                 s_script: 'Script', s_extra_args: 'Extra args (space separated)',
                 s_register_first: 'Register a script below first.',
+                // Only used when the server publishes no policy vocabulary
+                // (see FALLBACK_POLICY_SCHEMA); otherwise every policy label
+                // and help line below the step comes from the server.
                 p_continue: 'Go to the next step', p_end: 'Finish the run here',
-                p_ask: 'Ask me and wait', p_abort: 'Stop the workflow', p_retry: 'Retry once, then stop',
-                p_jump: 'Jump to "{name}"', p_goto: 'Go to "{name}"',
+                p_ask: 'Ask me and wait', p_abort: 'Stop the workflow', p_retry: 'Retry, then stop',
+                p_manual: 'Hand off to a person', p_goto_step: 'Jump to another step',
+                p_fallback_notice: 'This server did not publish its policy list — showing this page\u2019s built-in one, which may be out of date.',
+                p_target_pick: 'Pick a step…',
+                p_target_required: 'Pick a step to jump to. The server refuses to save a workflow that jumps to a step that does not exist.',
+                p_no_other_steps: 'No other step to jump to yet — add one first.',
+                p_unknown_type: 'not known to this page',
+                p_then_label: 'If it still fails after the last attempt',
+                p_nested_readonly: 'Nested deeper than this editor draws — shown read-only so it is not lost. Edit it in the app or through the API.',
                 optional: 'optional',
                 turn_timed_out: 'This is taking too long. Try again.',
                 name_required: 'Name is required', thinking: 'Configurator is thinking…',
@@ -1429,6 +1527,24 @@
                 tab_what: '하는 일', tab_schedule: '스케줄', tab_runs: '실행 기록',
                 detail_empty: '왼쪽에서 에이전트를 고르거나, 새로 만드세요.',
                 edit_definition: '정의 수정', archive: '보관',
+                open_canvas: '캔버스에서 편집',
+                open_canvas_title: '이 에이전트의 워크플로를 그림으로 편집합니다. 전체 화면 캔버스가 새 탭에서 열리고, 돌아오면 이 화면이 다시 읽어옵니다.',
+                open_canvas_empty: '캔버스에서 첫 단계를 그리기',
+                open_canvas_toast: '캔버스를 새 탭에서 열었습니다. 거기서 저장하고 돌아오면 이 화면이 에이전트를 다시 읽어옵니다.',
+                open_canvas_blocked: '브라우저가 새 탭을 막았습니다. 이 페이지의 팝업을 허용한 뒤 캔버스에서 편집을 다시 누르세요.',
+                quota_title: '{provider} 사용량 한도 — 초안은 만들지 않았습니다',
+                perm_title: 'Configurator가 도구를 쓰려고 합니다',
+                perm_body: '{tool} 를 요청했습니다. 답하기 전에는 아무것도 실행되지 않고, 실제 입력은 아래에 있습니다. 여기서 물어볼 수 있는 것은 직접 등록한 MCP 서버의 도구뿐이며, 셸 명령이나 파일 쓰기는 설계 대화에서 절대 쓸 수 없습니다.',
+                perm_allow: '이번만 허용',
+                perm_deny: '허용 안 함',
+                perm_waiting: '답변을 기다리는 중…',
+                perm_allowed_note: '도구 사용을 허용했습니다.',
+                perm_denied_note: '도구 사용을 거절했습니다.',
+                quota_offer: '이 서버에 설치되어 바로 쓸 수 있는 제공자입니다. 전환하면 여기뿐 아니라 모든 곳에서 에이전트를 쓰는 모델이 바뀌고, 방금 보낸 메시지를 그대로 다시 보냅니다.',
+                quota_no_alternative: '이 서버에는 대신 쓸 수 있는 다른 LLM 제공자가 설치되어 있지 않습니다. 설정에서 설치하거나, 한도가 풀린 뒤에 다시 시도하세요.',
+                quota_switch_btn: '{provider}(으)로 전환하고 다시 보내기',
+                quota_switched: '{provider}(으)로 전환했습니다. 이후 대화는 이 모델이 씁니다.',
+                quota_switch_failed: '제공자를 바꾸지 못했습니다. 설정 › LLM을 확인하세요.',
                 roster_empty: '아직 에이전트가 없습니다.',
                 roster_create_first: '첫 에이전트 만들기',
 
@@ -1481,6 +1597,31 @@
                 hint_permissions: '예약 실행에는 "승인"을 눌러줄 사람이 없습니다. 그래서 터미널·파일·브라우저가 처음 필요해지는 순간 멈춰서 기다리고, 작업이 살아 있는 동안 스케줄은 건너뛰므로 이후 실행도 전부 건너뜁니다. 아래 상시 규칙은 지정한 작업을 묻지 않고 통과시킵니다. 되도록 좁은 범위로 주세요.',
                 operation: '작업', scope: '범위', expires: '만료 (선택)',
                 allow_no_prompt: '묻지 않고 허용', revoke: '해제',
+                col_usage: '적용', rule_never_applied: '아직 적용된 적 없음',
+                rule_passed_n: '{n}회 통과', rule_applied_n: '{n}회 적용', rule_last: '마지막 {when}',
+                rule_inert: '효과 없음',
+                rule_inert_note: '이 작업 이름으로 승인을 묻는 코드가 서버에 없습니다. 이 규칙은 아무것도 통과시키지 않고, 없애려던 승인 창은 계속 뜹니다. 해제해도 됩니다.',
+                rule_duplicate_note: '같은 규칙 {n}개 중 하나 — 전부 같은 일을 하므로 하나만 있으면 됩니다',
+                rule_scope_global: '이 서버의 모든 채팅과 모든 에이전트가',
+                rule_scope_project: '프로젝트 "{name}" 안의 모든 작업이',
+                rule_scope_workspace: '워크스페이스 "{name}" 안의 모든 작업이',
+                rule_scope_agent: '에이전트 "{name}"이(가)',
+                rule_scope_run: '실행 "{name}" 하나만(지난 실행 한 건)',
+                rule_effect_allow: '{scope} {op} 작업을 요청하면 승인 창 없이 바로 통과합니다.',
+                rule_effect_forbidden: '{scope} {op} 작업을 요청하면 차단됩니다.',
+                rule_effect_confirm: '{scope} {op} 작업을 요청하면 "{effect}" 승인을 받아야 합니다.',
+                rule_op_terminal: '셸 명령 실행',
+                rule_op_file_write: '파일 수정·생성',
+                rule_op_file_read: '파일 읽기',
+                rule_op_network: '외부 네트워크 접근(WebFetch·WebSearch)',
+                rule_op_git_commit: 'git 커밋·푸시',
+                rule_op_git_push: 'git 푸시',
+                rule_op_provider_tool: '그 외 모든 도구(Read·Grep·MCP 도구 등) 사용',
+                rule_op_device: '연결된 폰 조작',
+                rule_op_file_delete: '파일 삭제', rule_op_file_move: '파일 이동·이름 변경',
+                rule_op_file_copy: '파일 복사', rule_op_file_upload: '파일 업로드',
+                rule_op_devserver: '개발 서버 실행',
+                rule_op_unknown: '"{op}" 작업 수행',
                 waiting_approval: '승인 대기', nothing_waiting: '대기 중인 것이 없습니다.',
                 hint_approvals: '권한 때문에 멈춘 실행입니다. 답하기 전까지 그 스케줄은 계속 건너뜁니다.',
 
@@ -1525,9 +1666,16 @@
                 s_type_shell: '스크립트 — 등록된 스크립트 실행, 토큰 없음',
                 s_script: '스크립트', s_extra_args: '추가 인자 (공백 구분)',
                 s_register_first: '먼저 아래에서 스크립트를 등록하세요.',
-                p_continue: '다음 단계로', p_end: '여기서 실행 종료',
-                p_ask: '나에게 묻고 대기', p_abort: '워크플로 중단', p_retry: '한 번 재시도 후 중단',
-                p_jump: '"{name}"(으)로 이동', p_goto: '"{name}"(으)로 이동',
+                p_continue: '다음 스텝으로', p_end: '여기서 실행 종료',
+                p_ask: '나에게 묻고 대기', p_abort: '워크플로 중단', p_retry: '재시도 후 중단',
+                p_manual: '사람에게 넘기기', p_goto_step: '다른 스텝으로 이동',
+                p_fallback_notice: '서버가 정책 목록을 보내지 않아 이 페이지에 내장된 목록을 표시합니다. 서버가 실제로 받는 목록과 다를 수 있습니다.',
+                p_target_pick: '스텝 선택…',
+                p_target_required: '이동할 스텝을 선택하세요. 존재하지 않는 스텝으로 이동하는 워크플로는 서버가 저장을 거부합니다.',
+                p_no_other_steps: '이동할 다른 스텝이 아직 없습니다. 스텝을 먼저 추가하세요.',
+                p_unknown_type: '이 페이지가 모르는 값',
+                p_then_label: '마지막 시도에도 실패하면',
+                p_nested_readonly: '이 편집기가 그리는 깊이보다 더 중첩되어 있어 읽기 전용으로 표시합니다. 앱이나 API에서 수정하세요.',
                 optional: '선택',
                 turn_timed_out: '응답이 너무 오래 걸립니다. 다시 시도해 주세요.',
                 name_required: '이름을 입력하세요', thinking: 'Configurator가 생각 중…',
@@ -1800,6 +1948,12 @@
                 const key = el.getAttribute('data-i18n-ph');
                 if (Object.prototype.hasOwnProperty.call(i18n[currentLang] || {}, key)) {
                     el.placeholder = i18n[currentLang][key];
+                }
+            });
+            document.querySelectorAll('[data-i18n-title]').forEach((el) => {
+                const key = el.getAttribute('data-i18n-title');
+                if (Object.prototype.hasOwnProperty.call(i18n[currentLang] || {}, key)) {
+                    el.title = i18n[currentLang][key];
                 }
             });
         }
@@ -2243,6 +2397,140 @@
                 if (card) card.scrollIntoView({ block: 'start' });
             }
         }
+
+        // --- Workflow canvas -------------------------------------------------
+        //
+        // The canvas is a separate SPA served at /canvas/. It is credential-free
+        // static hosting: authority comes from what it is *bound* to, and
+        // `binding=dashboard` points it at /api/dashboard/agent/* — the same
+        // no-key, localhost-only mirror this page already talks to. So the link
+        // has to carry three things or the page opens on nothing: which agent,
+        // which binding, and which language. Theme is passed too so the canvas
+        // does not come up white on a machine sitting in dark mode; this page
+        // has no toggle of its own (`color-scheme: light dark`), which is
+        // exactly why the OS preference is the honest source.
+        //
+        // A new tab rather than an inline frame: the canvas is a full-screen
+        // editor carrying its own save bar, and this pane is the narrow column
+        // of a two-column layout — an iframe here would clip the thing it is
+        // supposed to show.
+        let canvasOpenedForAgent = null;
+        let canvasOpenedRevision = null;
+        let canvasWindow = null;
+        let canvasWatchTimer = null;
+        let canvasRefreshInFlight = false;
+
+        function canvasUrlFor(agentId) {
+            const params = new URLSearchParams({
+                agent: agentId,
+                binding: 'dashboard',
+                locale: currentLang,
+                theme: window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+                    ? 'dark'
+                    : 'light',
+            });
+            return `/canvas/?${params.toString()}`;
+        }
+
+        function openWorkflowCanvas() {
+            if (!selectedAgentId) return;
+            // No `noopener`: it makes window.open return null *by
+            // specification*, whether or not the tab opened. That turns the
+            // check below — the only way to notice a blocked pop-up — into a
+            // check that always fires, and the tab opens anyway. It bought
+            // nothing here in the first place: the canvas is the same origin,
+            // served by this same server, so severing window.opener protects
+            // this page from nothing.
+            const opened = window.open(canvasUrlFor(selectedAgentId), '_blank');
+            if (!opened) {
+                // Pop-up blockers are the one failure mode of window.open that
+                // looks exactly like "the button does nothing". Say what
+                // happened instead of leaving the user clicking.
+                toast(t('open_canvas_blocked'));
+                return;
+            }
+            canvasWindow = opened;
+            canvasOpenedForAgent = selectedAgentId;
+            const agent = agents.find((candidate) => candidate.id === selectedAgentId);
+            canvasOpenedRevision = (agent && agent.flow_revision) || null;
+            startCanvasWatch();
+            toast(t('open_canvas_toast'));
+        }
+
+        // The canvas saves through its own API call, so this page has no way to
+        // be told about it — the standalone bundle carries no host bridge to
+        // post a `saved` message back. Until it does, this page has to notice
+        // on its own, and the cheapest reliable tell is the agent's
+        // `flow_revision`: it changes when and only when the workflow was
+        // written.
+        //
+        // "Refresh when the user comes back to this tab" was the first
+        // instinct and is not enough on its own. It does not fire at all when
+        // the two are side by side in separate windows, and it fires *once
+        // immediately* on open — opening a tab hands focus straight back to
+        // the opener — which is before anything could have been saved. So the
+        // watch is a poll for as long as the canvas is open, and the focus
+        // events below are only a way to react sooner.
+        const CANVAS_WATCH_MS = 3000;
+
+        function startCanvasWatch() {
+            stopCanvasWatch();
+            canvasWatchTimer = setInterval(checkCanvasSaved, CANVAS_WATCH_MS);
+        }
+
+        function stopCanvasWatch() {
+            if (canvasWatchTimer !== null) clearInterval(canvasWatchTimer);
+            canvasWatchTimer = null;
+        }
+
+        async function checkCanvasSaved() {
+            if (!canvasOpenedForAgent) { stopCanvasWatch(); return; }
+            if (canvasRefreshInFlight) return;
+            // A different agent is on screen now, so the open canvas is no
+            // longer about what this pane shows.
+            if (selectedAgentId !== canvasOpenedForAgent) {
+                canvasOpenedForAgent = null;
+                stopCanvasWatch();
+                return;
+            }
+            // Never while a definition is being typed in the create/edit view:
+            // selectAgent() repopulates those fields from the server. The
+            // watch keeps running so the edit is picked up on the way back.
+            if (currentView !== 'manage') return;
+            const closed = !canvasWindow || canvasWindow.closed;
+            canvasRefreshInFlight = true;
+            try {
+                const fresh = await api(`/agents/${encodeURIComponent(canvasOpenedForAgent)}`);
+                const agent = fresh && (fresh.agent || fresh);
+                if (!agent || fresh.error) return;
+                const revision = agent.flow_revision || null;
+                if (revision !== canvasOpenedRevision) {
+                    canvasOpenedRevision = revision;
+                    // reloadAll first so the roster's step count and readiness
+                    // move with the pane; selectAgent redraws the detail.
+                    await reloadAll();
+                    if (selectedAgentId === canvasOpenedForAgent) {
+                        await selectAgent(canvasOpenedForAgent);
+                    }
+                }
+            } finally {
+                canvasRefreshInFlight = false;
+                // Checked after one last read, not instead of it: the tab may
+                // have been closed on the same save we have not seen yet.
+                if (closed) {
+                    canvasOpenedForAgent = null;
+                    canvasWindow = null;
+                    stopCanvasWatch();
+                }
+            }
+        }
+
+        // Not the mechanism, just an accelerant: coming back to this tab is a
+        // good moment to check without waiting out the interval.
+        window.addEventListener('focus', checkCanvasSaved);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') checkCanvasSaved();
+        });
 
         function editSelectedAgent() {
             if (!selectedAgentId) return;
@@ -2981,9 +3269,15 @@
                         <div class="hint" style="margin:4px 0 0;">${escapeHtml(step.description || '')}</div>
                         ${GATE_STEP_TYPES.has(step.type) ? `<div class="note">${escapeHtml(t('step_parks_note'))}</div>` : ''}
                     </div>`).join('')
+                // An agent with no steps is the one case where the canvas is
+                // not an alternative editor but the answer to the sentence
+                // above it, so the empty state names it directly rather than
+                // leaving the button below as the only clue.
                 : `<div class="empty">${escapeHtml(currentLang === 'ko'
                         ? '단계가 없습니다. 스케줄이 이 에이전트를 불러도 실행할 것이 없습니다.'
-                        : 'No steps. A schedule can fire this agent, but there is nothing for it to run.')}</div>`;
+                        : 'No steps. A schedule can fire this agent, but there is nothing for it to run.')}
+                    <div style="margin-top:8px;"><button type="button" class="linklike" onclick="openWorkflowCanvas()">${escapeHtml(t('open_canvas_empty'))}</button></div>
+                   </div>`;
             const origin = agent.origin || null;
             const originEditable = origin ? origin.prompt_editable === true : false;
             const originPath = origin && origin.source_path ? origin.source_path : '';
@@ -3067,6 +3361,9 @@
                 `<span class="run-chip" data-kind="${kind}"><span class="dot"></span>${escapeHtml(label)}</span>`;
             const waiting = Number.isFinite(agent.waiting_run_count) ? agent.waiting_run_count : null;
             if (waiting !== null && waiting > 0) return chip('waiting', t('chip_needs_response'));
+            // A repair proposal outranks "last run failed": it is the same
+            // fact with a next action attached (AGENT_SELF_REPAIR_SPEC §2.6).
+            if (agent.open_repair_proposal) return chip('failed', t('chip_repair_proposal'));
             if (agent.last_run_status === 'failed') return chip('failed', t('chip_last_run_failed'));
             const active = Number.isFinite(agent.active_run_count) ? agent.active_run_count : null;
             if (active === null && waiting === null) return '';
@@ -3138,6 +3435,10 @@
             }
             const agent = result.agent || result;
             selectedAgentId = agent.id;
+            // The run list follows the selection (see runsPath); a failed
+            // fetch keeps the previous list, exactly as the live poll does.
+            refreshRunsOnce();
+            refreshRepairProposals();
             document.getElementById('agentId').value = agent.id;
             document.getElementById('agentName').value = agent.name || '';
             document.getElementById('agentDescription').value = agent.description || '';
@@ -3163,79 +3464,438 @@
             return step.id || `step_${index + 1}`;
         }
 
-        function failurePolicyValue(step) {
-            const policy = step.on_failure;
-            if (!policy) return 'ask_user';
-            if (typeof policy === 'string') return policy;
-            if (policy.type === 'goto_step') return `goto:${policy.target_step_id || ''}`;
-            if (policy.type === 'retry') return 'retry_once';
-            return policy.type || 'ask_user';
+        // --- Schema-driven policy editors ------------------------------------
+        //
+        // `on_failure` / `on_success` used to be two hardcoded <select> lists
+        // here: three success choices and four failure choices, with `retry`
+        // written out as the legacy string `retry_once` and no way to say how
+        // many attempts. The server accepts six failure policies and three
+        // success ones (`FAILURE_POLICY_TYPES` / `SUCCESS_POLICY_TYPES` in
+        // agent/workflow_v2.py), so `manual_handoff` and `continue`-on-failure
+        // were unauthorable from the PC, and a `retry` with `max_attempts` or
+        // a nested `then` could only be written by hand through the API. It is
+        // the same defect the step-type list had (see the schema-driven step
+        // field section below), one field set over.
+        //
+        // Everything below derives the vocabulary, the defaults, the labels,
+        // the help text, the per-policy parameters and "does this one need a
+        // step to point at" from `stepSchema.policies` — the payload
+        // `build_policy_schema()` publishes on `GET /workflow/step-schema`.
+        // A policy added to the server shows up here without a change to this
+        // file.
+        //
+        // Three things this page used to know by name — the wire key a
+        // target-taking policy stores its target in, the key a retry nests
+        // its follow-up policy under (and which policies nest at all), and
+        // the older spellings the server accepts but does not offer — are now
+        // published too: `option.target_key`, `option.nested_policy` and
+        // `slot.aliases`. The constants below are the fallback for a server
+        // that predates them, nothing more; every read goes through the
+        // accessors under them, which prefer what the server published.
+        const FALLBACK_POLICY_TARGET_KEY = 'target_step_id';
+        // A nested policy is a *failure* policy: `then` is what the step does
+        // when the last retry attempt still fails, and an unset `then` aborts.
+        const FALLBACK_POLICY_NESTING = { key: 'then', slot: 'on_failure', default: 'abort' };
+        const FALLBACK_POLICY_TYPES_WITH_NESTED_POLICY = new Set(['retry']);
+        // `FAILURE_POLICY_ALIASES` / `SUCCESS_POLICY_ALIASES` in
+        // agent/workflow_v2.py: accepted, folded into the canonical name, and
+        // deliberately not offered as choices.
+        const FALLBACK_POLICY_ALIASES = {
+            on_failure: { skip: 'continue', goto: 'goto_step', retry_once: 'retry' },
+            on_success: { next: 'continue', stop: 'end', done: 'end', goto: 'goto_step' },
+        };
+        // How many levels of nesting this editor draws as a form. Anything
+        // deeper is shown read-only rather than flattened away — a policy
+        // written through the API is not the dashboard's to silently rewrite.
+        const POLICY_MAX_NESTING_DEPTH = 1;
+
+        // Used only when the server publishes no policy vocabulary at all (an
+        // older server, or a schema fetch that failed). It is announced on
+        // screen whenever it is in use — a fallback that quietly showed a
+        // narrower list than the server accepts is the exact failure this
+        // section replaces. `tests/test_dashboard_policy_editor.py` fails if
+        // this list stops matching what the server publishes.
+        const FALLBACK_POLICY_SCHEMA = {
+            on_failure: {
+                key: 'on_failure',
+                default: 'ask_user',
+                options: [
+                    { type: 'ask_user', labelKey: 'p_ask' },
+                    { type: 'manual_handoff', labelKey: 'p_manual' },
+                    { type: 'retry', labelKey: 'p_retry' },
+                    { type: 'continue', labelKey: 'p_continue' },
+                    { type: 'goto_step', labelKey: 'p_goto_step', requires_target: true },
+                    { type: 'abort', labelKey: 'p_abort' },
+                ],
+            },
+            on_success: {
+                key: 'on_success',
+                default: 'continue',
+                options: [
+                    { type: 'continue', labelKey: 'p_continue' },
+                    { type: 'end', labelKey: 'p_end' },
+                    { type: 'goto_step', labelKey: 'p_goto_step', requires_target: true },
+                ],
+            },
+        };
+
+        // The server's published slot, or null when it did not publish one.
+        function publishedPolicySlot(slot) {
+            const policies = stepSchema && stepSchema.policies;
+            const published = policies && policies[slot];
+            if (published && Array.isArray(published.options) && published.options.length) {
+                return published;
+            }
+            return null;
         }
 
-        function setFailurePolicy(index, value) {
-            if (value.startsWith('goto:')) {
-                steps[index].on_failure = {
-                    type: 'goto_step',
-                    target_step_id: value.slice(5),
+        function policySlotIsFallback(slot) {
+            return publishedPolicySlot(slot) === null;
+        }
+
+        function policySlotSchema(slot) {
+            return publishedPolicySlot(slot) || FALLBACK_POLICY_SCHEMA[slot] || FALLBACK_POLICY_SCHEMA.on_failure;
+        }
+
+        function policyOptionLabel(option) {
+            if (option.label) return schemaText(option.label, option.type);
+            if (option.labelKey) return t(option.labelKey);
+            return option.type;
+        }
+
+        function policyOptionFor(slot, type) {
+            return policySlotSchema(slot).options.find((option) => option.type === type) || null;
+        }
+
+        function policySlotLabel(slot) {
+            const published = publishedPolicySlot(slot);
+            if (published && published.label) {
+                return schemaText(published.label, t(slot === 'on_success' ? 's_on_success' : 's_on_failure'));
+            }
+            return t(slot === 'on_success' ? 's_on_success' : 's_on_failure');
+        }
+
+        // --- The three facts that used to be hardcoded here -----------------
+
+        // Older spellings this slot accepts without offering them.
+        function policyAliases(slot) {
+            const published = publishedPolicySlot(slot);
+            const aliases = published && published.aliases;
+            if (aliases && typeof aliases === 'object') return aliases;
+            return FALLBACK_POLICY_ALIASES[slot] || {};
+        }
+
+        // The offered name for a stored value. A workflow written by hand or
+        // saved by an older client says `retry_once` / `skip` / `stop`; the
+        // server folds those in, so showing them as "not known to this page"
+        // was this page's gap, not the value's.
+        function policyCanonicalType(slot, type) {
+            const value = (type === undefined || type === null) ? '' : String(type).trim();
+            if (!value) return value;
+            if (policyOptionFor(slot, value)) return value;
+            const lowered = value.toLowerCase();
+            if (policyOptionFor(slot, lowered)) return lowered;
+            const canonical = policyAliases(slot)[lowered];
+            return (canonical && policyOptionFor(slot, canonical)) ? canonical : value;
+        }
+
+        // The wire key a target-taking policy stores its target under.
+        function policyTargetKey(slot, type) {
+            const option = policyOptionFor(slot, type);
+            if (option && option.target_key) return option.target_key;
+            return FALLBACK_POLICY_TARGET_KEY;
+        }
+
+        // `{ key, slot, default }` when this policy carries a follow-up policy
+        // inside it, null when it does not. A server that publishes
+        // `nested_policy: null` is believed; only one that publishes no such
+        // key at all falls back to the pin.
+        function policyNesting(slot, type) {
+            const option = policyOptionFor(slot, type);
+            if (option && typeof option === 'object' && 'nested_policy' in option) {
+                const nesting = option.nested_policy;
+                if (!nesting || !nesting.key) return null;
+                return {
+                    key: nesting.key,
+                    slot: nesting.slot || slot,
+                    default: nesting.default || FALLBACK_POLICY_NESTING.default,
                 };
-            } else if (value === 'retry_once') {
-                steps[index].on_failure = 'retry_once';
+            }
+            return FALLBACK_POLICY_TYPES_WITH_NESTED_POLICY.has(type)
+                ? { ...FALLBACK_POLICY_NESTING }
+                : null;
+        }
+
+        // A stored policy in object form. Accepts everything the server does:
+        // `null` (meaning "the default"), a bare type string, the legacy
+        // `goto:<step_id>` / `goto_step:<step_id>` string, or an object.
+        // Nothing is rewritten here — this only reads.
+        function policyObject(raw, slot) {
+            if (raw === null || raw === undefined || raw === '') {
+                return { type: policySlotSchema(slot).default };
+            }
+            if (typeof raw === 'string') {
+                const value = raw.trim();
+                const separator = value.indexOf(':');
+                if (separator > 0) {
+                    // `<policy>:<step_id>`. Which policy that can be, and the
+                    // key its target goes under, are the server's to say.
+                    const head = policyCanonicalType(slot, value.slice(0, separator));
+                    const option = policyOptionFor(slot, head);
+                    if (option && option.requires_target) {
+                        return {
+                            type: head,
+                            [policyTargetKey(slot, head)]: value.slice(separator + 1).trim(),
+                        };
+                    }
+                }
+                return { type: value };
+            }
+            if (typeof raw === 'object') return raw;
+            return { type: policySlotSchema(slot).default };
+        }
+
+        function policyPathParts(pathStr) {
+            return pathStr ? pathStr.split('.') : [];
+        }
+
+        // Which slot's vocabulary applies at this path: the slot itself at the
+        // root, and for anything nested, whichever slot the enclosing policy
+        // says its follow-up is drawn from. Walked down the stored policy so
+        // the answer comes from the published `nested_policy.slot` at every
+        // level rather than from one blanket assumption about `then`.
+        function policySlotAtPath(index, slot, pathStr) {
+            const parts = policyPathParts(pathStr);
+            if (!parts.length) return slot;
+            let currentSlot = slot;
+            let node = policyObject(steps[index][slot], slot);
+            for (const key of parts) {
+                const type = policyCanonicalType(currentSlot, (node && node.type) || policySlotSchema(currentSlot).default);
+                const nesting = policyNesting(currentSlot, type);
+                if (nesting && nesting.key === key) currentSlot = nesting.slot;
+                node = (node && node[key] && typeof node[key] === 'object' && !Array.isArray(node[key]))
+                    ? node[key]
+                    : null;
+            }
+            return currentSlot;
+        }
+
+        // Canonicalize the stored value to object form on first edit, then walk
+        // to the addressed node, creating missing objects on the way.
+        function policyNodeAt(index, slot, pathStr) {
+            const step = steps[index];
+            let node = policyObject(step[slot], slot);
+            step[slot] = node;
+            for (const key of policyPathParts(pathStr)) {
+                let next = node[key];
+                if (!next || typeof next !== 'object' || Array.isArray(next)) {
+                    next = {};
+                    node[key] = next;
+                }
+                node = next;
+            }
+            return node;
+        }
+
+        // Every other step is a candidate jump target — this is how a script
+        // step escalates to an LLM step that works out why it broke.
+        function policyTargetCandidates(index) {
+            return steps
+                .map((candidate, candidateIndex) => ({ candidate, candidateIndex }))
+                .filter(({ candidateIndex }) => candidateIndex !== index)
+                .map(({ candidate, candidateIndex }) => {
+                    const id = stepId(candidate, candidateIndex);
+                    return { id, label: candidate.name || id };
+                });
+        }
+
+        // Build the node for a newly chosen policy type: the parameters the
+        // schema declares (seeded from the previous node where the key carries
+        // over, otherwise from the schema's default), a jump target when the
+        // policy needs one, and a nested follow-up for the types that nest.
+        function buildPolicyNode(effectiveSlot, type, previous, index) {
+            const option = policyOptionFor(effectiveSlot, type);
+            const out = { type };
+            if (option && Array.isArray(option.params)) {
+                option.params.forEach((param) => {
+                    const carried = previous ? previous[param.key] : undefined;
+                    const value = carried === undefined ? param.default : carried;
+                    if (value !== undefined && value !== null) out[param.key] = value;
+                });
+            }
+            if (option && option.requires_target) {
+                const targetKey = policyTargetKey(effectiveSlot, type);
+                const carried = previous ? previous[targetKey] : undefined;
+                const candidates = policyTargetCandidates(index);
+                // Pre-pick the first other step rather than leaving the target
+                // blank: an unset target is not a warning on save, the server
+                // refuses the whole workflow (`_validate_policy_targets`).
+                out[targetKey] = carried || (candidates.length ? candidates[0].id : '');
+            }
+            const nesting = policyNesting(effectiveSlot, type);
+            if (nesting) {
+                const carried = previous && previous[nesting.key];
+                out[nesting.key] = (carried && typeof carried === 'object' && !Array.isArray(carried))
+                    ? carried
+                    : { type: nesting.default };
+            }
+            return out;
+        }
+
+        function setPolicyType(index, slot, pathStr, type) {
+            const parts = policyPathParts(pathStr);
+            const effectiveSlot = policySlotAtPath(index, slot, pathStr);
+            if (!parts.length) {
+                const previous = policyObject(steps[index][slot], slot);
+                steps[index][slot] = buildPolicyNode(effectiveSlot, type, previous, index);
             } else {
-                steps[index].on_failure = value;
+                const parentPath = parts.slice(0, -1).join('.');
+                const parent = policyNodeAt(index, slot, parentPath);
+                const leaf = parts[parts.length - 1];
+                parent[leaf] = buildPolicyNode(effectiveSlot, type, parent[leaf], index);
             }
             renderSteps();
         }
 
-        function successPolicyValue(step) {
-            const policy = step.on_success;
-            if (!policy) return 'continue';
-            if (typeof policy === 'string') return policy;
-            if (policy.type === 'goto_step') return `goto:${policy.target_step_id || ''}`;
-            return policy.type || 'continue';
-        }
-
-        function setSuccessPolicy(index, value) {
-            steps[index].on_success = value.startsWith('goto:')
-                ? { type: 'goto_step', target_step_id: value.slice(5) }
-                : value;
+        function setPolicyTarget(index, slot, pathStr, value) {
+            const node = policyNodeAt(index, slot, pathStr);
+            const effectiveSlot = policySlotAtPath(index, slot, pathStr);
+            node[policyTargetKey(effectiveSlot, policyCanonicalType(effectiveSlot, node.type))] = value;
             renderSteps();
         }
 
-        function successOptions(step, index) {
-            const current = successPolicyValue(step);
-            const options = [
-                ['continue', t('p_continue')],
-                ['end', t('p_end')],
-            ];
-            steps.forEach((candidate, candidateIndex) => {
-                if (candidateIndex === index) return;
-                const id = stepId(candidate, candidateIndex);
-                options.push([`goto:${id}`, t('p_jump').replace('{name}', candidate.name || id)]);
-            });
-            return options
-                .map(([value, label]) =>
-                    `<option value="${escapeHtml(value)}"${value === current ? ' selected' : ''}>${escapeHtml(label)}</option>`)
-                .join('');
+        function updatePolicyParam(index, slot, pathStr, key, raw) {
+            // No re-render: rewriting the DOM on every keystroke steals focus,
+            // same reason `updateStepField` does not re-render.
+            const node = policyNodeAt(index, slot, pathStr);
+            const parsed = parseInt(raw, 10);
+            if (Number.isNaN(parsed)) {
+                delete node[key];
+                return;
+            }
+            node[key] = parsed;
         }
 
-        function failureOptions(step, index) {
-            const current = failurePolicyValue(step);
-            const options = [
-                ['ask_user', t('p_ask')],
-                ['abort', t('p_abort')],
-                ['retry_once', t('p_retry')],
-            ];
-            // Every *other* step is a jump target — this is how a script step
-            // escalates to an LLM step that works out why it broke.
-            steps.forEach((candidate, candidateIndex) => {
-                if (candidateIndex === index) return;
-                const id = stepId(candidate, candidateIndex);
-                options.push([`goto:${id}`, t('p_goto').replace('{name}', candidate.name || id)]);
-            });
-            return options
-                .map(([value, label]) =>
-                    `<option value="${escapeHtml(value)}"${value === current ? ' selected' : ''}>${escapeHtml(label)}</option>`)
+        function renderPolicyParam(index, slot, pathStr, node, param) {
+            const value = node[param.key];
+            const shown = value === undefined || value === null ? '' : String(value);
+            const label = param.label ? schemaText(param.label, param.key) : param.key;
+            const help = param.help ? schemaText(param.help, '') : '';
+            const min = (param.min === undefined || param.min === null) ? '' : ` min="${escapeHtml(String(param.min))}"`;
+            const max = (param.max === undefined || param.max === null) ? '' : ` max="${escapeHtml(String(param.max))}"`;
+            return `
+                        <div class="field" style="margin-bottom:6px;">
+                            <label>${escapeHtml(label)}</label>
+                            ${help ? `<div class="hint" style="margin:0 0 6px;">${escapeHtml(help)}</div>` : ''}
+                            <input class="input" type="number"${min}${max} value="${escapeHtml(shown)}"
+                                   oninput="updatePolicyParam(${index}, '${slot}', '${pathStr}', '${escapeHtml(param.key)}', this.value)">
+                        </div>`;
+        }
+
+        function renderPolicyTargetPicker(index, slot, pathStr, node, targetKey) {
+            const current = node[targetKey] || '';
+            const candidates = policyTargetCandidates(index);
+            if (!candidates.length) {
+                return `<div class="hint" style="margin:0 0 6px;">${escapeHtml(t('p_no_other_steps'))}</div>`;
+            }
+            const rows = candidates
+                .map(({ id, label }) => `<option value="${escapeHtml(id)}"${id === current ? ' selected' : ''}>${escapeHtml(label)}</option>`)
                 .join('');
+            // A target that is not one of this workflow's steps (a step that
+            // was renamed or removed, or a policy written through the API)
+            // stays visible instead of looking silently cleared — but it is
+            // also called out, because the server refuses to save it.
+            const unknown = current && !candidates.some(({ id }) => id === current);
+            const keepCurrent = unknown
+                ? `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`
+                : '';
+            const warning = (!current || unknown)
+                ? `<div class="hint" style="margin:6px 0 0;">${escapeHtml(t('p_target_required'))}</div>`
+                : '';
+            return `
+                        <select class="input" style="margin-bottom:6px;" onchange="setPolicyTarget(${index}, '${slot}', '${pathStr}', this.value)">
+                            <option value="">${escapeHtml(t('p_target_pick'))}</option>
+                            ${rows}
+                            ${keepCurrent}
+                        </select>
+                        ${warning}`;
+        }
+
+        function renderPolicyNode(index, slot, pathStr, node, depth) {
+            const effectiveSlot = policySlotAtPath(index, slot, pathStr);
+            const schema = policySlotSchema(effectiveSlot);
+            const storedType = (node && typeof node.type === 'string' && node.type.trim())
+                ? node.type.trim()
+                : schema.default;
+            // An accepted older spelling is shown as the policy it means, not
+            // as a value this page has never heard of.
+            const currentType = policyCanonicalType(effectiveSlot, storedType);
+            const known = schema.options.some((option) => option.type === currentType);
+            const rows = schema.options
+                .map((option) => `<option value="${escapeHtml(option.type)}"${option.type === currentType ? ' selected' : ''}>${escapeHtml(policyOptionLabel(option))}</option>`)
+                .join('');
+            // A stored policy this build has never heard of (a newer server, a
+            // legacy spelling) keeps its value rather than being silently
+            // rewritten into whatever happens to be first in the list.
+            const extra = known
+                ? ''
+                : `<option value="${escapeHtml(currentType)}" selected>${escapeHtml(currentType)} — ${escapeHtml(t('p_unknown_type'))}</option>`;
+            const option = known ? policyOptionFor(effectiveSlot, currentType) : null;
+            const help = option && option.help ? schemaText(option.help, '') : '';
+
+            let extras = '';
+            if (option && option.requires_target) {
+                extras += renderPolicyTargetPicker(index, slot, pathStr, node, policyTargetKey(effectiveSlot, currentType));
+            }
+            if (option && Array.isArray(option.params)) {
+                extras += option.params.map((param) => renderPolicyParam(index, slot, pathStr, node, param)).join('');
+            }
+            const nesting = policyNesting(effectiveSlot, currentType);
+            if (nesting) {
+                const nestedPath = pathStr ? `${pathStr}.${nesting.key}` : nesting.key;
+                const nested = (node && node[nesting.key] && typeof node[nesting.key] === 'object' && !Array.isArray(node[nesting.key]))
+                    ? node[nesting.key]
+                    : null;
+                const nestedDefault = { type: nesting.default };
+                if (depth >= POLICY_MAX_NESTING_DEPTH) {
+                    // Deeper than this editor draws. Shown as-is, read-only —
+                    // flattening it would throw away a policy someone wrote.
+                    extras += `
+                        <div class="field" style="margin-bottom:6px;">
+                            <label>${escapeHtml(t('p_then_label'))}</label>
+                            <div class="hint" style="margin:0 0 6px;">${escapeHtml(t('p_nested_readonly'))}</div>
+                            <textarea class="input" rows="3" readonly
+                                      style="font-family:var(--mono, monospace); font-size:12px;">${escapeHtml(JSON.stringify(nested || nestedDefault, null, 2))}</textarea>
+                        </div>`;
+                } else {
+                    extras += `
+                        <div class="field" style="margin-bottom:6px; padding-left:10px; border-left:2px solid var(--border-color);">
+                            <label>${escapeHtml(t('p_then_label'))}</label>
+                            ${renderPolicyNode(index, slot, nestedPath, nested || nestedDefault, depth + 1)}
+                        </div>`;
+                }
+            }
+
+            return `
+                        <select class="input" onchange="setPolicyType(${index}, '${slot}', '${pathStr}', this.value)">
+                            ${rows}
+                            ${extra}
+                        </select>
+                        ${help ? `<div class="hint" style="margin:6px 0;">${escapeHtml(help)}</div>` : ''}
+                        ${extras}`;
+        }
+
+        function renderPolicyEditor(step, index, slot) {
+            const node = policyObject(step[slot], slot);
+            const fallbackNote = policySlotIsFallback(slot)
+                ? `<div class="hint" style="margin:0 0 6px;"><strong>${escapeHtml(t('p_fallback_notice'))}</strong></div>`
+                : '';
+            return `
+                    <div class="field" style="margin-bottom:0;">
+                        <label>${escapeHtml(policySlotLabel(slot))}</label>
+                        ${fallbackNote}
+                        ${renderPolicyNode(index, slot, '', node, 0)}
+                    </div>`;
         }
 
         // --- Schema-driven step fields ---------------------------------------
@@ -3479,6 +4139,82 @@
                     </div>`;
         }
 
+        // Positional arguments, named by the script that receives them.
+        //
+        // The schema publishes this field as kind `script_args` with
+        // `derives_from: 'script_id'` — the coupling cannot be discovered
+        // from a field name, so the server states it (see KIND_SCRIPT_ARGS in
+        // agent/workflow_step_schema.py). A registered script declares its
+        // own interface in its text (`# @param NAME required description`),
+        // and that is what names the boxes here.
+        //
+        // The reason this is not cosmetic: a step whose script needs a
+        // directory and was given an empty list does not fail, it stops at
+        // 3am and asks. "Extra arguments, one per line" gave nobody a reason
+        // to type anything into it.
+        function renderScriptArgsField(step, index, field, label, help) {
+            const script = scripts.find(
+                (entry) => entry.id === getStepField(step, field.derives_from || 'script_id'));
+            const parameters = script && Array.isArray(script.parameters) ? script.parameters : null;
+            // `null` parameters means the script states no interface — every
+            // script registered before declarations existed, and every
+            // hand-written one with no @param block. Unknown is not the same
+            // as none, and neither is grounds to draw a form nobody can fill
+            // in: fall back to the free list, which is what this always was.
+            if (!parameters || !parameters.length) {
+                return renderStringListField(step, index, field, label, help);
+            }
+            const values = stringListValues(step, field.key);
+            const rows = parameters.map((parameter, itemIndex) => {
+                const name = parameter.name || `#${itemIndex + 1}`;
+                const required = parameter.required !== false;
+                const description = (parameter.description || '').trim();
+                return `
+                        <div style="margin-bottom:8px;">
+                            <label style="font-size:12px; opacity:0.85;">
+                                ${escapeHtml(name)}${required ? ' *' : ''}
+                            </label>
+                            ${description ? `<div class="hint" style="margin:0 0 4px;">${escapeHtml(description)}</div>` : ''}
+                            <input class="input" value="${escapeHtml(values[itemIndex] || '')}"
+                                   oninput="updateScriptArgItem(${index}, '${field.key}', ${itemIndex}, this.value)">
+                        </div>`;
+            }).join('');
+            // Anything beyond what the script declares is still shown and
+            // still editable. A step that carries five arguments against a
+            // two-parameter script is a step someone had a reason for, and
+            // hiding the other three would delete them the next time the
+            // form was saved.
+            const extra = values.slice(parameters.length).map((value, offset) => {
+                const itemIndex = parameters.length + offset;
+                return `
+                        <div class="row" style="margin-bottom:6px;">
+                            <input class="input" value="${escapeHtml(value)}"
+                                   oninput="updateScriptArgItem(${index}, '${field.key}', ${itemIndex}, this.value)">
+                            <button type="button" class="btn btn-secondary btn-xs" onclick="removeStringListItem(${index}, '${field.key}', ${itemIndex}); return false;">${escapeHtml(t('s_remove_item'))}</button>
+                        </div>`;
+            }).join('');
+            return `
+                    <div class="field">
+                        <label>${escapeHtml(label)}</label>
+                        ${help ? `<div class="hint" style="margin:0 0 6px;">${escapeHtml(help)}</div>` : ''}
+                        ${rows}
+                        ${extra}
+                        <button type="button" class="btn btn-secondary btn-xs" onclick="addStringListItem(${index}, '${field.key}'); return false;">${escapeHtml(t('s_add_item'))}</button>
+                    </div>`;
+        }
+
+        // Like updateStringListItem, but the index can be past the end: the
+        // boxes are fixed by the script's parameter list, so someone can fill
+        // in the second one first. Assigning past the end of a JS array
+        // leaves holes, and JSON.stringify writes holes as `null` — which is
+        // not a string and is not what the step meant to carry.
+        function updateScriptArgItem(index, key, itemIndex, value) {
+            const values = stringListValues(steps[index], key).slice();
+            while (values.length <= itemIndex) values.push('');
+            values[itemIndex] = value;
+            setStepField(steps[index], key, values);
+        }
+
         function renderStepField(step, index, field) {
             const label = schemaText(field.label, field.key);
             const help = schemaText(field.help, '');
@@ -3488,10 +4224,19 @@
                 case 'select': return renderSelectField(step, index, field, label, help);
                 case 'string_list': return renderStringListField(step, index, field, label, help);
                 case 'action_list': return renderActionListField(step, index, field, label, help);
+                case 'script_args': return renderScriptArgsField(step, index, field, label, help);
                 default:
                     // A field kind this build doesn't know how to render yet.
-                    // Skipping it is the harmless outcome — showing nothing
-                    // beats crashing the whole step editor over one field.
+                    // The schema may name a simpler shape to fall back to
+                    // (`fallback_kind`), and taking it is strictly better
+                    // than dropping the field: the value is still there, and
+                    // an editor that cannot show it is an editor that deletes
+                    // it the next time someone saves.
+                    if (field.fallback_kind && field.fallback_kind !== field.kind) {
+                        return renderStepField(step, index, { ...field, kind: field.fallback_kind });
+                    }
+                    // Nothing to fall back to. Showing nothing beats crashing
+                    // the whole step editor over one field.
                     return '';
             }
         }
@@ -3613,19 +4358,9 @@
                         <textarea class="input" rows="2" oninput="updateStep(${index}, 'description', this.value)">${escapeHtml(step.description || '')}</textarea>
                     </div>
                     ${fieldArea}
-                    <div class="row" style="margin-bottom:0;">
-                        <div class="field" style="margin-bottom:0;">
-                            <label>${escapeHtml(t('s_on_success'))}</label>
-                            <select class="input" onchange="setSuccessPolicy(${index}, this.value)">
-                                ${successOptions(step, index)}
-                            </select>
-                        </div>
-                        <div class="field" style="margin-bottom:0;">
-                            <label>${escapeHtml(t('s_on_failure'))}</label>
-                            <select class="input" onchange="setFailurePolicy(${index}, this.value)">
-                                ${failureOptions(step, index)}
-                            </select>
-                        </div>
+                    <div class="row" style="margin-bottom:0; align-items:flex-start;">
+                        ${renderPolicyEditor(step, index, 'on_success')}
+                        ${renderPolicyEditor(step, index, 'on_failure')}
                     </div>
                 </div>`;
             }).join('');
@@ -4080,6 +4815,10 @@
             await reloadAll();
             showDetail('runs');
             if (result.run && result.run.id) selectRun(result.run.id);
+            // The run has only just started; `reloadAll` above captured it
+            // mid-flight. Follow it to its end rather than leaving the label
+            // frozen on whatever it happened to say one moment in.
+            followLiveRuns();
         }
 
         async function archiveAgent() {
@@ -4097,13 +4836,208 @@
 
         // --- Builder chat ---------------------------------------------------
 
+        // --- Out of quota on the selected provider ---------------------------
+        //
+        // Nothing here switches provider on its own, and the server does not
+        // either. A quota block on Codex lasts until a date weeks out, so a
+        // silent one-off failover would keep re-deciding on every turn while
+        // Settings went on claiming Codex — the model writing someone's agent
+        // would have changed without them ever being told. So the switch is
+        // offered, taken by a click, written to the same app-wide setting the
+        // Settings screen shows, and only then is the turn retried.
+        function renderProviderSwitchOffer(result, userMessage) {
+            if (!result || result.error_kind !== 'quota') return;
+            const alternatives = Array.isArray(result.provider_alternatives)
+                ? result.provider_alternatives
+                : [];
+            const who = result.error_provider_name || result.error_provider_id || '';
+            const log = document.getElementById('builderLog');
+            const box = document.createElement('div');
+            box.className = 'note blocking';
+            if (!alternatives.length) {
+                // Honest dead end: say it is a dead end rather than showing a
+                // button that cannot lead anywhere.
+                box.innerHTML = `<strong>${escapeHtml(t('quota_title').replace('{provider}', who))}</strong>
+                    <div style="margin-top:4px;">${escapeHtml(t('quota_no_alternative'))}</div>`;
+                log.appendChild(box);
+                log.scrollTop = log.scrollHeight;
+                return;
+            }
+            const buttons = alternatives.map((alt, index) => `
+                <button type="button" class="btn btn-secondary btn-xs" data-alt="${index}">
+                    ${escapeHtml(t('quota_switch_btn').replace('{provider}', alt.name || alt.company_id))}
+                </button>`).join(' ');
+            box.innerHTML = `<strong>${escapeHtml(t('quota_title').replace('{provider}', who))}</strong>
+                <div style="margin-top:4px;">${escapeHtml(t('quota_offer'))}</div>
+                <div class="actions" style="margin-top:8px;">${buttons}</div>`;
+            box.querySelectorAll('button[data-alt]').forEach((button) => {
+                button.addEventListener('click', () => {
+                    switchProviderAndRetry(alternatives[Number(button.dataset.alt)], userMessage, box);
+                });
+            });
+            log.appendChild(box);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        async function switchProviderAndRetry(alternative, userMessage, box) {
+            if (!alternative) return;
+            box.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+            let response;
+            try {
+                response = await fetch('/api/system/llm/selection', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        company_id: alternative.company_id,
+                        model: alternative.model,
+                    }),
+                });
+            } catch (err) {
+                box.querySelectorAll('button').forEach((button) => { button.disabled = false; });
+                toast(t('quota_switch_failed'));
+                return;
+            }
+            if (!response.ok) {
+                box.querySelectorAll('button').forEach((button) => { button.disabled = false; });
+                toast(t('quota_switch_failed'));
+                return;
+            }
+            const label = alternative.name || alternative.company_id;
+            // Said out loud, in the transcript, and left there: the rest of
+            // this conversation is written by a different model than the turns
+            // above it, and that has to stay readable after the fact.
+            box.innerHTML = `<strong>${escapeHtml(t('quota_switched').replace('{provider}', label))}</strong>`;
+            toast(t('quota_switched').replace('{provider}', label));
+
+            const retryBody = { user_message: userMessage };
+            if (builderSession) retryBody.session_id = builderSession;
+            if (builderDraft) retryBody.draft = builderDraft;
+            const button = document.getElementById('builderSendBtn');
+            button.disabled = true;
+            setStatus('builderStatus', t('thinking'));
+            const retried = await runBuilderTurn(retryBody);
+            button.disabled = false;
+            if (!retried || retried.error) {
+                setStatus('builderStatus', (retried && retried.error) || 'Request failed', true);
+                appendBuilderLine('error', (retried && retried.error) || 'Request failed');
+                renderProviderSwitchOffer(retried, userMessage);
+                return;
+            }
+            setStatus('builderStatus', '');
+            builderSession = retried.session_id || builderSession;
+            builderDraft = retried.updated_draft || builderDraft;
+            pendingDraft = retried.updated_draft || pendingDraft;
+            appendBuilderLine('builder', retried.assistant_message || t('no_reply'));
+            applyDraft(pendingDraft);
+            syncScriptProposals(retried.script_proposals);
+        }
+
+        // The Configurator is told to ask multiple-choice questions as a tag
+        // rather than as prose — `<ask_user question="..." options="A|B"/>`,
+        // appended to every Claude session's system prompt
+        // (llm/claude_session.ASK_USER_SYSTEM_PROMPT). The directive is
+        // unconditional, so a builder turn running on Claude emits it here
+        // too, and this screen used to print the raw tag at the reader.
+        //
+        // Deliberately the same shape as the app's parser
+        // (lib/utils/interactive_prompt_parser.dart): the same regex, and the
+        // same refusal to treat a single option as a choice. Two clients
+        // reading one directive differently is a worse failure than either
+        // reading it badly, because only one of them would ever be looked at.
+        const ASK_USER_TAG = /<ask_user\s+question="([^"]*)"\s+options="([^"]*)"\s*\/>/;
+
+        function parseAskUser(content) {
+            const match = ASK_USER_TAG.exec(String(content || ''));
+            if (!match) return null;
+            const options = (match[2] || '')
+                .split('|')
+                .map((option) => option.trim())
+                .filter((option) => option.length > 0);
+            // One option is not a question. The tag is malformed or the model
+            // wrote prose into it; showing a lone button would invite a click
+            // that says nothing.
+            if (options.length < 2) return null;
+            return { question: (match[1] || '').trim(), options: options };
+        }
+
+        function stripAskUserTags(content) {
+            return String(content || '')
+                .replace(new RegExp(ASK_USER_TAG.source, 'g'), '')
+                .replace(/[ \t]+$/gm, '')
+                .trim();
+        }
+
+        // Only the newest question is answerable. An older one's buttons are
+        // removed rather than disabled: the conversation has moved on, and a
+        // greyed-out row of choices reads like something that failed.
+        function clearStaleAskUser() {
+            document
+                .querySelectorAll('#builderLog .ask-user')
+                .forEach((node) => node.remove());
+        }
+
+        function renderAskUser(prompt) {
+            const log = document.getElementById('builderLog');
+            const box = document.createElement('div');
+            box.className = 'note ask-user';
+            const buttons = prompt.options.map((option, index) => `
+                <button type="button" class="btn btn-secondary btn-xs" data-option="${index}">
+                    ${escapeHtml(option)}
+                </button>`).join(' ');
+            box.innerHTML = `${prompt.question ? `<strong>${escapeHtml(prompt.question)}</strong>` : ''}
+                <div class="actions" style="margin-top:8px;">${buttons}</div>`;
+            box.querySelectorAll('button[data-option]').forEach((button) => {
+                button.addEventListener('click', () => {
+                    const answer = prompt.options[Number(button.dataset.option)];
+                    // Removed before the turn starts, not after it returns:
+                    // the question has been answered the moment it is clicked,
+                    // and leaving it live invites a second answer to a
+                    // question that is already in flight.
+                    box.remove();
+                    submitBuilderMessage(answer);
+                });
+            });
+            log.appendChild(box);
+            log.scrollTop = log.scrollHeight;
+        }
+
         function appendBuilderLine(who, text) {
             const log = document.getElementById('builderLog');
-            const line = document.createElement('div');
-            line.className = 'chat-line ' + who;
-            line.innerHTML = `<span class="who">${who}</span>${escapeHtml(text)}`;
-            log.appendChild(line);
+            clearStaleAskUser();
+            // The tag is stripped from every role, not just the builder's: a
+            // user turn that quotes one back should not print markup either.
+            const prose = stripAskUserTags(text);
+            // A turn that is *only* a question leaves nothing to print, and an
+            // empty bubble above the buttons reads as a broken reply.
+            if (prose) {
+                const line = document.createElement('div');
+                line.className = 'chat-line ' + who;
+                line.innerHTML = `<span class="who">${who}</span>${escapeHtml(prose)}`;
+                log.appendChild(line);
+            }
+            if (who === 'builder') {
+                const prompt = parseAskUser(text);
+                if (prompt) renderAskUser(prompt);
+            }
             log.scrollTop = log.scrollHeight;
+        }
+
+        // The inverse of `draftToFields`, for the one moment the conversation
+        // has no draft but the screen does. Only the fields an AgentDraft
+        // carries; `collectSteps()` is the same reader `saveAgent` uses, so
+        // what the server is told we have is what a save would write.
+        function draftFromFields() {
+            const name = document.getElementById('agentName').value.trim();
+            const flow = collectSteps();
+            if (!name && !(flow || []).length) return null;
+            return {
+                name,
+                description: document.getElementById('agentDescription').value.trim(),
+                system_prompt: document.getElementById('agentPrompt').value,
+                provider_id: document.getElementById('agentProvider').value || null,
+                model: document.getElementById('agentModel').value.trim() || null,
+                flow,
+            };
         }
 
         function resetBuilder() {
@@ -4126,7 +5060,80 @@
         }
 
         const BUILDER_POLL_MS = 2000;
-        const BUILDER_POLL_LIMIT = 90;  // ~3 minutes, then say so rather than hang.
+        // Must outlast the server's own ceiling, never merely match it: the
+        // job keeps running after the client stops asking, so a client that
+        // gives up first throws away a reply the server went on to produce.
+        // The ceiling is now the *wider* of two (routes/agents
+        // BUILDER_TOOL_TURN_TIMEOUT_SECONDS = 600s, for turns that can drive a
+        // browser; 240s otherwise), because the page cannot know which kind of
+        // turn it started. 330 x 2s = 660s leaves a minute of slack over 600s.
+        const BUILDER_POLL_LIMIT = 330;
+        // The server holds a permission question for
+        // `BUILDER_PERMISSION_WAIT_SECONDS` (600s); this outlasts that, so
+        // the page is never the reason an answer arrives too late.
+        const BUILDER_PERMISSION_POLL_LIMIT = 330;
+
+        // The Configurator asked to use one of this machine's MCP tools, and
+        // nothing happens until a person answers. Rendered into the
+        // conversation rather than as a dialog on purpose: the question is
+        // *about* what is being designed, and it belongs where the reader is
+        // already looking. Only MCP tools ever reach here — shell and file
+        // tools are refused server-side and are not a question anyone is
+        // asked (see agent/builder_tool_policy.py).
+        let builderPermissionShown = null;
+
+        function clearBuilderPermission() {
+            builderPermissionShown = null;
+            document.querySelectorAll('#builderLog .tool-permission').forEach((n) => n.remove());
+        }
+
+        function renderBuilderPermission(jobId, request) {
+            // Re-rendering on every poll tick would rebuild the card twice a
+            // second and lose a click mid-press.
+            if (builderPermissionShown === request.request_id) return;
+            clearBuilderPermission();
+            builderPermissionShown = request.request_id;
+
+            const log = document.getElementById('builderLog');
+            const box = document.createElement('div');
+            box.className = 'note blocking tool-permission';
+            // The input verbatim, because "may it use playwright?" is not the
+            // question — *what it would do* is, and that is the URL, the
+            // selector, the argument. Truncated only to keep one long value
+            // from burying the buttons.
+            const detail = JSON.stringify(request.input || {}, null, 1);
+            const shown = detail.length > 400 ? `${detail.slice(0, 400)}…` : detail;
+            // The tool name is printed on its own, not only interpolated into
+            // the sentence. A translation that drops `{tool}` would otherwise
+            // leave the card asking about "a tool" with no way to tell which,
+            // and the identifier is the one part that must survive every
+            // locale.
+            box.innerHTML = `<strong>${escapeHtml(t('perm_title'))}</strong>
+                <div style="margin-top:4px; font-family:var(--mono, monospace); font-size:12px;">${escapeHtml(request.tool_name || '')}</div>
+                <div style="margin-top:4px;">${escapeHtml(
+                    t('perm_body').replace('{tool}', request.tool_name || ''))}</div>
+                <pre class="log-pane" style="margin-top:6px; max-height:140px;">${escapeHtml(shown)}</pre>
+                <div class="actions" style="margin-top:8px;">
+                    <button type="button" class="btn btn-xs" data-allow="1">${escapeHtml(t('perm_allow'))}</button>
+                    <button type="button" class="btn btn-secondary btn-xs" data-allow="0">${escapeHtml(t('perm_deny'))}</button>
+                </div>`;
+            box.querySelectorAll('button[data-allow]').forEach((button) => {
+                button.addEventListener('click', async () => {
+                    // Disabled before the request, not after: the answer is
+                    // settled server-side the moment it lands, and a second
+                    // click would get a 409 for a question already answered.
+                    box.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+                    const allow = button.dataset.allow === '1';
+                    await api(`/builder/converse/jobs/${encodeURIComponent(jobId)}/permission`, {
+                        method: 'POST', body: JSON.stringify({ allow }),
+                    });
+                    clearBuilderPermission();
+                    appendBuilderLine('user', allow ? t('perm_allowed_note') : t('perm_denied_note'));
+                });
+            });
+            log.appendChild(box);
+            log.scrollTop = log.scrollHeight;
+        }
 
         async function runBuilderTurn(body) {
             const started = await api('/builder/converse/jobs', {
@@ -4135,15 +5142,39 @@
             if (!started || started.error) return started;
             if (!started.job_id) return started;  // Server answered inline.
 
-            for (let attempt = 0; attempt < BUILDER_POLL_LIMIT; attempt += 1) {
+            // Two budgets, for the same reason the server keeps two clocks:
+            // waiting for a model and waiting for a person are different kinds
+            // of waiting. A tick spent parked on a permission question does
+            // not count against `BUILDER_POLL_LIMIT`, or the page would
+            // abandon a job the moment someone took longer than five minutes
+            // to answer — while the server was still holding it open.
+            let thinking = 0;
+            let waiting = 0;
+            while (thinking < BUILDER_POLL_LIMIT && waiting < BUILDER_PERMISSION_POLL_LIMIT) {
                 if (started.status === 'completed' || started.status === 'failed') break;
                 await new Promise((resolve) => setTimeout(resolve, BUILDER_POLL_MS));
                 const polled = await api(`/builder/converse/jobs/${encodeURIComponent(started.job_id)}`);
                 if (!polled || polled.error) return polled;
-                if (polled.status === 'completed') return polled;
-                if (polled.status === 'failed') return { error: polled.error || t('turn_failed') };
-                setStatus('builderStatus', `${t('thinking')} ${(attempt + 1) * 2}s`);
+                if (polled.status === 'completed') { clearBuilderPermission(); return polled; }
+                // Spread rather than reduce to `{error}`: a failed turn now
+                // carries what kind of failure it was and what else is
+                // installed, and throwing that away here is what left the
+                // caller with nothing to offer but the raw provider sentence.
+                if (polled.status === 'failed') {
+                    clearBuilderPermission();
+                    return { ...polled, error: polled.error || t('turn_failed') };
+                }
+                if (polled.status === 'waiting_for_permission' && polled.permission_request) {
+                    waiting += 1;
+                    renderBuilderPermission(started.job_id, polled.permission_request);
+                    setStatus('builderStatus', t('perm_waiting'));
+                    continue;
+                }
+                clearBuilderPermission();
+                thinking += 1;
+                setStatus('builderStatus', `${t('thinking')} ${thinking * 2}s`);
             }
+            clearBuilderPermission();
             return { error: t('turn_timed_out') };
         }
 
@@ -4152,6 +5183,14 @@
             const message = input.value.trim();
             if (!message) return;
             input.value = '';
+            await submitBuilderMessage(message);
+        }
+
+        // Split out of sendBuilderTurn so a question's own answer buttons can
+        // send a turn without going through the textarea. The two paths have
+        // to be the same path: a click that assembled its own body would drift
+        // from the typed one the first time either changed.
+        async function submitBuilderMessage(message) {
             appendBuilderLine('user', message);
 
             const button = document.getElementById('builderSendBtn');
@@ -4160,7 +5199,21 @@
 
             const body = { user_message: message };
             if (builderSession) body.session_id = builderSession;
-            if (builderDraft) body.draft = builderDraft;
+            // The draft the *form* is showing, when the conversation has none
+            // of its own yet. `editSelectedAgent` starts a clean session on
+            // purpose, so the first turn after "정의 수정" used to arrive with
+            // no draft at all: the server's idea of "what we had" was empty,
+            // the model redrew the workflow from the message alone, and steps
+            // the user could see on screen vanished from what came back.
+            //
+            // Measured repeatedly in one session — 9 steps to 7 asked to fix
+            // three instruction texts, 4 to 2 asked to attach a schedule
+            // (losing both browser steps and three selectors read off a live
+            // page), 4 to 2 again asked to reword one instruction. The
+            // Configurator said so itself each time: "초안이 비어 있는 상태로
+            // 도착했습니다". The disclosure that reports dropped steps could
+            // not fire either, having nothing to compare against.
+            body.draft = builderDraft || draftFromFields();
 
             // The Configurator regularly runs past the synchronous window, and
             // that route reports the timeout as a failed turn — which reads as
@@ -4172,6 +5225,12 @@
             if (!result || result.error) {
                 setStatus('builderStatus', (result && result.error) || 'Request failed', true);
                 appendBuilderLine('error', (result && result.error) || 'Request failed');
+                // The turn still failed and no draft was invented — that part
+                // is unchanged and deliberate. What is added is the way out:
+                // when the failure was the selected provider refusing on
+                // quota, and this machine has another one installed, offer the
+                // switch here instead of leaving the user at a dead end.
+                renderProviderSwitchOffer(result, message);
                 return;
             }
             setStatus('builderStatus', '');
@@ -4565,6 +5624,128 @@
             return ko ? `${Math.round(s / 86400)}일 전` : `${Math.round(s / 86400)}d ago`;
         }
 
+        // A run in flight is the only thing on this page that changes on its
+        // own. Everything else here is edited by the person looking at it, so
+        // one fetch at load is right for all of it — and wrong for this.
+        //
+        // The "Run once now" POST returns the moment the run *starts*, so the
+        // reload it triggers snapshots `running`, and nothing ever asked
+        // again: a run that finished a second later went on saying "running"
+        // until the whole page was reloaded. A scheduled run firing while
+        // this page is open was invisible for exactly the same reason, and
+        // that is the case nobody would have thought to reload for.
+        //
+        // Follows only while something is actually live and stops by itself,
+        // so an idle page makes no requests at all.
+        const LIVE_RUN_POLL_MS = 3000;
+        let liveRunTimer = null;
+
+        const anyRunLive = () => runs.some((run) => LIVE_RUN.has(run.status));
+
+        async function refreshRunsOnce() {
+            // Scoped to the selected agent: the page-wide newest-sixty window
+            // is owned by whichever agent runs most often (two device cycles
+            // every two hours filled it), and the Runs tab of any other agent
+            // showed a handful of its runs — six of twenty, measured — with
+            // no hint that the rest existed. The server has filtered by agent
+            // all along. (`typeof`: this function also runs on its own in the
+            // template tests, where the page's selection does not exist.)
+            const agentId = typeof selectedAgentId === 'string' && selectedAgentId
+                ? selectedAgentId : null;
+            const result = await api(agentId
+                ? `/runs?agent_id=${encodeURIComponent(agentId)}&limit=60`
+                : '/runs?limit=60');
+            // A transient failure keeps the last known list rather than
+            // emptying the pane; the next tick tries again.
+            if (!result || result.error || !Array.isArray(result.runs)) return;
+            const before = new Map(runs.map((run) => [run.id, run.status]));
+            runs = result.runs;
+            renderRunList();
+            // The open detail is a second fetch, so it is re-run only when
+            // the run it shows actually moved — otherwise watching a long run
+            // would reload its whole step list every three seconds.
+            if (selectedRunId) {
+                const current = runs.find((run) => run.id === selectedRunId);
+                if (current && before.get(selectedRunId) !== current.status) {
+                    selectRun(selectedRunId);
+                }
+            }
+        }
+
+        function followLiveRuns() {
+            if (liveRunTimer || !anyRunLive()) return;
+            liveRunTimer = setInterval(async () => {
+                await refreshRunsOnce();
+                if (!anyRunLive()) {
+                    clearInterval(liveRunTimer);
+                    liveRunTimer = null;
+                }
+            }, LIVE_RUN_POLL_MS);
+        }
+
+        // --- repair proposals (AGENT_SELF_REPAIR_SPEC §2.6) ----------------
+        let repairProposals = [];
+
+        async function refreshRepairProposals() {
+            if (!selectedAgentId) { repairProposals = []; renderRepairProposal(); return; }
+            const result = await api(`/agents/${encodeURIComponent(selectedAgentId)}/repair-proposals?limit=5`);
+            if (!result || result.error || !Array.isArray(result.proposals)) return;
+            repairProposals = result.proposals;
+            renderRepairProposal();
+        }
+
+        function renderRepairProposal() {
+            let host = document.getElementById('repairProposal');
+            const list = document.getElementById('runList');
+            if (!host) {
+                if (!list || !list.parentElement) return;
+                host = document.createElement('div');
+                host.id = 'repairProposal';
+                list.parentElement.insertBefore(host, list);
+            }
+            const open = repairProposals.find((p) => p.status === 'proposed');
+            if (!open) { host.innerHTML = ''; return; }
+            const kindLabel = t('repair_kind_' + (open.kind || 'unknown'));
+            const seen = (open.seen_runs || []).length;
+            const actions = (open.human_actions || []).map((a) =>
+                `<li>${escapeHtml(a.what || '')}${a.where ? ` — <span class="mono">${escapeHtml(a.where)}</span>` : ''}${a.why ? `<div class="status">${escapeHtml(a.why)}</div>` : ''}</li>`).join('');
+            const diag = open.diagnosis || {};
+            host.innerHTML = `
+                <div class="note" data-testid="repair-proposal" data-kind="${escapeHtml(open.kind || '')}">
+                    <div><span class="badge ${open.applicable ? 'ok' : 'warn'}">${escapeHtml(t('repair_title'))}</span>
+                        <strong>${escapeHtml(kindLabel)}</strong>
+                        ${seen > 1 ? `<span class="status"> · ${escapeHtml(t('repair_seen_runs').replace('{n}', String(seen)))}</span>` : ''}</div>
+                    <div style="margin:4px 0;">${escapeHtml(open.summary || '')}</div>
+                    ${diag.cause ? `<div class="status">${escapeHtml(diag.cause)}</div>` : ''}
+                    ${(diag.evidence || []).map((line) => `<pre class="mono" style="margin:4px 0;white-space:pre-wrap;">${escapeHtml(String(line))}</pre>`).join('')}
+                    ${open.applicable ? `
+                        <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">
+                            <button class="btn btn-primary btn-sm" onclick="decideRepairProposal('${open.id}', 'accept', false)">${escapeHtml(t('repair_apply'))}</button>
+                            <button class="btn btn-secondary btn-sm" onclick="decideRepairProposal('${open.id}', 'accept', true)">${escapeHtml(t('repair_apply_and_run'))}</button>
+                            <button class="btn btn-secondary btn-sm" onclick="decideRepairProposal('${open.id}', 'reject', false)">${escapeHtml(t('repair_reject'))}</button>
+                        </div>` : `
+                        <div style="margin-top:6px;">${escapeHtml(t('repair_human_only'))}</div>
+                        <ul style="margin:4px 0 6px 18px;">${actions}</ul>
+                        <button class="btn btn-secondary btn-sm" onclick="decideRepairProposal('${open.id}', 'reject', false)">${escapeHtml(t('repair_reject'))}</button>`}
+                </div>`;
+        }
+
+        async function decideRepairProposal(proposalId, decision, runNow) {
+            if (!selectedAgentId) return;
+            const body = decision === 'reject'
+                ? { reason: window.prompt(t('repair_reject_reason'), '') || null }
+                : { run_now: !!runNow };
+            const result = await api(
+                `/agents/${encodeURIComponent(selectedAgentId)}/repair-proposals/${encodeURIComponent(proposalId)}/${decision}`,
+                { method: 'POST', body: JSON.stringify(body) },
+            );
+            if (!result || result.error) { toast(result && result.error ? result.error : 'Could not update the proposal'); }
+            else { toast(t(decision === 'reject' ? 'repair_rejected' : 'repair_applied')); }
+            await refreshRepairProposals();
+            if (decision === 'accept') { await selectAgent(selectedAgentId); }
+            await refreshRunsOnce();
+        }
+
         function renderRunList() {
             const host = document.getElementById('runList');
             const label = document.getElementById('runResultsFor');
@@ -4602,13 +5783,16 @@
                 return;
             }
             detail.innerHTML = '<div class="empty">Loading…</div>';
+            // Both reads are scoped to this run. The steps used to be read
+            // as `/tasks/${run.task_id}/steps`, and an agent owns exactly one
+            // task that every one of its runs appends to — so clicking a
+            // two-step run rendered 386 steps from 193 runs going back weeks,
+            // with the oldest one's stale `running` status at the top.
             // The MCP report is a run *event*, not a step output — fetching
             // only the steps is exactly what kept task.step.mcp_tools
             // invisible after the orchestrator started writing it.
             const [stepResult, eventResult] = await Promise.all([
-                run.task_id
-                    ? api(`/tasks/${encodeURIComponent(run.task_id)}/steps`)
-                    : Promise.resolve(null),
+                api(`/runs/${encodeURIComponent(run.id)}/steps`),
                 api(`/runs/${encodeURIComponent(run.id)}/events?limit=500`),
             ]);
             const steps = (stepResult && stepResult.steps) || [];
@@ -4631,7 +5815,11 @@
                     runLevel.push(event);
                 }
             });
-            const runLevelHtml = runLevel
+            // The server's own diagnosis of a failed run (AGENT_SELF_REPAIR_SPEC
+            // §3) — one event, drawn above the steps it explains.
+            const diagnosisEvent = ((eventResult && eventResult.events) || [])
+                .filter((event) => event && event.event_type === 'run.diagnosis').pop();
+            const runLevelHtml = renderDiagnosisEvent(diagnosisEvent) + runLevel
                 .map((event) => renderMcpToolsEvent(event, true)).join('');
             if (!steps.length) {
                 detail.innerHTML = `${dryRunBanner}${runLevelHtml}<div class="empty">This run has no recorded steps.</div>`;
@@ -4639,6 +5827,25 @@
             }
             detail.innerHTML = dryRunBanner + runLevelHtml
                 + steps.map((step) => renderStepResult(step, byStep[step.id] || [])).join('');
+        }
+
+        // One run.diagnosis event → a block: class, cause, quoted evidence,
+        // and what to change. Rendered from the stored payload as-is; a
+        // model that answered nothing shows the class and its error, never
+        // a made-up cause.
+        function renderDiagnosisEvent(event) {
+            const d = event && event.app_event;
+            if (!d || typeof d !== 'object' || !d.class) return '';
+            const kind = d.suggested_change && d.suggested_change.kind;
+            const lines = [];
+            lines.push(`<div><span class="badge ${d.class === 'interrupted' ? 'info' : 'warn'}">diagnosis</span> <strong>${escapeHtml(d.class)}</strong>${d.failed_step_id ? ` · ${escapeHtml(d.failed_step_id)}` : ''}</div>`);
+            if (d.cause) lines.push(`<div>${escapeHtml(d.cause)}${d.unsupported ? ' <span class="status">(no line in the record supports this)</span>' : ''}</div>`);
+            (d.evidence || []).forEach((line) => lines.push(`<pre class="mono" style="margin:4px 0;white-space:pre-wrap;">${escapeHtml(String(line))}</pre>`));
+            if (d.suggested_change && (d.suggested_change.what || kind)) {
+                lines.push(`<div><span class="badge ${kind === 'workflow' || kind === 'generated_script' ? 'ok' : 'warn'}">${escapeHtml(kind || 'unknown')}</span> ${escapeHtml(d.suggested_change.what || '')}${d.suggested_change.where ? ` — ${escapeHtml(d.suggested_change.where)}` : ''}</div>`);
+            }
+            if (d.error) lines.push(`<div class="status">model: ${escapeHtml(d.error)}</div>`);
+            return `<div class="note" data-testid="run-diagnosis">${lines.join('')}</div>`;
         }
 
         // One task.step.mcp_tools event → compact lines. Rendered from the
@@ -4718,6 +5925,18 @@
                 body = `<pre class="log-pane">${escapeHtml(output.result)}</pre>`;
             } else if (output.checkpoint) {
                 body = `<div class="log-label">waiting</div><pre class="log-pane">${escapeHtml(output.checkpoint.prompt || '')}</pre>`;
+            } else if (output.skipped && typeof output.skipped.message === 'string'
+                       && output.skipped.message.trim()) {
+                // The server settles a step that never ran with a whole
+                // sentence saying why — which condition took which arm, or
+                // where the run ended (task_orchestrator `_skip_reason_sentence`
+                // / `_never_reached_sentence`). The phone reads it that way
+                // (`workflow_step_tile.dart`); this pane was falling through
+                // to the raw-JSON branch below and printing `{"skipped":
+                // {"reason": …}}` at the reader. The sentence was written for
+                // a person and this is where a person reads it.
+                body = `<div class="log-label">${escapeHtml(output.skipped.reason || 'skipped')}</div>`
+                    + `<div class="hint" style="margin:0 0 6px;">${escapeHtml(output.skipped.message.trim())}</div>`;
             } else if (Object.keys(output).length) {
                 body = `<pre class="log-pane">${escapeHtml(JSON.stringify(output, null, 2))}</pre>`;
             }
@@ -4791,6 +6010,87 @@
                 + `${escapeHtml(raw)}</span>`;
         }
 
+        // The rules table used to show only the raw operation code, the raw
+        // scope and a green `allow` badge — which told the reader nothing
+        // about what would actually be let through, whether it ever had
+        // been, or whether the rule could fire at all. Each row now carries
+        // a sentence in words, the audit log's count of real decisions, and
+        // an explicit "no effect" marker when no code path gates the
+        // operation (see `annotate_rules` in routes/policies.py).
+        const RULE_OPERATION_PHRASE_KEY = {
+            'process.terminal': 'rule_op_terminal',
+            'file.write': 'rule_op_file_write',
+            'file.read': 'rule_op_file_read',
+            'network.external': 'rule_op_network',
+            'git.commit': 'rule_op_git_commit',
+            'git.push': 'rule_op_git_push',
+            'provider.tool': 'rule_op_provider_tool',
+            'device.control': 'rule_op_device',
+            'file.delete': 'rule_op_file_delete',
+            'file.move': 'rule_op_file_move',
+            'file.copy': 'rule_op_file_copy',
+            'file.upload': 'rule_op_file_upload',
+            'process.devserver': 'rule_op_devserver',
+        };
+
+        function fillTemplate(template, values) {
+            return String(template).replace(/\{(\w+)\}/g, (match, key) =>
+                Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : match);
+        }
+
+        function ruleOperationPhrase(operation) {
+            const key = RULE_OPERATION_PHRASE_KEY[operation];
+            return key ? t(key) : fillTemplate(t('rule_op_unknown'), { op: operation });
+        }
+
+        function ruleScopePhrase(scope) {
+            const raw = String(scope || 'global');
+            if (raw === 'global') return t('rule_scope_global');
+            const sep = raw.indexOf(':');
+            const kind = sep === -1 ? raw : raw.slice(0, sep);
+            const name = sep === -1 ? '' : raw.slice(sep + 1);
+            if (kind === 'project') return fillTemplate(t('rule_scope_project'), { name });
+            if (kind === 'workspace') return fillTemplate(t('rule_scope_workspace'), { name });
+            if (kind === 'run') return fillTemplate(t('rule_scope_run'), { name });
+            if (kind === 'agent') {
+                const agent = agents.find((candidate) => candidate.id === name);
+                return fillTemplate(t('rule_scope_agent'), { name: (agent && agent.name) || name });
+            }
+            return raw;
+        }
+
+        function ruleDescription(rule) {
+            const values = {
+                scope: ruleScopePhrase(rule.scope),
+                op: ruleOperationPhrase(rule.operation),
+                effect: rule.effect,
+            };
+            if (rule.effect === 'allow') return fillTemplate(t('rule_effect_allow'), values);
+            if (rule.effect === 'forbidden') return fillTemplate(t('rule_effect_forbidden'), values);
+            return fillTemplate(t('rule_effect_confirm'), values);
+        }
+
+        // Audit timestamps are UTC "YYYY-MM-DD HH:MM:SS" with no zone marker.
+        function formatAuditTime(value) {
+            if (!value) return '';
+            const iso = String(value).includes('T') ? String(value) : String(value).replace(' ', 'T') + 'Z';
+            const date = new Date(iso);
+            if (Number.isNaN(date.getTime())) return String(value);
+            return date.toLocaleString(currentLang === 'ko' ? 'ko-KR' : 'en-US',
+                { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        }
+
+        function ruleUsageText(rule) {
+            const n = Number(rule.matched_count || 0);
+            if (!n) return t('rule_never_applied');
+            const countKey = rule.effect === 'allow' ? 'rule_passed_n' : 'rule_applied_n';
+            const count = fillTemplate(t(countKey), { n });
+            const last = rule.last_matched_at
+                ? ' · ' + fillTemplate(t('rule_last'), { when: formatAuditTime(rule.last_matched_at) })
+                : '';
+            return count + last;
+        }
+
         function renderPolicyRules() {
             const host = document.getElementById('ruleList');
             document.getElementById('ruleCount').textContent =
@@ -4799,18 +6099,40 @@
                 host.innerHTML = '<div class="empty">No standing rules — every tool use will prompt.</div>';
                 return;
             }
-            const rows = policyRules.map((rule) => `
+            const identical = {};
+            for (const rule of policyRules) {
+                const key = `${rule.operation}|${rule.scope}|${rule.effect}`;
+                identical[key] = (identical[key] || 0) + 1;
+            }
+            const rows = policyRules.map((rule) => {
+                const inert = rule.consulted === false;
+                const effectBadge = inert
+                    ? `<span class="badge warn" title="${escapeHtml(t('rule_inert_note'))}">${escapeHtml(t('rule_inert'))}</span>`
+                    : `<span class="badge ${rule.effect === 'allow' ? 'on' : 'off'}">${escapeHtml(rule.effect)}</span>`;
+                const dupes = identical[`${rule.operation}|${rule.scope}|${rule.effect}`] || 1;
+                const notes = [];
+                if (inert) notes.push(`<span style="color:var(--warning-color);">${escapeHtml(t('rule_inert_note'))}</span>`);
+                if (dupes > 1) notes.push(escapeHtml(fillTemplate(t('rule_duplicate_note'), { n: dupes })));
+                return `
                 <tr>
                     <td>${escapeHtml(rule.operation)}</td>
                     <td>${policyScopeLabel(rule.scope)}</td>
-                    <td><span class="badge ${rule.effect === 'allow' ? 'on' : 'off'}">${escapeHtml(rule.effect)}</span></td>
-                    <td>${escapeHtml(rule.expires_at || t('never'))}</td>
-                    <td style="text-align:right;">
+                    <td>${effectBadge}</td>
+                    <td style="white-space:nowrap;${inert ? 'color:var(--text-muted);' : ''}">${escapeHtml(ruleUsageText(rule))}</td>
+                    <td style="white-space:nowrap;">${escapeHtml(rule.expires_at || t('never'))}</td>
+                    <td style="text-align:right; white-space:nowrap;">
                         <button class="btn btn-danger btn-xs" onclick="deletePolicyRule('${rule.id}')">${escapeHtml(t('revoke'))}</button>
                     </td>
-                </tr>`).join('');
+                </tr>
+                <tr class="rule-desc">
+                    <td colspan="6" style="padding-top:0; border-top:none; font-size:13.5px; color:${inert ? 'var(--text-muted)' : 'var(--text-primary, inherit)'};">
+                        ${inert ? '<s>' : ''}${escapeHtml(ruleDescription(rule))}${inert ? '</s>' : ''}
+                        ${notes.length ? `<div style="font-size:12.5px; margin-top:2px; color:var(--text-muted);">${notes.join(' · ')}</div>` : ''}
+                    </td>
+                </tr>`;
+            }).join('');
             host.innerHTML = `<table class="sched">
-                <thead><tr><th>${escapeHtml(t('operation'))}</th><th>${escapeHtml(t('scope'))}</th><th>${escapeHtml(t('col_effect'))}</th><th>${escapeHtml(t('col_expires'))}</th><th></th></tr></thead>
+                <thead><tr><th>${escapeHtml(t('operation'))}</th><th>${escapeHtml(t('scope'))}</th><th>${escapeHtml(t('col_effect'))}</th><th>${escapeHtml(t('col_usage'))}</th><th>${escapeHtml(t('col_expires'))}</th><th></th></tr></thead>
                 <tbody>${rows}</tbody></table>`;
         }
 
@@ -4869,13 +6191,18 @@
             return key ? t(key) : '';
         }
 
+        /* APPROVAL_REVIEW_MODULE */
+        const approvalDecisionsInFlight = new Set();
+
         function renderApprovals() {
             const host = document.getElementById('approvalList');
             if (!approvals.length) {
                 host.innerHTML = `<div class="empty">${escapeHtml(t('nothing_waiting'))}</div>`;
                 return;
             }
-            const rows = approvals.map((approval) => {
+            const expanded = new Set(Array.from(host.querySelectorAll('details[data-approval-id][open]')).map(el => el.dataset.approvalId));
+            const ko = currentLang === 'ko';
+            const rows = approvals.map((approval, index) => {
                 const details = approval.details || {};
                 const display = (details.display && typeof details.display === 'object') ? details.display : null;
                 const sentence = approvalActionSentence(display && display.action);
@@ -4894,39 +6221,72 @@
                 // undo that. Without one, the old preview is still the best
                 // description available.
                 const command = sentence ? target : (target || legacy);
-                const what = sentence
-                    ? `<div>${escapeHtml(sentence)}</div><div class="hint" style="margin:2px 0 0;">${escapeHtml(approval.operation)}</div>`
-                    : escapeHtml(approval.operation);
-                return `
-                    <tr>
-                        <td>${what}</td>
-                        <td class="${command ? 'target-line' : ''}" style="max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(command)}</td>
-                        <td><span class="badge off">${escapeHtml(approval.risk_level || '')}</span></td>
-                        <td style="text-align:right; white-space:nowrap;">
-                            <button class="btn btn-secondary btn-xs" onclick="decideApproval('${approval.id}', 'approve_once')">Approve once</button>
-                            <button class="btn btn-xs" onclick="decideApproval('${approval.id}', 'approve_rule')">Always allow</button>
-                            <button class="btn btn-danger btn-xs" onclick="decideApproval('${approval.id}', 'deny')">Deny</button>
-                        </td>
-                    </tr>`;
+                const what = escapeHtml(sentence || approval.operation);
+                const feedback = approval.operation === 'feedback.reply.send';
+                const summaryTarget = command || (feedback
+                    ? [details.subject, details.recipient].filter(value => typeof value === 'string' && value.trim()).join(' → ')
+                    : '');
+                const disabled = !ApprovalReview.canReview(approval) || approvalDecisionsInFlight.has(approval.id);
+                return `<article class="approval-card">
+                    <h3>${feedback ? (ko ? '피드백 답장 발송 요청' : 'Send a feedback reply') : what}</h3>
+                    <div class="target-line approval-target">${escapeHtml(summaryTarget)}</div>
+                    <p class="hint">${escapeHtml(approval.operation)} · ${escapeHtml(approval.risk_level || '')}</p>
+                    <details data-approval-id="${escapeHtml(approval.id)}" ${expanded.has(approval.id) ? 'open' : ''}>
+                      <summary>${ko ? '내용과 승인 범위 확인' : 'Review content and approval scope'}</summary>
+                      ${ApprovalReview.render(approval, currentLang)}
+                      <details class="approval-technical"><summary>${ko ? '기술 정보' : 'Technical details'}</summary><pre>${escapeHtml(JSON.stringify(approval, null, 2))}</pre></details>
+                      <p class="hint">${approval.desktop_only
+                        ? (ko ? '이 작업은 개별 승인만 지원합니다.' : 'This operation requires individual approval.')
+                        : `${ko ? '항상 허용 범위' : 'Always-allow scope'}: <strong>${escapeHtml(ruleScopePhrase(ApprovalReview.scope(approval)))}</strong> (${escapeHtml(ApprovalReview.scope(approval))}) · ${ko ? '만료 없음. 같은 종류의 향후 요청 전체에 적용되며 정책에서 취소할 수 있습니다.' : 'No expiry. Applies to all future requests for this operation in this scope; revoke in Policies.'}`}</p>
+                      <div class="approval-actions">
+                        <button class="btn" data-approval-index="${index}" data-decision="approve_once" ${disabled ? 'disabled' : ''}>${feedback ? (ko ? '이 답장 발송 승인' : 'Approve sending this reply') : (ko ? '이번 작업 승인' : 'Approve once')}</button>
+                        <button class="btn btn-secondary" data-approval-index="${index}" data-decision="approve_rule" ${disabled || approval.desktop_only ? 'disabled' : ''}>${ko ? '항상 허용…' : 'Always allow…'}</button>
+                        <button class="btn btn-danger" data-approval-index="${index}" data-decision="deny" ${approvalDecisionsInFlight.has(approval.id) ? 'disabled' : ''}>${ko ? '거절' : 'Deny'}</button>
+                      </div>
+                    </details>
+                </article>`;
             }).join('');
-            host.innerHTML = `<table class="sched">
-                <thead><tr><th>${escapeHtml(t('operation'))}</th><th>${escapeHtml(t('col_detail'))}</th><th>${escapeHtml(t('col_risk'))}</th><th></th></tr></thead>
-                <tbody>${rows}</tbody></table>`;
+            host.innerHTML = rows;
+            host.querySelectorAll('button[data-decision]').forEach(button => {
+                const approval = approvals[Number(button.dataset.approvalIndex)];
+                button.addEventListener('click', () => decideApproval(approval.id, button.dataset.decision));
+            });
         }
 
         async function decideApproval(approvalId, decision) {
-            const result = await api(`/approvals/${encodeURIComponent(approvalId)}/decision`, {
-                method: 'POST',
-                body: JSON.stringify({ decision, approver: { type: 'dashboard' } }),
-            });
-            if (!result || result.error) {
-                toast((result && result.error) || 'Decision failed');
-                return;
+            const approval = approvals.find(item => item.id === approvalId);
+            if (!approval || approvalDecisionsInFlight.has(approvalId)) return;
+            if (decision !== 'deny' && !ApprovalReview.canReview(approval)) return;
+            const ko = currentLang === 'ko';
+            const body = { decision, approver: { type: 'dashboard' } };
+            if (decision === 'approve_rule') {
+                if (approval.desktop_only) return;
+                const scope = ApprovalReview.scope(approval);
+                if (!confirm(ko
+                    ? `${ruleScopePhrase(scope)} (${scope}) 범위의 ${approval.operation} 요청을 앞으로 모두 허용합니다. 이 답장이나 대상에만 한정되지 않으며 만료가 없습니다. 정책에서 취소할 수 있습니다. 계속할까요?`
+                    : `Allow every future ${approval.operation} request in ${ruleScopePhrase(scope)} (${scope})? This is not limited to this reply or target and never expires. You can revoke it in Policies.`)) return;
+                body.rule_scope = scope;
+                body.scope = 'rule';
             }
-            // "Always allow" only stops *future* prompts; the run that is
-            // parked right now still has to be resumed from the app.
-            toast(decision === 'approve_rule' ? 'Allowed from now on' : 'Recorded');
-            reloadAll();
+            approvalDecisionsInFlight.add(approvalId);
+            renderApprovals();
+            try {
+                const result = await api(`/approvals/${encodeURIComponent(approvalId)}/decision`, {
+                    method: 'POST',
+                    body: JSON.stringify(body),
+                });
+                if (!result || result.error) {
+                    toast((result && result.error) || 'Decision failed');
+                    return;
+                }
+                toast(approval.operation === 'feedback.reply.send' && decision !== 'deny'
+                    ? (ko ? '승인 기록됨 — 발송 완료는 피드백 에이전트 처리 결과에서 확인하세요.' : 'Approval recorded — check the feedback agent for delivery status.')
+                    : (ko ? '결정이 기록되었습니다.' : 'Decision recorded.'));
+                await reloadAll();
+            } finally {
+                approvalDecisionsInFlight.delete(approvalId);
+                renderApprovals();
+            }
         }
 
         // --- CLI agent import -------------------------------------------------
@@ -5318,6 +6678,10 @@
             renderApprovalBanner();
             renderCliAgentSweepStatus();
             renderSteps();
+            // Covers the case nobody would think to reload for: a scheduled
+            // run already in flight when this page loaded, or one that fired
+            // while it sat open. No-op when nothing is live.
+            followLiveRuns();
         }
 
         // A run parked on an unanswered permission keeps its schedule skipping,

@@ -29,6 +29,9 @@ from remote.remote_access_service import verify_pair_token_for_current_server
 
 from .deps import require_local_access, require_localhost_only, verify_api_key
 from .result_response import as_route_response
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Rate limiting constants for pairing endpoints
 TOKEN_STATUS_MAX_ATTEMPTS = 20
@@ -149,10 +152,11 @@ async def get_token_status(token: str, request: Request) -> dict[str, Any]:
 
     result = get_pair_token_status_for_current_server(token)
 
-    # Record attempt (non-existent tokens count as failed attempts)
-    if not result.exists:
-        _token_status_limiter.record_attempt(client_ip, success=False)
-
+    # Only a malformed token (above) spends the caller's budget. A well-formed
+    # token that no longer exists is what the dashboard's own pairing page
+    # asks about after the QR expires — it kept polling, hit twenty of these,
+    # and locked 127.0.0.1 out of pairing for five minutes, 307 times in one
+    # month. Guessing a live token this way is not a threat: it is 128 bits.
     return result.as_response_fields()
 
 
@@ -234,6 +238,17 @@ async def verify_pair_token(request: Request, body: PairVerifyRequest) -> dict[s
 
     # Record attempt
     _verify_limiter.record_attempt(client_ip, success=result.success)
+
+    if not result.success:
+        # The wire answer is a deliberate flat "Pairing failed" (nothing for
+        # a caller to enumerate on); the reason still has to land where a
+        # person can read it, or a phone that cannot pair is undiagnosable
+        # from either side — as it was.
+        logger.warning(
+            "Pair verify failed for device %r (client %r, ip %s): %s [%s]",
+            body.device_name, body.client_id, client_ip,
+            result.error, result.status_code,
+        )
 
     return as_route_response(result)
 

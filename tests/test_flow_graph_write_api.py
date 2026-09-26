@@ -48,7 +48,7 @@ if str(TESTS_DIR) not in sys.path:
 
 from agent import agent_store, schedule_store  # noqa: E402
 from agent.browser_action_adapter import reset_browser_readiness_cache  # noqa: E402
-from agent.workflow_v2 import normalize_workflow  # noqa: E402
+from code_bridge_core.workflow_v2 import normalize_workflow  # noqa: E402
 from core import database  # noqa: E402
 from routes import agents, dashboard_agents  # noqa: E402
 from routes.deps import require_local_access, verify_api_key  # noqa: E402
@@ -334,6 +334,24 @@ class KernelMissingWriteTest(FlowGraphWriteApiTestBase):
         self.assertIn("agent-flow-core", payload["detail"])
         # Refused means refused: nothing half-saved.
         self.assertEqual(self.store.count_agents(), 0)
+
+    def test_the_refusal_says_how_to_install_the_kernel(self):
+        """Same reason as the read view's: the package is on no index, so
+        "not installed" alone is a dead end for whoever has to fix it."""
+
+        graph = wire_graph(LINEAR_FLOW)
+
+        with kernel_uninstalled():
+            payload = self.client.post(
+                "/api/agent/agents", json={**AGENT_BODY, "flow_graph": graph}
+            ).json()
+
+        self.assertIn("requirements-kernel.txt", payload["detail"])
+        self.assertIn("sync-local-install.sh", payload["detail"])
+        self.assertIn("requirements-kernel.txt", payload["remedy"])
+        # The immediate workaround stays in front of the install instructions:
+        # flow_json needs no kernel and is the stored canon.
+        self.assertIn("flow_json", payload["detail"])
 
     def test_update_with_graph_is_a_422_and_changes_nothing(self):
         created = self._create(flow_json=LINEAR_FLOW)

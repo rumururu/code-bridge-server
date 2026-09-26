@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -37,12 +38,17 @@ from .capability_registry import (
     refresh_capability_registry,
     verify_declared_mcp_ids,
 )
-from .configurator import is_builder_added_tool
+from code_bridge_core.configurator import is_builder_added_tool
 from .prompt_composer import compose_system_prompt
 from .cli_agent_runtime import find_cli_agent_source_path, resolve_cli_agent_definition
 from .cli_agent_sources import cli_agent_reference_prompt
-from .step_cursor import StepCursor
-from .workflow_v2 import WorkflowNormalizationError, normalize_workflow
+from code_bridge_core.step_cursor import (
+    UNSUPPORTED_TOPOLOGY_REASON,
+    StepCursor,
+    branch_reentry_positions,
+    unreachable_by_branch,
+)
+from code_bridge_core.workflow_v2 import WorkflowNormalizationError, normalize_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +81,21 @@ _DECISION_PATTERNS = (
     re.compile(r"결과에 따라"),
     re.compile(r"조건"),
 )
+
+
+_PROVIDER_ERROR_PREFIXES = ("API Error:", "API error:")
+
+
+def _looks_like_provider_error(text: Any) -> bool:
+    """A CLI error message standing where the answer should be.
+
+    Belt and braces for a `result` event whose `is_error` is missing or
+    false while the text is the CLI's own error line — the shape the
+    2026-09-04 incident had. Deliberately narrow: only the CLI's literal
+    "API Error:" prefix, so an answer that *mentions* an API error is not
+    thrown away.
+    """
+    return isinstance(text, str) and text.lstrip().startswith(_PROVIDER_ERROR_PREFIXES)
 
 
 class AgentTaskRunSink:
@@ -131,7 +152,16 @@ class AgentTaskRunSink:
                 self.result_text = content.strip()
         elif event_type == "result":
             content = data.get("result")
-            if isinstance(content, str) and content.strip():
+            if data.get("is_error") or _looks_like_provider_error(content):
+                # The turn ended in an error, and the CLI puts the error's
+                # text where the answer would be. Taken as an answer it is
+                # posted: on 2026-09-04 an llm step "완료"-d with "API Error:
+                # 400 Claude Code 2.1.220 does not support this model…", the
+                # next step typed that into a cafe article's title and
+                # published it, and the run reported success.
+                message = content.strip() if isinstance(content, str) and content.strip() else "Provider turn ended in an error."
+                self.error_message = message
+            elif isinstance(content, str) and content.strip():
                 self.result_text = content.strip()
 
         provider_id_raw = data.get("provider_id")
@@ -500,6 +530,57 @@ def prepare_task_orchestration(
             "launch_message": plan["launch_message"],
         },
     }
+
+
+def continue_paused_run(run_id: str) -> dict[str, Any] | None:
+    """Build the execution payload for carrying a paused run forward.
+
+    A pause is not a park. `resume_task_orchestration` reads the task's active
+    checkpoint, because everything that stopped before this existed stopped by
+    asking somebody something. A stepped run asks nothing and writes nothing on
+    the step it stopped before, so it has no checkpoint and that door answers
+    409 — correctly, for the question it was asked.
+
+    This is the same payload without the checkpoint lookup. The loop needs no
+    marker to find its place: completed rows are skipped, so re-entering it
+    lands on the first row that has not run.
+    """
+
+    store = get_agent_store()
+    run = store.get_run(run_id)
+    if not isinstance(run, dict):
+        return None
+    if run.get("status") != "paused":
+        raise ValueError("Only a paused run can be continued.")
+    task_id = run.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        raise ValueError("Paused run is not linked to a task.")
+    task = store.get_task(task_id)
+    if not isinstance(task, dict):
+        return None
+
+    provider_id = str(run.get("provider_id") or "openai")
+    execution: dict[str, Any] = {
+        "auto_start": True,
+        "resume": True,
+        "run_id": run_id,
+        "task_id": task_id,
+        "project_name": str(run.get("project_name") or GLOBAL_TASK_PROJECT_NAME),
+        "project_path": str(run.get("cwd") or _resolve_project_path(task, cwd=None)),
+        "provider_id": provider_id,
+        "model": run.get("model"),
+        "launch_message": _resume_launch_message(task, store.list_messages(run_id)),
+    }
+    store.append_event(
+        run_id=run_id,
+        event_type="task.execution.continue_requested",
+        provider_id=provider_id,
+        app_event={"task_id": task_id},
+    )
+    # Back to `running` before the loop starts, so nothing reading the row
+    # mid-flight sees a run that is working call itself paused.
+    store.update_run_status(run_id, "running")
+    return {"task": task, "run": run, "execution": execution}
 
 
 def resume_task_orchestration(
@@ -885,11 +966,12 @@ async def _execute_single_workflow_task_step(
         }
 
     if workflow_type == "condition":
-        return _complete_step(
-            task=task,
-            step_id=step_id,
+        # Same function the auto-advance loop calls. See
+        # `_execute_condition_workflow_step` for why that is not negotiable.
+        return _execute_condition_workflow_step(
+            task_id=task_id,
             run_id=run_id,
-            output={"result": "condition step completed without branching"},
+            step=step,
         )
 
     completed = await _execute_llm_workflow_step(
@@ -937,6 +1019,17 @@ async def execute_task_orchestration(execution: dict[str, Any]) -> None:
     project_name = str(execution.get("project_name") or GLOBAL_TASK_PROJECT_NAME)
     project_path = str(execution.get("project_path") or _global_task_path())
     launch_message = str(execution.get("launch_message") or "")
+    # How many steps this call may run before pausing. Carried on the
+    # execution dict like everything else the caller decides, so a stepped run
+    # and a normal one take the same door — the endpoint sets it, nothing else
+    # in the pipeline has to know.
+    max_steps_raw = execution.get("max_steps")
+    max_steps = (
+        max_steps_raw
+        if isinstance(max_steps_raw, int) and not isinstance(max_steps_raw, bool)
+        and max_steps_raw > 0
+        else None
+    )
     permission_decision_raw = execution.get("permission_decision")
     permission_decision = (
         permission_decision_raw if isinstance(permission_decision_raw, str) else None
@@ -954,6 +1047,7 @@ async def execute_task_orchestration(execution: dict[str, Any]) -> None:
             launch_message=launch_message,
             steps=steps,
             permission_decision=permission_decision,
+            max_steps=max_steps,
         )
         return
 
@@ -1131,6 +1225,7 @@ async def _execute_workflow_orchestration(
     launch_message: str,
     steps: list[dict[str, Any]],
     permission_decision: str | None = None,
+    max_steps: int | None = None,
 ) -> None:
     """Drive a workflow run and make sure it ends.
 
@@ -1166,6 +1261,7 @@ async def _execute_workflow_orchestration(
             launch_message=launch_message,
             steps=steps,
             permission_decision=permission_decision,
+            max_steps=max_steps,
         )
     except Exception as exc:
         logger.exception(
@@ -1225,6 +1321,15 @@ def _close_out_unfinished_run(*, task_id: str, run_id: str) -> None:
 #: driven, these are runs that stopped and are waiting. Only these can be
 #: abandoned — a run that is working is never "unanswered".
 _WAITING_RUN_STATUSES = {"blocked", "waiting_for_user", "waiting_user"}
+
+#: The same set, published for clients.
+#:
+#: ``routes/agents.py`` ``list_runs_waiting_for_a_person`` answers "what needs
+#: me?" from this, so the phone never hard-codes the statuses. It cannot: a
+#: client that lists only ``waiting_for_user`` stops seeing ``blocked`` runs
+#: the day one appears, and an empty list is indistinguishable from nothing to
+#: do — the failure would be silent on the one screen that must not be.
+WAITING_RUN_STATUSES = frozenset(_WAITING_RUN_STATUSES)
 
 
 #: Why a run ended when nobody ever answered the park it was sitting on.
@@ -1345,11 +1450,30 @@ async def _drive_workflow_steps(
     launch_message: str,
     steps: list[dict[str, Any]],
     permission_decision: str | None = None,
+    max_steps: int | None = None,
 ) -> None:
+    """Run the workflow from wherever it is, optionally only so far.
+
+    ``max_steps`` is how a run is walked one step at a time. It bounds how many
+    steps *this call* executes; when the budget runs out the loop stops and
+    leaves the run paused, with everything it did recorded exactly as a normal
+    run records it.
+
+    Nothing else has to know about pausing. Re-entering the loop continues
+    where it left off, because `StepCursor.should_skip` walks past completed
+    steps — the same property the existing resume path relies on. So "run one
+    more step" is this function again with the same budget, and "run the rest"
+    is this function with none.
+
+    Wanted because there was no way to look at a workflow mid-flight. Fixing
+    one cafe-posting step took six full runs, each one all-or-nothing, each
+    diagnosed afterwards from stored evidence rather than watched.
+    """
     store = get_agent_store()
+    executed = 0
     # Every "which step runs next" decision below is the cursor's. The loop
     # executes steps and records what happened; the cursor answers where
-    # execution goes (see agent/step_cursor.py — the T-B-07 delegation point).
+    # execution goes (see code_bridge_core/step_cursor.py — the T-B-07 delegation point).
     cursor = StepCursor(steps)
     while cursor.index < len(steps):
         if not cursor.begin_transition():
@@ -1357,7 +1481,7 @@ async def _drive_workflow_steps(
                 task_id=task_id,
                 run_id=run_id,
                 status="failed",
-                error={"message": "Workflow transition limit exceeded."},
+                error={"message": cursor.budget_exhausted_message(steps)},
             )
             return
 
@@ -1365,6 +1489,20 @@ async def _drive_workflow_steps(
         if cursor.should_skip(step):
             cursor.index += 1
             continue
+
+        # Checked here, before the step runs and after the skips: the budget
+        # counts *work done*, so walking over rows that were already finished
+        # in an earlier call does not spend it. Stopping before a step rather
+        # than after one also means the run is paused at a step the reader can
+        # point at and say "this one is next".
+        if max_steps is not None and executed >= max_steps:
+            _pause_workflow_execution(
+                task_id=task_id,
+                run_id=run_id,
+                next_step=step,
+            )
+            return
+        executed += 1
         step_input = step.get("input")
         if not isinstance(step_input, dict):
             step_input = {}
@@ -1577,13 +1715,35 @@ async def _drive_workflow_steps(
             )
             return
         if workflow_type == "condition":
-            _complete_step(
-                task=store.get_task(task_id) or {"id": task_id},
-                step_id=step["id"],
+            # The same function the single-step path calls, deliberately —
+            # see `_execute_condition_workflow_step`. Two copies of this is
+            # how `mcp_tool` came to work by hand and stall on a schedule.
+            outcome = _execute_condition_workflow_step(
+                task_id=task_id,
                 run_id=run_id,
-                output={"result": "condition step completed without branching"},
+                step=step,
             )
+            # Refresh before routing either way. The success path needs the
+            # recorded arm (that *is* the route); the failure path needs it
+            # too, because parking on a person merges into the row's output
+            # and a stale row would drop the explanation the person has to
+            # read.
             steps[cursor.index] = store.get_task_step(step["id"]) or step
+            if outcome.get("status") == "failed":
+                next_index = _apply_workflow_failure_policy(
+                    task_id=task_id,
+                    run_id=run_id,
+                    steps=steps,
+                    failed_index=cursor.index,
+                    cursor=cursor,
+                    error=outcome.get("error")
+                    or {"message": f"Condition step '{step.get('title')}' could not be judged."},
+                )
+                if next_index is None:
+                    return
+                steps = _steps_for_run(store, task_id, run_id)
+                cursor.index = next_index
+                continue
             next_index = _apply_workflow_success_policy(
                 task_id=task_id,
                 run_id=run_id,
@@ -2539,8 +2699,26 @@ async def _execute_notify_workflow_step(
     me if the disk is nearly full" is what survives the run. Earlier steps put
     their findings on the step record; this one turns the sentence the
     workflow was given into something the inbox will show.
+
+    The sentence is authored before the run, so the part worth reading is
+    usually a `{{steps.<id>.<fact>}}` reference to what an earlier step
+    produced — the Configurator is taught to write exactly that
+    (`code_bridge_core.configurator`). Resolving it here is what makes the
+    reference mean anything: without it the phone was shown the template,
+    verbatim, as the message. Measured on a real agent that posts an article
+    every morning and then reports its title: every notification since the
+    flow was authored read `오늘 등록한 제목: {{steps.pick_title.text}}`,
+    while the title itself sat resolved in the row above.
+
+    A name the run cannot answer is left written as it is and recorded in
+    ``unresolved`` on the step. The step still completes and the message still
+    goes: the run's substance already happened, and a notification is the one
+    place where failing loudly would replace a partially useful message with
+    no message at all. What it must not do is silently blank the reference —
+    an empty string reads like an answer.
     """
     from agent.notification_store import get_notification_store, normalize_level
+    from code_bridge_core.run_scope import resolve
 
     store = get_agent_store()
     step_id = str(step["id"])
@@ -2549,8 +2727,8 @@ async def _execute_notify_workflow_step(
     store.update_task_step(step_id, {"status": "running"})
 
     payload = step_input.get("notify") if isinstance(step_input.get("notify"), dict) else {}
-    title = str(payload.get("title") or step.get("title") or "").strip()
-    if not title:
+    raw_title = str(payload.get("title") or step.get("title") or "").strip()
+    if not raw_title:
         error = {
             "message": "notify step has no title to send",
             "type": "NotificationTitleMissing",
@@ -2559,7 +2737,28 @@ async def _execute_notify_workflow_step(
         return False
 
     task = store.get_task(task_id) or {}
-    notify_body = payload.get("body") or step_input.get("description") or None
+    raw_body = payload.get("body") or step_input.get("description") or None
+
+    scope = _bindings_from_earlier_steps(
+        store, run_id=run_id, task_id=task_id, step_id=step_id
+    )
+    resolved_title = resolve(raw_title, scope)
+    title = resolved_title.text.strip()
+    unresolved = list(resolved_title.missing)
+    notify_body = raw_body
+    if raw_body is not None:
+        resolved_body = resolve(raw_body, scope)
+        notify_body = resolved_body.text
+        for name in resolved_body.missing:
+            if name not in unresolved:
+                unresolved.append(name)
+    if unresolved:
+        logger.warning(
+            "notify step %s could not resolve %s; the message ships as written",
+            step_id,
+            ", ".join(unresolved),
+        )
+
     notify_level = normalize_level(payload.get("level"))
     try:
         notification = get_notification_store().create(
@@ -2585,12 +2784,23 @@ async def _execute_notify_workflow_step(
         title=title,
         body=notify_body,
         level=notify_level,
+        # What the tap needs to land somewhere. A notify push used to carry
+        # nothing but its own id, so tapping it opened the generic inbox —
+        # a list where the message sits as inert text next to a dismiss X,
+        # with no way through to the run that sent it. The ids are the same
+        # ones the waiting-for-user push already sends, for the same reason.
+        data_extra={
+            "kind": "agent_notify",
+            "run_id": run_id,
+            "task_id": task_id,
+            "agent_id": task.get("assigned_agent_id"),
+        },
     )
 
-    store.update_task_step(
-        step_id,
-        {"status": "completed", "output": {"notification": notification}},
-    )
+    output: dict[str, Any] = {"notification": notification}
+    if unresolved:
+        output["unresolved"] = unresolved
+    store.update_task_step(step_id, {"status": "completed", "output": output})
     return True
 
 
@@ -2600,6 +2810,7 @@ def _push_notification_best_effort(
     title: str,
     body: str | None,
     level: str,
+    data_extra: dict[str, str | None] | None = None,
 ) -> None:
     """Best-effort FCM push for a notification that is already durably stored.
 
@@ -2624,6 +2835,7 @@ def _push_notification_best_effort(
             body=body,
             notification_id=notification.get("id"),
             level=level,
+            data_extra=data_extra,
         )
         for dead_token in result.get("dropped", []):
             get_pairing_service().remove_push_token(dead_token)
@@ -2724,6 +2936,109 @@ async def _execute_shell_workflow_step(
         app_event={"task_id": task_id, "step_id": step_id, "output": output},
     )
     return False
+
+
+def _execute_condition_workflow_step(
+    *,
+    task_id: str,
+    run_id: str,
+    step: dict[str, Any],
+) -> dict[str, Any]:
+    """Judge a condition step's branches and record which arm it took.
+
+    **The only place a condition step is executed.** There are two dispatch
+    sites — the single-step path (`_execute_single_workflow_task_step`) and
+    the auto-advance loop (`_drive_workflow_steps`) — and both call this. Two
+    copies is not a style question here: `mcp_tool` shipped wired into one
+    site with the other holding a stale reference, and 1800 passing tests did
+    not notice because nothing exercised the second path. `shell` shipped the
+    same way and ran by hand while stalling on a schedule. So there is one
+    function, and `tests/test_condition_runner_wiring.py` drives a branching
+    workflow down *each* path and compares where it lands, because "they call
+    the same function" is a property a review checks and a review is exactly
+    what missed `mcp_tool`.
+
+    Returns the `_complete_step` / `_fail_step` result with a ``status`` key
+    added, so the single-step path can return it as-is (its old shape is a
+    subset) and the loop can read the outcome without re-reading the row.
+
+    No I/O beyond reading this run's rows: the judgement itself is
+    :func:`code_bridge_core.condition_eval.evaluate_branches`, which is pure. There is no
+    model call and no adapter — a condition step costs nothing and takes no
+    time, which is why a polling loop written as a backward branch is bounded
+    by the transition budget alone.
+    """
+
+    from code_bridge_core.condition_eval import ConditionEvaluationError, evaluate_branches
+    from code_bridge_core.run_scope import build_run_scope
+
+    store = get_agent_store()
+    task = store.get_task(task_id) or {"id": task_id}
+    step_id = str(step["id"])
+    step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+
+    if "branches" not in step_input:
+        # Every condition step saved before track H. Absent is not the same as
+        # empty (RUNNER_BRANCHING_SPEC 1.5): this is the passthrough that has
+        # always honoured `on_success`, and it keeps emitting the same string
+        # it always did so no stored workflow changes behaviour.
+        result = _complete_step(
+            task=task,
+            step_id=step_id,
+            run_id=run_id,
+            output={"result": "condition step completed without branching"},
+        )
+        result["status"] = "completed"
+        return result
+
+    # Everything this run has produced, keyed the way an author writes it.
+    # Read here rather than inside the evaluator so the evaluator stays pure
+    # and its answer stays reproducible from the scope alone.
+    scope = build_run_scope(
+        store.list_task_steps(task_id) or [],
+        run_id=run_id,
+        exclude_step_id=step_id,
+    )
+
+    try:
+        decision = evaluate_branches(step_input.get("branches"), scope)
+    except ConditionEvaluationError as exc:
+        # No fallback. A predicate that cannot be judged is not the default
+        # arm — the default arm is "the remaining cases", and sending an
+        # unreadable value there would leave the run record unable to tell a
+        # healthy run from a blind one. `on_failure` decides what happens
+        # next, and for a condition step that defaults to `ask_user`, which
+        # shows this message to a person (RUNNER_BRANCHING_SPEC 4.2).
+        result = _fail_step(
+            task=task,
+            step_id=step_id,
+            run_id=run_id,
+            error={"condition": exc.to_record()},
+        )
+        result["status"] = "failed"
+        return result
+
+    result = _complete_step(
+        task=task,
+        step_id=step_id,
+        run_id=run_id,
+        output={"condition": decision.to_record()},
+    )
+    store.append_event(
+        run_id=run_id,
+        event_type="task.step.branch",
+        app_event={
+            "task_id": task_id,
+            "step_id": step_id,
+            "workflow_step_id": step_input.get("workflow_step_id"),
+            "matched_index": decision.matched_index,
+            "matched_label": decision.label,
+            "target_step_id": decision.target_step_id,
+            "default": decision.default,
+        },
+    )
+    result["status"] = "completed"
+    return result
 
 
 async def _execute_app_action_workflow_step(
@@ -2866,35 +3181,41 @@ def _bindings_from_earlier_steps(
 
     Same run only. Yesterday's id is not this run's evidence, and silently
     reusing it would send the step somewhere nobody looked at.
+
+    The reading itself lives in :func:`code_bridge_core.run_scope.browser_bindings` now —
+    a condition step's predicates need the same run's values and more of them,
+    and two readers of the same rows is how the two would come to disagree
+    about which run a value belongs to. What stays here is the store call:
+    ``run_scope`` is pure on purpose, so the caller owns the I/O and the
+    "a lookup must never bring the run down" rule stays where the exception
+    can actually happen.
+
+    Browser action binding is the only consumer of *this* function, and it now
+    takes the **whole** run scope rather than the extract names alone. An
+    extract is not the only thing a browser action can be waiting on: a run
+    also holds `steps.<id>.<fact>`, and `steps.<id>.text` is what an `llm`
+    step wrote. Reading only the extracts left the one flow those facts were
+    added for parked on its own reference —
+
+        브라우저 action에 실제 URL/selector/검증값이 필요합니다.
+
+    for a `{{steps.write_body.text}}` whose value was sitting in the row
+    above, already written, already saved, already accepted by the gate.
+
+    `build_run_scope` is the same reader the condition steps use, and it is
+    where the reserved-namespace rule lives: an extract that named itself
+    `steps.x.status` is dropped rather than allowed to shadow a fact. Two
+    readers of these rows is how the two would come to disagree.
     """
-    bindings: dict[str, str] = {}
+    from code_bridge_core.run_scope import build_run_scope
+
     try:
         steps = store.list_task_steps(task_id) or []
     except Exception:  # noqa: BLE001 - a missing binding parks, it never crashes
         logger.debug("could not read earlier steps for bindings", exc_info=True)
-        return bindings
+        return {}
 
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        if step.get("run_id") != run_id or step.get("id") == step_id:
-            continue
-        output = step.get("output")
-        if not isinstance(output, dict):
-            continue
-        browser = output.get("browser_action")
-        if not isinstance(browser, dict):
-            continue
-        for found in browser.get("extracted") or []:
-            if not isinstance(found, dict):
-                continue
-            name = found.get("name")
-            value = found.get("value")
-            # Later steps win: a flow may re-read a value that changed, and the
-            # freshest reading is the one the run just made.
-            if isinstance(name, str) and name and value is not None:
-                bindings[name] = str(value)
-    return bindings
+    return build_run_scope(steps, run_id=run_id, exclude_step_id=step_id)
 
 
 async def _execute_browser_action_workflow_step(
@@ -3276,6 +3597,91 @@ def _is_app_action_workflow_type(workflow_type: str) -> bool:
     }
 
 
+def _rearm_backward_branch(
+    *,
+    task_id: str,
+    run_id: str,
+    steps: list[dict[str, Any]],
+    completed_index: int,
+    target_step_id: str | None,
+) -> None:
+    """Let the rows a backward arm goes back into run a second time.
+
+    A polling loop is written as a condition arm that goes back a step
+    (RUNNER_BRANCHING_SPEC 10.3). Routing there already works; what stopped it
+    being a loop is that ``StepCursor.should_skip`` walks past any row whose
+    status is ``completed``, so on the second pass the condition row skipped
+    itself and control left through the far end. The target ran exactly once
+    and the transition budget was never reached.
+
+    The fix is **not** to let completed rows run again: that rule is what
+    keeps "already ran" meaning one thing for every step type. Instead the
+    rows the arm is about to walk back into are explicitly *re-armed* — set
+    back to ``queued`` — so ``completed`` still means exactly what it means
+    everywhere else, and only rows this run deliberately re-enters lose it.
+
+    Three things bound which rows that is, and each is load-bearing:
+
+    * ``branch_reentry_positions`` covers only ``[target … condition]`` of a
+      **backward condition arm**. Forward arms and ``on_success: goto_step``
+      are untouched, so no workflow without a branching condition changes.
+    * ``run_id`` must match this run. This is the line that separates "this
+      row completed in this pass of this run" from "this row is left over from
+      an earlier run", and it is deliberately the same property that refuses
+      the 2026-08-06 replay. That incident is easy to mis-attribute to
+      ``should_skip``'s completed-row rule; measured, it is not — with the
+      completed-row rule removed and ``_steps_for_run``'s run scoping left in,
+      the stale row is still never reached, and with run scoping removed and
+      the rule left in, the stale script runs. Run scoping is the guard that
+      holds, so that is what this gate is written against. On the legacy path
+      ``_steps_for_run`` falls back to the whole task's rows when *none* of
+      them is stamped, and there no row matches, so nothing is ever re-armed
+      and the walk behaves exactly as it does today.
+      (``tests/test_condition_runner_wiring.py``
+      ``TheStaleRowIncidentIsStillRefusedTest``.)
+    * only ``completed`` rows. A row that is ``running``, ``waiting_for_user``
+      or ``blocked`` is not re-armed — a stale ``running`` shell row is the
+      2026-08-06 signature, and this function will not touch one.
+
+    Once re-armed, the loop is bounded by the transition budget, which is what
+    ``StepCursor.budget_exhausted_message`` and its ``branch_history`` were
+    built to explain (T-H-06).
+    """
+
+    positions = branch_reentry_positions(steps, completed_index, target_step_id)
+    if not positions:
+        return
+
+    store = get_agent_store()
+    rearmed: list[str] = []
+    for position in positions:
+        step = steps[position]
+        if step.get("run_id") != run_id:
+            continue
+        if step.get("status") != "completed":
+            continue
+        step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+        workflow_step_id = step_input.get("workflow_step_id")
+        if not workflow_step_id:
+            continue
+        updated = store.update_task_step(step["id"], {"status": "queued"})
+        steps[position] = updated or step
+        rearmed.append(str(workflow_step_id))
+
+    if not rearmed:
+        return
+    store.append_event(
+        run_id=run_id,
+        event_type="task.step.branch.reentry",
+        app_event={
+            "task_id": task_id,
+            "step_id": steps[completed_index]["id"],
+            "target_step_id": target_step_id,
+            "rearmed_step_ids": rearmed,
+        },
+    )
+
+
 def _apply_workflow_success_policy(
     *,
     task_id: str,
@@ -3304,10 +3710,34 @@ def _apply_workflow_success_policy(
                 "reason": "on_success",
             },
         )
+        # A backward *branch* arm is a loop, and a loop needs the rows it goes
+        # back into to be runnable again. No-op for every other route.
+        _rearm_backward_branch(
+            task_id=task_id,
+            run_id=run_id,
+            steps=steps,
+            completed_index=completed_index,
+            target_step_id=route.target_step_id,
+        )
         return route.next_index
 
     if route.kind == "end":
         _finish_workflow_from_steps(task_id=task_id, run_id=run_id)
+        return None
+
+    if route.kind == "park":
+        # The step worked; the *workflow's shape* is what this runner cannot
+        # execute (a parallel branch, a merge, an ordering loop — see
+        # step_cursor.plan_execution_order). Stopping on a person with the
+        # reason is the only honest move: continuing down the list would run
+        # a branch as a sequence and report it as the authored workflow.
+        _wait_for_user_step(
+            task_id=task_id,
+            run_id=run_id,
+            step=steps[completed_index],
+            reason=route.park_reason or UNSUPPORTED_TOPOLOGY_REASON,
+            prompt=route.park_prompt,
+        )
         return None
 
     if route.kind == "abort":
@@ -3385,7 +3815,21 @@ def _apply_workflow_failure_policy(
             retry_state = {}
         retry_state = {**retry_state, "attempts": route.attempt}
         next_input = {**step_input, "retry_state": retry_state}
-        output = dict(failed_step.get("output") or {})
+        # Re-read, because the row moved underneath this dict. The failing
+        # executor has already written the attempt's evidence through
+        # `_finish_execution` (for a browser step, the whole
+        # `browser_action` block: which action, what the page was, what the
+        # error said). `steps` is the in-memory list the loop started with, so
+        # merging into *that* copy and storing the result overwrites the row
+        # with a version that never had the evidence in it.
+        #
+        # What was left instead was `{"last_retry_error": {"message":
+        # "Browser action step '제목·본문 입력' did not complete."}}` — the only
+        # trace of a failure whose cause was sitting in the column a moment
+        # earlier. A step that fails twice then parks on a person hands them
+        # that sentence and nothing else, which is not enough to act on.
+        stored = store.get_task_step(failed_step["id"]) or failed_step
+        output = dict(stored.get("output") or failed_step.get("output") or {})
         output["last_retry_error"] = error
         # A retry is a *fresh attempt*, so it starts with no denials against
         # it. The record exists to survive a park inside one attempt (see
@@ -3508,7 +3952,14 @@ def _wait_for_user_step(
     }
     if checkpoint_extra:
         checkpoint.update(checkpoint_extra)
-    output = dict(step.get("output") or {})
+    # Re-read for the same reason the retry path does: whatever the executor
+    # wrote about the attempt that led here — the browser observations, the
+    # error text — is in the row, not in this `step` dict, and merging into the
+    # stale copy stores a version with the evidence removed. The person this
+    # parks on is being asked to look at a failure; handing them a checkpoint
+    # and nothing else is handing them the question without the facts.
+    stored = store.get_task_step(step["id"]) or step
+    output = dict(stored.get("output") or step.get("output") or {})
     output["checkpoint"] = checkpoint
     output["reason"] = reason
     updated_step = store.update_task_step(
@@ -3978,6 +4429,17 @@ def _notify_waiting_for_user_best_effort(
             title=title,
             body=body,
             level="warning",
+            # What the tap needs to land somewhere useful. This push says a run
+            # is waiting for a person; without these it opens a list of
+            # sentences and the person still has to find which agent, which
+            # run, and then four screens to the answer box.
+            data_extra={
+                "kind": "waiting_for_user",
+                "run_id": run_id,
+                "task_id": task.get("id") if isinstance(task, dict) else None,
+                "agent_id": agent_id,
+                "wait_reason": reason,
+            },
         )
     except Exception:
         logger.exception(
@@ -3985,6 +4447,271 @@ def _notify_waiting_for_user_best_effort(
             run_id,
             step.get("id"),
         )
+
+
+#: The one status a row can hold and still be settled as "the run never came
+#: here". A row that started — ``running``, ``waiting_for_user``, ``blocked``,
+#: ``failed`` — was reached, whatever became of it, and overwriting that would
+#: erase what actually happened.
+_UNREACHED_STEP_STATUS = "queued"
+
+
+def _skip_reason_sentence(why: dict[str, Any]) -> str:
+    """One line saying which condition sent the run elsewhere, and where.
+
+    Read off the row on its own — the point of the whole ticket is that
+    "why didn't the restock step happen?" is answerable without rebuilding
+    the run from its events.
+    """
+
+    name = (
+        why.get("condition_workflow_step_id")
+        or why.get("condition_title")
+        or "condition"
+    )
+    label = why.get("matched_label")
+    arm = f"갈래 {why.get('matched_index')}"
+    if isinstance(label, str) and label:
+        arm += f"('{label}')"
+    if why.get("default"):
+        arm += "[기본 가지]"
+    return (
+        f"'{name}' 조건이 {arm}를 선택해 '{why.get('target_step_id')}'로 갔습니다."
+        " 이 스텝은 이번 run에서 실행되지 않았습니다."
+    )
+
+
+def _reconcile_unreached_branch_steps(*, task_id: str, run_id: str) -> None:
+    """Settle the rows a branch decision put out of reach as ``skipped``.
+
+    Step rows are all created ``queued`` up front (``:441-458``), so the arm a
+    condition did *not* take leaves its rows queued for ever. The run
+    finishing is safe — ``_finish_workflow_from_steps`` counts ``failed`` rows
+    only — but the record lies: the app draws ``queued`` as "about to run"
+    (``lib/screens/task/task_detail_screen.dart:762``), so a finished run
+    displays steps that will never happen and cannot say why.
+
+    What is settled here is exactly the rows
+    :func:`step_cursor.unreachable_by_branch` names — rows reachable in the
+    workflow's graph and unreachable once each condition keeps only the arm it
+    took. That set is empty for every run without a branching condition, which
+    is the regression net RUNNER_BRANCHING_SPEC 8 asks for: a linear run walks
+    every row, so it cannot produce a ``skipped`` one, and this function makes
+    no writes at all on such a run.
+
+    Rows that got as far as starting are left alone (see
+    ``_UNREACHED_STEP_STATUS``), and so are rows a run left queued for reasons
+    that are not a branch — an ``on_success: end`` above them, an abort part
+    way. Those were already queued at the end of a run before branching
+    existed, and calling them skipped now would change what every existing
+    workflow's record says.
+    """
+
+    store = get_agent_store()
+    steps = _steps_for_run(store, task_id, run_id)
+    reasons = unreachable_by_branch(steps)
+    if not reasons:
+        return
+
+    for position, why in sorted(reasons.items()):
+        step = steps[position]
+        if step.get("status") != _UNREACHED_STEP_STATUS:
+            continue
+        step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+        if not step_input.get("workflow_step_id"):
+            continue
+        record = {
+            "reason": "branch_not_taken",
+            "message": _skip_reason_sentence(why),
+            "condition_step_id": why.get("condition_workflow_step_id"),
+            "condition_row_id": why.get("condition_step_id"),
+            "matched_index": why.get("matched_index"),
+            "matched_label": why.get("matched_label"),
+            "target_step_id": why.get("target_step_id"),
+            "default": why.get("default"),
+        }
+        # Merged, not replaced: `update_task_step` writes `output` whole, and
+        # a row can carry a record that predates this settlement.
+        output = dict(step.get("output") or {})
+        output["skipped"] = record
+        store.update_task_step(step["id"], {"status": "skipped", "output": output})
+        store.append_event(
+            run_id=run_id,
+            event_type="task.step.skipped",
+            app_event={
+                "task_id": task_id,
+                "step_id": step["id"],
+                "workflow_step_id": step_input.get("workflow_step_id"),
+                **record,
+            },
+        )
+
+
+#: Run statuses that mean *this run is over and nothing will resume it*.
+#: Only these two ever reach :func:`_finish_workflow_execution` — parking on a
+#: person does not go through it (``route.kind == "park"`` keeps the run open),
+#: which is exactly why settling rows here cannot steal a step from a run that
+#: a human is still going to answer.
+_TERMINAL_RUN_STATUSES = frozenset({"completed", "failed"})
+
+
+def _never_started(step: dict[str, Any]) -> bool:
+    """True when this row has not run once in this run.
+
+    Status alone is not the test, and assuming it was destroyed a record. A
+    backward branch arm *re-arms* the rows it loops into — sets them back to
+    ``queued`` after they completed (``_rearm_backward_branch``) — so a
+    polling loop that ends while its condition row sits re-armed leaves a
+    ``queued`` row that has run several times and holds the decisions it
+    made. Settling that as "never reached" is wrong twice over: the sentence
+    is false, and writing the skip record over the row's output erased the
+    condition record underneath it.
+
+    Both timestamps are consulted, because neither alone covers every step
+    type. ``started_at`` is stamped when a row goes ``running`` — which a
+    shell row does and a *condition* row never does, since it is decided in
+    place and goes straight to ``completed``. ``ended_at`` is stamped on
+    every terminal status. Both are written with ``COALESCE``, so the re-arm
+    cannot clear either: whatever ran once keeps saying so.
+
+    Reading ``started_at`` alone is what the first version did, and a looping
+    condition row answered "never started" on a run it had decided on every
+    single pass.
+    """
+
+    if step.get("status") != _UNREACHED_STEP_STATUS:
+        return False
+    return not step.get("started_at") and not step.get("ended_at")
+
+
+def _never_reached_sentence(*, status: str, last_step: dict[str, Any] | None) -> str:
+    """One line saying where the run stopped, for a row it never got to."""
+
+    if last_step is None:
+        where = "이 run은 어떤 스텝도 실행하지 못하고 끝났습니다"
+    else:
+        name = last_step.get("title") or last_step.get("id")
+        where = (
+            f"이 run은 '{name}'에서 끝났습니다"
+            if status == "completed"
+            else f"이 run은 '{name}'에서 실패해 끝났습니다"
+        )
+    return f"{where}. 이 스텝은 차례가 오지 않았고, 이번 run에서는 실행되지 않습니다."
+
+
+def _settle_steps_never_reached(*, task_id: str, run_id: str, status: str) -> None:
+    """Settle every row a finished run never got to as ``skipped``.
+
+    :func:`_reconcile_unreached_branch_steps` runs first and answers the
+    narrow, attributable question — *which arm did the condition not take* —
+    and leaves everything else queued. Everything else is what this handles:
+    the rows below an ``on_success: end``, the rows a ``goto`` stepped over,
+    the rows under a step that failed the run. Those were left queued
+    deliberately, on the grounds that calling them skipped would change what
+    an existing workflow's record says.
+
+    It does change it, and the change is a correction. ``queued`` on a run
+    that is over is not a neutral placeholder — the app draws it as *about to
+    run* (``lib/screens/task/task_detail_screen.dart:762``). A completed run
+    that ends on ``on_success: end`` therefore displays two steps that will
+    never happen, with no way to say so, for ever. The old record was not
+    silent about these rows; it was wrong about them.
+
+    Two things keep the correction honest:
+
+    * **Only a finished run.** ``status`` is checked against
+      :data:`_TERMINAL_RUN_STATUSES` rather than trusted, so a caller that
+      grows a third, resumable status does not silently start settling rows a
+      person could still answer.
+    * **Only rows that never started.** ``running``, ``failed`` and anything
+      already ``skipped`` are left exactly as they are — this writes a status
+      for the absence of a run, never over the record of one.
+
+    The reason is stored separately from the branch reason (``run_ended`` vs
+    ``branch_not_taken``) because they answer different questions and only one
+    of them can name a condition. Collapsing them would make every skipped row
+    claim a branch decided it.
+    """
+
+    if status not in _TERMINAL_RUN_STATUSES:
+        return
+
+    store = get_agent_store()
+    steps = _steps_for_run(store, task_id, run_id)
+    stranded = [step for step in steps if _never_started(step)]
+    if not stranded:
+        return
+
+    # The last row that actually got somewhere — what the sentence names as
+    # where the run stopped. Read from the same ordered list, so it is the
+    # run's own last step and not the workflow's last definition entry.
+    ran = [step for step in steps if not _never_started(step)]
+    last_step = ran[-1] if ran else None
+    last_input = (last_step or {}).get("input")
+    record = {
+        "reason": "run_ended",
+        "message": _never_reached_sentence(status=status, last_step=last_step),
+        "run_status": status,
+        "last_step_id": (last_step or {}).get("id"),
+        "last_workflow_step_id": (
+            last_input.get("workflow_step_id") if isinstance(last_input, dict) else None
+        ),
+    }
+
+    for step in stranded:
+        step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+        # Merged into whatever the row already carries, never replacing it.
+        # `update_task_step` writes `output` whole, and a row can hold a
+        # record that predates this settlement — a condition row's own
+        # `condition` decision, for one. Replacing the map deleted it.
+        output = dict(step.get("output") or {})
+        output["skipped"] = record
+        store.update_task_step(step["id"], {"status": "skipped", "output": output})
+        store.append_event(
+            run_id=run_id,
+            event_type="task.step.skipped",
+            app_event={
+                "task_id": task_id,
+                "step_id": step["id"],
+                "workflow_step_id": step_input.get("workflow_step_id"),
+                **record,
+            },
+        )
+
+
+def _pause_workflow_execution(
+    *,
+    task_id: str,
+    run_id: str,
+    next_step: dict[str, Any],
+) -> None:
+    """Stop the run before ``next_step``, in a state the resume path continues.
+
+    Not a failure and not a park on a person: the run did what it was asked to
+    do and is waiting to be told to carry on. `paused` is its own status for
+    that reason — `failed` would put a red run in the list for a successful
+    walk, and `waiting_for_user` would claim someone was asked a question.
+
+    Nothing is written onto the step. It stays `queued`, which is what it is:
+    the next thing to run. Re-entering `_drive_workflow_steps` finds it there,
+    because completed rows are skipped and this one was never touched.
+    """
+
+    store = get_agent_store()
+    # `update_run_status` stamps `updated_at` itself (CURRENT_TIMESTAMP).
+    store.update_run_status(run_id, "paused")
+    store.append_event(
+        run_id=run_id,
+        event_type="task.execution.paused",
+        app_event={
+            "task_id": task_id,
+            "next_step_id": next_step.get("id"),
+            "next_workflow_step_id": (next_step.get("input") or {}).get(
+                "workflow_step_id"
+            ),
+            "next_title": next_step.get("title"),
+        },
+    )
 
 
 def _finish_workflow_execution(
@@ -3996,6 +4723,12 @@ def _finish_workflow_execution(
     error: dict[str, Any] | None = None,
 ) -> None:
     store = get_agent_store()
+    # Before the run is called finished, so nothing reading the terminal
+    # event can see a row still claiming it is about to run.
+    _reconcile_unreached_branch_steps(task_id=task_id, run_id=run_id)
+    # Second, and only after the branch attribution has claimed the rows
+    # it can explain: whatever is still queued on a run that is over.
+    _settle_steps_never_reached(task_id=task_id, run_id=run_id, status=status)
     store.update_run_status(run_id, status)
     updates: dict[str, Any] = {"status": status}
     if result is not None:
@@ -4019,6 +4752,15 @@ def _finish_workflow_execution(
             run_id=run_id,
             error=error,
         )
+        # Diagnosis is an attribute of the run, not a step someone remembered
+        # to add (AGENT_SELF_REPAIR_SPEC §3). Background, best-effort: a run
+        # is finished whether or not the model answers.
+        try:
+            from agent.run_diagnosis import schedule_diagnosis
+
+            schedule_diagnosis(run_id)
+        except Exception:
+            logger.exception("run diagnosis could not be scheduled for %s", run_id)
 
 
 def _notify_run_failed_best_effort(
@@ -4629,6 +5371,21 @@ def _required_user_action(reason: str) -> str:
         return "필요한 작업을 승인하거나 거절한 뒤 워크플로를 재개하세요."
     if reason == "approval_required":
         return "대기 중인 요청을 승인한 뒤 워크플로를 재개하세요."
+    if reason == UNSUPPORTED_TOPOLOGY_REASON:
+        # Nothing to approve or complete here — the workflow itself has to
+        # change, so say that instead of asking for a manual action.
+        #
+        # "한 줄로 이어지도록" was the right advice only while a branching
+        # workflow was unrepresentable. Condition steps now branch (T-H-08),
+        # so the accurate instruction names the one shape still refused:
+        # two steps running at the same time. The English twin of this
+        # sentence is in `step_cursor._unexecutable_topology`; the two say
+        # the same thing on purpose.
+        return (
+            "한 스텝에서 두 갈래가 동시에 시작되고 있습니다. 갈림길은 condition "
+            "스텝의 분기로 옮기고(한 번에 한 갈래만 실행됩니다), 동시 실행은 아직 "
+            "지원하지 않으니 워크플로를 수정한 뒤 다시 실행하세요."
+        )
     return "요청된 수동 작업을 완료한 뒤 워크플로를 재개하세요."
 
 
@@ -5218,39 +5975,59 @@ def _plan_workflow_steps(
     workflow_steps: list[dict[str, Any]],
     capabilities: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Turn normalized workflow steps into the run's step rows.
+
+    The ``input`` dict below is a hand-written key list, and that shape has a
+    known failure mode: a field the normalizer accepts but this list forgets
+    simply never reaches the run. ``branches`` was in exactly that state until
+    T-H-09 — ``derive_run_graph`` could not draw a single branch edge no
+    matter how right its derivation was, so the canvas would have drawn a
+    branching workflow while the run graph said it was a straight line.
+    ``tests/test_workflow_field_scoping.py`` now fails if a new
+    ``WORKFLOW_STEP_SCHEMA`` field stops reaching the row, because reviewing
+    this list by eye is what let the last one through.
+    """
+
     planned: list[dict[str, Any]] = []
     for index, workflow_step in enumerate(workflow_steps, start=1):
+        step_input: dict[str, Any] = {
+            "workflow_step_id": workflow_step["id"],
+            "workflow_type": workflow_step["type"],
+            "description": workflow_step.get("description") or "",
+            "instruction": workflow_step.get("instruction")
+            or workflow_step.get("description")
+            or "",
+            "observation": workflow_step.get("observation") or "",
+            "memory_read": workflow_step.get("memory_read")
+            or workflow_step.get("memoryRead")
+            or "",
+            "memory_write": workflow_step.get("memory_write")
+            or workflow_step.get("memoryWrite")
+            or "",
+            "tool_hint": workflow_step.get("tool_hint"),
+            "device_id": workflow_step.get("device_id"),
+            "android_device_id": workflow_step.get("android_device_id"),
+            "actions": workflow_step.get("actions") or [],
+            "script_id": workflow_step.get("script_id"),
+            "script_args": workflow_step.get("script_args") or [],
+            "notify": workflow_step.get("notify") or {},
+            "success_criteria": workflow_step.get("success_criteria") or "",
+            "on_failure": workflow_step.get("on_failure") or {"type": "abort"},
+            "on_success": workflow_step.get("on_success") or {"type": "continue"},
+            "retry_state": {"attempts": 0},
+        }
+        # Absent and empty are different routings (RUNNER_BRANCHING_SPEC 1.5):
+        # no key at all is the pre-branching condition step that honours
+        # `on_success`, an empty list is a half-authored one. Copying the key
+        # only when the step has it keeps the two tellable apart on the row.
+        if "branches" in workflow_step:
+            step_input["branches"] = copy.deepcopy(workflow_step["branches"])
         planned.append(
             {
                 "title": _workflow_step_title(workflow_step, index),
                 "capability_id": _workflow_step_capability_id(workflow_step, capabilities),
                 "status": "queued",
-                "input": {
-                    "workflow_step_id": workflow_step["id"],
-                    "workflow_type": workflow_step["type"],
-                    "description": workflow_step.get("description") or "",
-                    "instruction": workflow_step.get("instruction")
-                    or workflow_step.get("description")
-                    or "",
-                    "observation": workflow_step.get("observation") or "",
-                    "memory_read": workflow_step.get("memory_read")
-                    or workflow_step.get("memoryRead")
-                    or "",
-                    "memory_write": workflow_step.get("memory_write")
-                    or workflow_step.get("memoryWrite")
-                    or "",
-                    "tool_hint": workflow_step.get("tool_hint"),
-                    "device_id": workflow_step.get("device_id"),
-                    "android_device_id": workflow_step.get("android_device_id"),
-                    "actions": workflow_step.get("actions") or [],
-                    "script_id": workflow_step.get("script_id"),
-                    "script_args": workflow_step.get("script_args") or [],
-                    "notify": workflow_step.get("notify") or {},
-                    "success_criteria": workflow_step.get("success_criteria") or "",
-                    "on_failure": workflow_step.get("on_failure") or {"type": "abort"},
-                    "on_success": workflow_step.get("on_success") or {"type": "continue"},
-                    "retry_state": {"attempts": 0},
-                },
+                "input": step_input,
             }
         )
     return planned

@@ -91,6 +91,45 @@ class PolicyRoutesTest(unittest.TestCase):
         self.assertEqual(request_response.status_code, 403)
         self.assertEqual(request_response.json()["policy"]["effect"], "forbidden")
 
+    def test_rule_listing_says_whether_a_rule_is_live_and_how_often_it_fired(self):
+        live = self.client.post(
+            "/api/policies/rules",
+            json={"scope": "global", "operation": "process.terminal", "effect": "allow"},
+        ).json()["rule"]
+        inert = self.client.post(
+            "/api/policies/rules",
+            json={"scope": "project:tfkeyboard", "operation": "feedback.reply.send", "effect": "allow"},
+        ).json()["rule"]
+
+        for _ in range(2):
+            self.client.post(
+                "/api/approvals/request",
+                json={"operation": "process.terminal", "details": {"command": "git status"}},
+            )
+
+        by_id = {rule["id"]: rule for rule in self.client.get("/api/policies/rules").json()["rules"]}
+        self.assertTrue(by_id[live["id"]]["consulted"])
+        self.assertEqual(by_id[live["id"]]["matched_count"], 2)
+        self.assertIsNotNone(by_id[live["id"]]["last_matched_at"])
+        # Nothing on the server ever asks for approval under this name, so the
+        # rule can never fire — and the listing has to say so, not show it as
+        # an allow like any other.
+        self.assertFalse(by_id[inert["id"]]["consulted"])
+        self.assertEqual(by_id[inert["id"]]["matched_count"], 0)
+        self.assertIsNone(by_id[inert["id"]]["last_matched_at"])
+
+    def test_identical_rule_is_not_created_twice(self):
+        body = {"scope": "project:tfkeyboard", "operation": "feedback.reply.send", "effect": "allow"}
+        first = self.client.post("/api/policies/rules", json=body).json()["rule"]
+        second = self.client.post("/api/policies/rules", json=body).json()["rule"]
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(len(self.client.get("/api/policies/rules").json()["rules"]), 1)
+        # A different effect for the same operation/scope is a new rule, not a duplicate.
+        other = self.client.post(
+            "/api/policies/rules", json={**body, "effect": "confirm_each"}
+        ).json()["rule"]
+        self.assertNotEqual(other["id"], first["id"])
+
     def test_delete_policy_rule(self):
         rule = self.client.post(
             "/api/policies/rules",

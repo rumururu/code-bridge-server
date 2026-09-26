@@ -5,7 +5,9 @@ fastapi==0.109.0
 # wheel and tried to compile it from source. Versions below match the tested set.
 uvicorn[standard]>=0.31.1,<0.52
 websockets==12.0
-pyyaml==6.0.1
+# 6.0.2 is the first release with CPython 3.13 wheels; 6.0.1 needs a C
+# compiler on Windows, which the MSI build host does not have.
+pyyaml==6.0.2
 httpx>=0.27.1,<0.28  # >=0.27.1 for mcp (claude-agent-sdk), <0.28 keeps starlette 0.35's TestClient working
 python-multipart>=0.0.9,<0.1
 tomli>=2.0.1; python_version < "3.11"
@@ -59,6 +61,21 @@ cryptography>=41.0.0
 
 # mDNS/Bonjour for local network discovery
 zeroconf>=0.131.0
+
+# --- declared elsewhere: the agent-flow-core kernel ------------------------
+# Not omitted, and not optional to the feature: the workflow graph view
+# (`flow_graph` on GET /agents/{id}) and graph-shaped writes need the
+# `agent-flow-core` package. It cannot be named on an installable line HERE
+# because it is deliberately absent from public indexes. Release inputs carry
+# a reviewed target wheel and manifest under vendor/agent-flow-core, and the
+# deployment/package verifier installs it only after target, source commit,
+# and SHA-256 checks. The pin is declared in the file next to this one:
+#
+#     server/requirements-kernel.txt
+#
+# install/sync-local-install.sh and the desktop release workflow install it
+# from that vendored pair. Missing or source kernels fail those release paths.
+# ---------------------------------------------------------------------------
 
 # Desktop tray/menu-bar launcher
 pystray>=0.19.5

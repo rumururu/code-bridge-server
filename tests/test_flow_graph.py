@@ -34,7 +34,7 @@ from agent.flow_graph import (  # noqa: E402
     from_graph,
     to_graph,
 )
-from agent.workflow_v2 import ALLOWED_STEP_TYPES, normalize_workflow  # noqa: E402
+from code_bridge_core.workflow_v2 import ALLOWED_STEP_TYPES, normalize_workflow  # noqa: E402
 from agent_flow_core.model import Flow  # noqa: E402
 from agent_flow_core.validate import validate_flow  # noqa: E402
 from test_flow_json_snapshot_regression import SNAPSHOTS  # noqa: E402
@@ -950,3 +950,129 @@ class StructuralCornerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FailureContinueWithoutSeqSuccessorTest(unittest.TestCase):
+    """E6 (spec 3.0.1) — a failure-continue draws the walk E1 does not.
+
+    The morning-check agent's shape: ``run_tests`` succeeds into a goto and
+    fails into ``continue``. The spec's "E1 already draws that line" only
+    holds when the success policy *is* ``continue``; here nothing drew it,
+    and ``analyze_failure`` floated as a second root with no way in.
+    """
+
+    MORNING_CHECK = [
+        {"id": "git_status", "type": "llm", "name": "git"},
+        {
+            "id": "run_tests",
+            "type": "llm",
+            "name": "tests",
+            "on_success": {"type": "goto_step", "target_step_id": "record_pass"},
+            "on_failure": {"type": "continue"},
+        },
+        {
+            "id": "analyze_failure",
+            "type": "llm",
+            "name": "analyze",
+            "on_failure": {"type": "goto_step", "target_step_id": "deep_dive"},
+        },
+        {"id": "notify_failure", "type": "notify", "name": "notify",
+         "on_success": {"type": "end"}},
+        {"id": "deep_dive", "type": "llm", "name": "deep dive",
+         "on_success": {"type": "end"}},
+        {"id": "record_pass", "type": "llm", "name": "record",
+         "on_success": {"type": "end"}},
+    ]
+
+    def _edges_from(self, linear, step_id):
+        graph = to_graph(linear)
+        return [
+            (e.to_step_id, e.kind, e.extensions["codeBridgeLinear"]["on"], e.id)
+            for e in graph.edges
+            if e.from_step_id == step_id
+        ]
+
+    def test_goto_success_plus_continue_failure_draws_the_failure_walk(self):
+        linear = _normalized(self.MORNING_CHECK)
+        self.assertEqual(
+            self._edges_from(linear, "run_tests"),
+            [
+                ("record_pass", "goto", "success", "run_tests:success"),
+                ("analyze_failure", "seq", "failure", "run_tests:failure"),
+            ],
+        )
+
+    def test_every_step_after_the_first_now_has_a_way_in(self):
+        graph = to_graph(_normalized(self.MORNING_CHECK))
+        targets = {e.to_step_id for e in graph.edges}
+        roots = [s.id for s in graph.steps if s.id not in targets]
+        self.assertEqual(roots, ["git_status"])
+
+    def test_end_success_plus_continue_failure_draws_it_too(self):
+        linear = _normalized([
+            {"id": "a", "type": "llm", "name": "A",
+             "on_success": {"type": "end"}, "on_failure": {"type": "continue"}},
+            {"id": "b", "type": "llm", "name": "B"},
+        ])
+        self.assertEqual(
+            self._edges_from(linear, "a"),
+            [("b", "seq", "failure", "a:failure")],
+        )
+
+    def test_branching_condition_plus_continue_failure_draws_it_too(self):
+        linear = _normalized([
+            {
+                "id": "gate", "type": "condition", "name": "Gate",
+                "on_failure": {"type": "continue"},
+                "branches": [
+                    {
+                        "label": "yes",
+                        "target_step_id": "far",
+                        "when": {"left": "{{x}}", "op": "equals", "right": "1"},
+                    },
+                    {"label": "else", "target_step_id": "far", "when": None},
+                ],
+            },
+            {"id": "after", "type": "llm", "name": "After"},
+            {"id": "far", "type": "llm", "name": "Far"},
+        ])
+        edges = self._edges_from(linear, "gate")
+        self.assertEqual([e[1] for e in edges], ["branch", "branch", "seq"])
+        self.assertEqual(edges[-1], ("after", "seq", "failure", "gate:failure"))
+
+    def test_beside_a_seq_successor_nothing_extra_is_drawn(self):
+        # Success continue draws E1; a failure continue must not double it.
+        linear = _normalized([
+            {"id": "a", "type": "llm", "name": "A",
+             "on_failure": {"type": "continue"}},
+            {"id": "b", "type": "llm", "name": "B"},
+        ])
+        self.assertEqual(
+            self._edges_from(linear, "a"),
+            [("b", "seq", "success", "a:success")],
+        )
+
+    def test_last_step_draws_nothing(self):
+        linear = _normalized([
+            {"id": "a", "type": "llm", "name": "A"},
+            {"id": "b", "type": "llm", "name": "B",
+             "on_success": {"type": "end"}, "on_failure": {"type": "continue"}},
+        ])
+        self.assertEqual(self._edges_from(linear, "b"), [])
+
+    def test_round_trip_and_kernel_gate(self):
+        linear = _normalized(self.MORNING_CHECK)
+        graph = to_graph(linear)
+        self.assertEqual(from_graph(graph), linear)
+        issues = validate_flow(graph, allowed_step_types=ALLOWED_STEP_TYPES)
+        self.assertEqual([i for i in issues if i.severity == "error"], [])
+
+    def test_a_graph_that_omits_the_failure_walk_is_missing_an_edge(self):
+        # The pre-fix canvas payload: same policies, no run_tests:failure edge.
+        # It is a stale view now, and from_graph says so instead of accepting
+        # a graph whose picture disagrees with its policies.
+        dump = to_graph(_normalized(self.MORNING_CHECK)).model_dump(by_alias=True)
+        dump["edges"] = [e for e in dump["edges"] if e["id"] != "run_tests:failure"]
+        with self.assertRaises(UnsupportedTopologyError) as ctx:
+            from_graph(Flow.model_validate(dump))
+        self.assertEqual([i.code for i in ctx.exception.issues], ["linear.edge_missing"])

@@ -265,5 +265,107 @@ class PushNotifierConfigurationTest(unittest.TestCase):
         )
 
 
+class NotifyStepResolvesStepReferencesTest(_OrchestratorTestBase):
+    """A notify message is authored before the value it is about exists.
+
+    `{{steps.<id>.<fact>}}` is the syntax the Configurator is taught to write
+    for exactly that, and `run_scope` already publishes `.text` from an llm
+    step's `output["result"]`. Until this was wired up the notify step sent
+    the template itself: a real agent that writes an article every morning and
+    reports its title pushed `오늘 등록한 제목: {{steps.pick_title.text}}` to a
+    phone, every day, while the title sat resolved in the row above.
+    """
+
+    def _run_flow_with_an_earlier_llm_step(self, notify_payload: dict):
+        agent = self.store.create_agent(
+            name="reporter bot",
+            system_prompt="Write, then report.",
+            provider_id="openai",
+            flow_json=[
+                {"id": "pick_title", "type": "llm", "name": "Pick a title"},
+                {
+                    "id": "report",
+                    "type": "notify",
+                    "name": "Report it",
+                    "notify": notify_payload,
+                },
+            ],
+        )
+        task = self.store.create_task(
+            title="Write and report",
+            assigned_agent_id=agent["id"],
+            goal="Write, then report.",
+        )
+        result = prepare_task_orchestration(task["id"], provider_id="openai", auto_start=False)
+        assert result is not None
+
+        # Stand in for the llm step having run: `run_scope.step_facts` reads
+        # `.text` off `output["result"]`, which is the shape an llm step writes.
+        steps = self.store.list_task_steps(task["id"])
+        llm_row = next(
+            s for s in steps if (s.get("input") or {}).get("workflow_step_id") == "pick_title"
+        )
+        self.store.update_task_step(
+            llm_row["id"],
+            {"status": "completed", "output": {"result": "드롭다운 목록 만들기"}},
+        )
+
+        asyncio.run(execute_task_orchestration(result["execution"]))
+        return task, self.store.list_task_steps(task["id"])
+
+    def test_the_phone_gets_the_value_not_the_template(self):
+        self._run_flow_with_an_earlier_llm_step(
+            {"title": "등록 완료", "body": "오늘 등록한 제목: {{steps.pick_title.text}}"}
+        )
+
+        stored = get_notification_store().list_notifications()
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["body"], "오늘 등록한 제목: 드롭다운 목록 만들기")
+        self.assertNotIn("{{", stored[0]["body"])
+
+    def test_a_reference_in_the_title_resolves_too(self):
+        self._run_flow_with_an_earlier_llm_step(
+            {"title": "등록 완료: {{steps.pick_title.text}}", "body": "본문 없음"}
+        )
+
+        stored = get_notification_store().list_notifications()
+        self.assertEqual(stored[0]["title"], "등록 완료: 드롭다운 목록 만들기")
+
+    def test_a_name_the_run_cannot_answer_is_recorded_and_still_sent(self):
+        # Left written rather than blanked: an empty string reads like an
+        # answer. The step still completes — the run's substance happened.
+        _, steps = self._run_flow_with_an_earlier_llm_step(
+            {"title": "등록 완료", "body": "제목: {{steps.nowhere.text}}"}
+        )
+
+        notify_row = next(
+            s for s in steps if (s.get("input") or {}).get("workflow_step_id") == "report"
+        )
+        self.assertEqual(notify_row["status"], "completed")
+        self.assertEqual(notify_row["output"]["unresolved"], ["steps.nowhere.text"])
+        stored = get_notification_store().list_notifications()
+        self.assertEqual(stored[0]["body"], "제목: {{steps.nowhere.text}}")
+
+    def test_the_push_carries_the_ids_a_tap_needs(self):
+        # Without these the tap opens the generic inbox, where the message is
+        # inert text beside a dismiss X and there is no way through to the run.
+        sent: dict = {}
+
+        def _capture(notification, title, body, level, data_extra=None):
+            sent.update(data_extra or {})
+
+        with mock.patch(
+            "agent.task_orchestrator._push_notification_best_effort",
+            side_effect=lambda **kw: _capture(**kw),
+        ):
+            task, _ = self._run_flow_with_an_earlier_llm_step(
+                {"title": "등록 완료", "body": "본문"}
+            )
+
+        self.assertEqual(sent.get("kind"), "agent_notify")
+        self.assertEqual(sent.get("task_id"), task["id"])
+        self.assertTrue(sent.get("run_id"))
+
+
 if __name__ == "__main__":
     unittest.main()

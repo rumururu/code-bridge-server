@@ -1,26 +1,4 @@
-"""The deploy script installs the agent-flow-core kernel — guarded, as a snapshot.
-
-The flow kernel lives in a separate local git repository, not on any package
-index, so `server/requirements.txt` cannot name it: a local path there would
-break every install on a machine without that checkout, and the public mirror
-installs from the same file. `install/sync-local-install.sh` is therefore the
-one path that puts the kernel into the deployed venv, and it must keep two
-properties:
-
-* **Guarded** — when the checkout is absent (another developer's machine, a
-  public install) the step logs one line and skips. If the guard is lost, the
-  deploy fails on every machine that is not this one.
-* **Non-editable** — the install is a snapshot taken at deploy time. An
-  editable install (`pip install -e`) would point the live server at the
-  kernel repo's *working tree*, so every half-finished edit there would reach
-  the running server immediately — the exact partial-deployment accident the
-  sync script exists to prevent for `server/` code.
-
-These tests pin both properties in the script text itself (the same style as
-`test_deploy_protects_runtime_state.py`): they do not execute the script —
-execution against a real install is the orchestrator's job — they make sure a
-future edit cannot silently drop the guard or flip the install to editable.
-"""
+"""Code Bridge deployment requires the reviewed compiled kernel artifact."""
 
 from __future__ import annotations
 
@@ -31,122 +9,81 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SYNC_SCRIPT = REPO_ROOT / "install" / "sync-local-install.sh"
 REQUIREMENTS = REPO_ROOT / "server" / "requirements.txt"
+KERNEL_REQUIREMENTS = REPO_ROOT / "server" / "requirements-kernel.txt"
+INSTALLER = REPO_ROOT / "scripts" / "install_closed_kernel.py"
+ARTIFACTS = REPO_ROOT / "server" / "vendor" / "agent-flow-core"
 
 
 class FlowKernelInstallStepTest(unittest.TestCase):
-    """The kernel step exists, is guarded, and installs a snapshot."""
-
     @classmethod
     def setUpClass(cls) -> None:
         cls.script = SYNC_SCRIPT.read_text(encoding="utf-8")
 
     def _function_body(self) -> str:
-        """The text of sync_flow_core(), so assertions cannot match a comment."""
         match = re.search(
             r"^sync_flow_core\(\)\s*\{\n(.*?)^\}", self.script, re.M | re.S
         )
-        if match is None:
-            self.fail(
-                "sync-local-install.sh no longer defines sync_flow_core(); the "
-                "kernel install step is gone (or renamed — point this test at "
-                "whatever replaced it)"
-            )
+        self.assertIsNotNone(match, "sync_flow_core() is missing")
         return match.group(1)
 
-    def test_the_kernel_install_step_exists_and_is_invoked(self) -> None:
-        body = self._function_body()  # fails with the message above if absent
-        self.assertTrue(body.strip(), "sync_flow_core() is defined but empty")
-        # Defining the function is not enough — it must actually run.
+    def test_step_is_invoked_and_uses_the_verifier(self) -> None:
+        body = self._function_body()
         after_def = self.script.split("sync_flow_core() {", 1)[1]
-        self.assertRegex(
-            after_def,
-            re.compile(r"^\s*sync_flow_core\s*$", re.M),
-            "sync_flow_core is defined but never called; the kernel would "
-            "silently stop being deployed",
-        )
+        self.assertRegex(after_def, re.compile(r"^\s*sync_flow_core\s*$", re.M))
+        self.assertIn("install_closed_kernel.py", body)
+        self.assertIn("vendor/agent-flow-core", body)
+        self.assertIn('"$python" "$installer" "$artifacts"', body)
 
-    def test_the_kernel_path_is_overridable(self) -> None:
-        self.assertIn(
-            "CODE_BRIDGE_FLOW_CORE_DIR",
-            self._function_body(),
-            "the kernel path must be overridable via CODE_BRIDGE_FLOW_CORE_DIR "
-            "so a machine with a non-standard checkout location can deploy",
-        )
-
-    def test_a_missing_checkout_skips_instead_of_failing(self) -> None:
-        """Property (a): the guard. Public/other-machine installs must survive."""
+    def test_missing_kernel_or_verifier_fails_deployment(self) -> None:
         body = self._function_body()
-        guard = re.search(
-            r"if \[ ! -d \"\$kernel_dir\" \];\s*then\n(.*?)\bfi\b",
-            body,
-            re.S,
-        )
-        self.assertIsNotNone(
-            guard,
-            "sync_flow_core() no longer checks whether the kernel checkout "
-            "exists; on any machine without ~/VSCodeProject/agent-flow-core "
-            "the deploy would now fail instead of skipping",
-        )
-        self.assertIn(
-            "return 0",
-            guard.group(1),
-            "the missing-checkout branch must return success (skip), not fall "
-            "through to pip or fail the deploy",
-        )
-        # The guard must come before any pip invocation in the function.
-        self.assertLess(
-            body.index('! -d "$kernel_dir"'),
-            body.index("$pip"),
-            "the existence guard must run before pip is touched",
-        )
+        self.assertIn("kernel verifier not found", body)
+        self.assertIn("kernel artifacts missing", body)
+        self.assertNotIn("skipped (expected", body)
+        self.assertNotIn("CODE_BRIDGE_FLOW_CORE_DIR", body)
 
-    def test_the_install_is_a_snapshot_not_editable(self) -> None:
-        """Property (b): no -e/--editable, ever."""
+    def test_release_install_has_no_source_or_editable_path(self) -> None:
         body = self._function_body()
-        install_lines = [
-            line
-            for line in body.splitlines()
-            if "install" in line and "$kernel_dir" in line
-        ]
-        self.assertTrue(
-            install_lines,
-            "sync_flow_core() has no `pip install ... $kernel_dir` line; the "
-            "kernel is no longer installed",
-        )
-        for line in install_lines:
-            with self.subTest(line=line.strip()):
-                self.assertIsNone(
-                    re.search(r"(?:^|\s)(-e|--editable)(?:\s|$)", line),
-                    "the kernel must be installed as a non-editable snapshot: "
-                    "an editable install points the live server at the kernel "
-                    "repo's working tree, so unfinished edits there would "
-                    "reach the running server immediately",
-                )
+        self.assertNotRegex(body, r"(?:^|\s)(-e|--editable)(?:\s|$)")
+        self.assertNotIn("agent-flow-core @ file:", body)
+        self.assertNotIn("ALLOW_SOURCE", body)
 
-    def test_dry_run_does_not_install(self) -> None:
-        """The script's convention: a dry run announces, only --apply acts."""
+    def test_dry_run_reports_but_does_not_install(self) -> None:
         body = self._function_body()
-        dry = re.search(r"if \[ \"\$APPLY\" -ne 1 \];\s*then\n(.*?)\bfi\b", body, re.S)
-        self.assertIsNotNone(
-            dry,
-            "sync_flow_core() no longer distinguishes dry run from --apply; "
-            "a default (dry) run of the sync script would install packages",
-        )
+        dry = re.search(r'if \[ "\$APPLY" -ne 1 \];\s*then\n(.*?)\bfi\b', body, re.S)
+        self.assertIsNotNone(dry)
         self.assertIn("return 0", dry.group(1))
 
-    def test_requirements_txt_never_names_the_kernel(self) -> None:
-        """The decision this step exists to uphold: no local path in the
-        shared requirements file, because the public mirror installs from it
-        on machines where that path does not exist."""
-        requirements = REQUIREMENTS.read_text(encoding="utf-8")
-        self.assertNotIn(
-            "agent-flow-core",
-            requirements,
-            "server/requirements.txt must not reference the local kernel "
-            "checkout — it would break every install on a machine without "
-            "that path (public mirror included); the sync script installs "
-            "the kernel instead",
-        )
+    def test_no_pip_cannot_bypass_the_offline_kernel_verifier(self) -> None:
+        invocation = self.script.split('echo "${CYAN}--- flow kernel${NC}"', 1)[1]
+        invocation = invocation.split('echo ""', 1)[0]
+        self.assertIn("sync_flow_core", invocation)
+        self.assertNotIn("SKIP_PIP", invocation)
+
+
+class FlowKernelArtifactDeclarationTest(unittest.TestCase):
+    def test_declaration_and_verifier_exist(self) -> None:
+        self.assertTrue(KERNEL_REQUIREMENTS.is_file())
+        self.assertTrue(INSTALLER.is_file())
+        text = KERNEL_REQUIREMENTS.read_text(encoding="utf-8")
+        self.assertIn("agent-flow-core 0.1.0", text)
+        self.assertIn("017ca72f1da20fd6416e8fb92b34c267c709f44c", text)
+        self.assertIn("install_closed_kernel.py", text)
+
+    def test_mac_arm64_cp313_wheel_and_manifest_are_bundled(self) -> None:
+        wheel = ARTIFACTS / "agent_flow_core-0.1.0-cp313-cp313-macosx_26_0_arm64.whl"
+        manifest = ARTIFACTS / f"{wheel.name}.manifest.json"
+        self.assertTrue(wheel.is_file())
+        self.assertTrue(manifest.is_file())
+
+    def test_base_requirements_points_to_the_separate_artifact_contract(self) -> None:
+        text = REQUIREMENTS.read_text(encoding="utf-8")
+        self.assertIn("requirements-kernel.txt", text)
+        installable = [
+            line
+            for line in text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertFalse(any("agent-flow-core" in line for line in installable))
 
 
 if __name__ == "__main__":

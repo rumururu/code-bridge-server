@@ -25,7 +25,7 @@ from agent import script_store as script_store_module
 from agent.script_store import ScriptRegistrationError
 from agent.shell_step_executor import build_command, run_registered_script
 from agent.task_orchestrator import _workflow_step_output_summary
-from agent.workflow_v2 import WorkflowNormalizationError, normalize_workflow
+from code_bridge_core.workflow_v2 import WorkflowNormalizationError, normalize_workflow
 from core import database
 
 
@@ -95,6 +95,205 @@ class ScriptRegistryTest(unittest.TestCase):
         script = self.store.register(name="gone", path=str(path))
         self.assertTrue(self.store.delete(script["id"]))
         self.assertIsNone(self.store.get(script["id"]))
+
+
+# What the script writer produces once it is told to declare its arguments:
+# the requirement stated once for a person (`usage`) and once for the machine.
+DECLARED_BODY = """#!/bin/bash
+# @param CHECK_DIR required Directory whose free space is checked
+# @param HEALTH_URL required Health endpoint probed after the disk check
+# @param BEARER_TOKEN optional Sent as an Authorization header
+set -euo pipefail
+usage() { echo "usage: $0 CHECK_DIR HEALTH_URL [BEARER_TOKEN]" >&2; exit 2; }
+[ $# -ge 2 ] || usage
+"""
+
+
+class ScriptInterfaceTest(unittest.TestCase):
+    """A script records what it needs, so something can check before 3am.
+
+    The registry used to keep a name, a path and an interpreter. A script whose
+    own `usage()` demanded two arguments was therefore indistinguishable, once
+    registered, from one that needed none — so a shell step naming it with no
+    `script_args` looked fine at every gate and stopped, asking, on its first
+    scheduled fire.
+
+    The distinction that matters most here is `None` vs `[]`. Every row written
+    before this existed has no declaration, and reading those as "takes no
+    arguments" would be the registry vouching for something nobody checked.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self._original_db_path = database.DB_PATH
+        database.DB_PATH = self.dir / "interface_test.db"
+        script_store_module._script_store = None
+        database.init_db()
+        self.addCleanup(self._restore)
+        self.store = script_store_module.get_script_store()
+
+    def _restore(self) -> None:
+        script_store_module._script_store = None
+        database.DB_PATH = self._original_db_path
+
+    def test_the_declaration_in_the_script_is_captured_at_registration(self):
+        path = _write_script(self.dir, "health.sh", DECLARED_BODY)
+        script = self.store.register(name="health", path=str(path))
+
+        self.assertEqual(
+            script["parameters"],
+            [
+                {
+                    "name": "CHECK_DIR",
+                    "required": True,
+                    "description": "Directory whose free space is checked",
+                },
+                {
+                    "name": "HEALTH_URL",
+                    "required": True,
+                    "description": "Health endpoint probed after the disk check",
+                },
+                {
+                    "name": "BEARER_TOKEN",
+                    "required": False,
+                    "description": "Sent as an Authorization header",
+                },
+            ],
+        )
+        self.assertEqual(
+            [entry["name"] for entry in script_store_module.required_parameters(script)],
+            ["CHECK_DIR", "HEALTH_URL"],
+        )
+
+    def test_a_script_that_declares_nothing_is_unknown_not_empty(self):
+        path = _write_script(self.dir, "quiet.sh", "#!/bin/bash\ndf -h /\n")
+        script = self.store.register(name="quiet", path=str(path))
+
+        self.assertIsNone(script["parameters"])
+        self.assertEqual(script_store_module.required_parameters(script), [])
+
+    def test_a_caller_can_state_an_interface_the_file_does_not(self):
+        path = _write_script(self.dir, "binary.sh", "#!/bin/bash\n")
+        script = self.store.register(
+            name="binary",
+            path=str(path),
+            parameters=[{"name": "SERIAL", "description": "adb device serial"}],
+        )
+        # `required` defaults to true: a parameter whose necessity nobody
+        # stated is one to ask about, not one to wave through.
+        self.assertEqual(
+            script["parameters"],
+            [{"name": "SERIAL", "required": True, "description": "adb device serial"}],
+        )
+
+    def test_an_explicit_empty_list_is_the_stronger_claim(self):
+        path = _write_script(self.dir, "none.sh", "#!/bin/bash\n")
+        script = self.store.register(name="none", path=str(path), parameters=[])
+        self.assertEqual(script["parameters"], [])
+
+    def test_a_stated_interface_wins_over_the_files_block(self):
+        path = _write_script(self.dir, "override.sh", DECLARED_BODY)
+        script = self.store.register(
+            name="override",
+            path=str(path),
+            parameters=[{"name": "ONLY_DIR", "required": True, "description": "d"}],
+        )
+        self.assertEqual([p["name"] for p in script["parameters"]], ["ONLY_DIR"])
+
+    def test_a_malformed_declaration_fails_at_registration(self):
+        # The module's premise: a typo fails now, not at 3am. A skipped
+        # `@param` line is a required argument nobody will ever be asked for.
+        path = _write_script(
+            self.dir, "typo.sh", "#!/bin/bash\n# @param CHECK_DIR requried a dir\n"
+        )
+        with self.assertRaises(ScriptRegistrationError) as caught:
+            self.store.register(name="typo", path=str(path))
+        self.assertIn("CHECK_DIR", str(caught.exception))
+
+    def test_a_duplicate_declaration_fails_at_registration(self):
+        path = _write_script(
+            self.dir,
+            "dupe.sh",
+            "#!/bin/bash\n# @param DIR required a\n# @param DIR required b\n",
+        )
+        with self.assertRaises(ScriptRegistrationError):
+            self.store.register(name="dupe", path=str(path))
+
+    def test_param_text_outside_a_comment_is_not_a_declaration(self):
+        # `@param` in a here-doc or a string is text the script prints, not an
+        # interface it declares. Requiring the comment marker keeps the parse
+        # off lines that can be executable code.
+        path = _write_script(
+            self.dir, "prose.sh", '#!/bin/bash\necho "@param DIR required x"\n'
+        )
+        self.assertIsNone(self.store.register(name="prose", path=str(path))["parameters"])
+
+    def test_an_update_can_state_or_clear_the_interface(self):
+        path = _write_script(self.dir, "later.sh", "#!/bin/bash\n")
+        script = self.store.register(name="later", path=str(path))
+        self.assertIsNone(script["parameters"])
+
+        stated = self.store.update(
+            script["id"], {"parameters": [{"name": "DIR", "required": True}]}
+        )
+        self.assertEqual([p["name"] for p in stated["parameters"]], ["DIR"])
+
+        # Unset leaves it alone…
+        renamed = self.store.update(script["id"], {"name": "later renamed"})
+        self.assertEqual([p["name"] for p in renamed["parameters"]], ["DIR"])
+
+        # …and an explicit null returns it to unknown.
+        cleared = self.store.update(script["id"], {"parameters": None})
+        self.assertIsNone(cleared["parameters"])
+
+    def test_rows_registered_before_the_column_existed_read_as_unknown(self):
+        # The migration case, exercised against a real pre-column database:
+        # the table as it was created, populated, and with only the *old*
+        # migration recorded — which is every database that has ever had a
+        # script registered in it.
+        path = _write_script(self.dir, "legacy.sh", DECLARED_BODY)
+        with database.get_db_connection() as conn:
+            conn.execute(
+                "DELETE FROM schema_migrations WHERE version = ?",
+                (database.AGENT_SCRIPTS_SCHEMA_VERSION,),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_migrations (version, name) VALUES (?, ?)",
+                (2026072600, "agent_scripts"),
+            )
+            conn.execute("DROP TABLE agent_scripts")
+            conn.execute(
+                """
+                CREATE TABLE agent_scripts (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    path TEXT NOT NULL,
+                    interpreter TEXT NOT NULL DEFAULT 'bash',
+                    default_args_json TEXT NOT NULL DEFAULT '[]',
+                    timeout_seconds INTEGER NOT NULL DEFAULT 3600,
+                    created_by TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO agent_scripts (id, name, path) VALUES (?, ?, ?)",
+                ("script_legacy", "legacy", str(path)),
+            )
+            conn.commit()
+
+        database.init_db()
+        legacy = self.store.get("script_legacy")
+
+        # Not backfilled from the file. The row was registered without anyone
+        # reading that block, and inventing the reading now would be the
+        # registry asserting something it never checked.
+        self.assertIsNone(legacy["parameters"])
+        self.assertEqual(script_store_module.required_parameters(legacy), [])
 
 
 class ShellStepNormalizationTest(unittest.TestCase):
@@ -379,3 +578,29 @@ class LlmStepResultTest(unittest.TestCase):
         sink = self._sink()
         asyncio.run(sink.send_json({"type": "assistant", "message": {"content": "thinking"}}))
         self.assertIsNone(sink.result_text)
+
+
+class TimedOutScriptKeepsItsTailTest(unittest.IsolatedAsyncioTestCase):
+    """A script the timeout kills still leaves the lines it wrote.
+
+    The device cycle hung after fifty minutes of logging and was diagnosed
+    from an empty record: `communicate()` held everything in one buffer and
+    the timeout path threw it away. The pipes are now drained as they fill.
+    """
+
+    async def test_stderr_written_before_the_hang_survives_the_kill(self):
+        import tempfile
+        from agent import shell_step_executor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "hang.sh"
+            script.write_text("#!/bin/bash\necho 'step one' >&2\necho 'home tab not found' >&2\nsleep 30\n")
+            script.chmod(0o755)
+            result = await shell_step_executor.run_registered_script(
+                {"id": "s", "name": "hang", "path": str(script), "interpreter": "bash", "timeout_seconds": 1},
+                extra_args=[],
+            )
+        self.assertTrue(result.timed_out)
+        self.assertIsNone(result.exit_code)
+        self.assertIn("home tab not found", result.stderr)
+        self.assertIn("timeout", result.error or "")

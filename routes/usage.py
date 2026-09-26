@@ -6,7 +6,11 @@ from fastapi import APIRouter, Depends, Query
 
 from core.config import get_config
 from core.database import get_usage_db
-from llm.claude_usage import fetch_claude_cli_stats
+from llm.claude_usage import (
+    fetch_claude_cli_stats,
+    fetch_claude_usage_snapshot,
+    merge_usage_for_display,
+)
 
 from .deps import verify_api_key
 
@@ -56,8 +60,16 @@ async def get_usage_summary(
     run_id: str | None = None,
     provider_id: str | None = None,
 ) -> dict[str, Any]:
-    """Return filtered usage summary for Work Cockpit."""
-    return _summary_payload(
+    """Return filtered usage summary for Work Cockpit.
+
+    The unfiltered summary — what the phone's settings screen asks for — also
+    carries Claude's own weekly reading as ``display_usage_percent``. It never
+    used to: only the chat socket merged it in, so the settings "usage" row
+    had no real number to show and the app filled the slot with cost divided
+    by a default budget. A filtered summary (one task, one run, one project)
+    is a slice of cost, and the account-wide limit does not belong on it.
+    """
+    payload = _summary_payload(
         window_days=window_days,
         project_name=project_name,
         workspace_id=workspace_id,
@@ -65,6 +77,10 @@ async def get_usage_summary(
         run_id=run_id,
         provider_id=provider_id,
     )
+    if any((project_name, workspace_id, task_id, run_id, provider_id)):
+        return payload
+    snapshot = await fetch_claude_usage_snapshot()
+    return merge_usage_for_display(payload, snapshot)
 
 
 @router.get("/turns", dependencies=[Depends(verify_api_key)], response_model=None)

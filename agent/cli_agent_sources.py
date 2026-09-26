@@ -131,7 +131,7 @@ from core.database import get_db_connection
 from core.timestamps import to_utc_iso
 
 from .cli_agent_eligibility import classify_candidates
-from .workflow_v2 import WorkflowNormalizationError, normalize_workflow
+from code_bridge_core.workflow_v2 import WorkflowNormalizationError, normalize_workflow
 
 logger = logging.getLogger(__name__)
 

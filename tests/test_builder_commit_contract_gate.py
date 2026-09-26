@@ -23,9 +23,10 @@ This file pins the three answers the commit paths now give:
 
 The refusal is a 400, matching every other "this workflow cannot be saved as
 written" refusal on this router (`_normalize_agent_workflow`,
-`agent/workflow_v2.py`). One class of refusal, one status code.
+`code_bridge_core/workflow_v2.py`). One class of refusal, one status code.
 """
 
+import stat
 import sys
 import tempfile
 import unittest
@@ -40,8 +41,9 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 from agent import agent_store, schedule_store  # noqa: E402
+from agent import script_store as script_store_module  # noqa: E402
 from agent.browser_action_adapter import reset_browser_readiness_cache  # noqa: E402
-from agent.configurator import create_builder_session  # noqa: E402
+from code_bridge_core.configurator import create_builder_session  # noqa: E402
 from core import database  # noqa: E402
 from routes import agents  # noqa: E402
 from routes.deps import verify_api_key  # noqa: E402
@@ -558,6 +560,451 @@ class AgentWriteRoutesContractGateTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         # No workflow was submitted, so no workflow was judged.
         self.assertNotIn("readiness", response.json())
+
+
+# The script the Configurator proposed for "매일 밤 스크립트를 실행하고 종료코드가
+# 0이 아니면 AI가 진단해서 알림", with the declaration block the script writer is
+# now told to emit. Its `usage()` and its `@param` lines say the same thing;
+# only one of them is readable by anything but a person.
+PROPOSED_SCRIPT = """#!/bin/bash
+# @param CHECK_DIR required 여유 공간을 확인할 디렉터리
+# @param HEALTH_URL required 확인할 헬스 엔드포인트
+set -euo pipefail
+usage() { echo "usage: $0 CHECK_DIR HEALTH_URL" >&2; exit 2; }
+[ $# -ge 2 ] || usage
+df -h "$1"
+curl -fsS "$2" >/dev/null
+"""
+
+
+class ShellScriptParameterGateTest(unittest.TestCase):
+    """The defect, reproduced through the door the user came in.
+
+    Built through the builder: the Configurator proposed a script, it was
+    approved through the product's own proposal path, the agent was created
+    with a daily schedule and fired — and it parked on step 1 with
+    `waiting_for_user`, because the script's two required positional arguments
+    were declared in its `usage()` and the shell step was bound to it with
+    `script_args` empty. The runtime was right to stop. What was missing is
+    that the registry threw the requirement away at registration, so no gate
+    could see a stall that was certain from the moment it was saved.
+
+    The refusal is not a dead end: `builder_provider.resolveRefusalInConversation`
+    hands it back to the Configurator as the next turn, which is why the `ask`
+    has to name the script and each parameter.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self._original_db_path = database.DB_PATH
+        database.DB_PATH = self.dir / "script_parameter_gate.db"
+        agent_store._agent_store = None
+        schedule_store._store = None
+        script_store_module._script_store = None
+        database.init_db()
+        reset_browser_readiness_cache()
+
+        app = FastAPI()
+        app.include_router(agents.router)
+        app.dependency_overrides[verify_api_key] = lambda: "test-api-key"
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        agent_store._agent_store = None
+        schedule_store._store = None
+        script_store_module._script_store = None
+        database.DB_PATH = self._original_db_path
+        reset_browser_readiness_cache()
+        self._tmp.cleanup()
+
+    # --- helpers ---------------------------------------------------------
+
+    def _register(self, body: str, *, name: str, filename: str) -> str:
+        path = self.dir / filename
+        path.write_text(body)
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        script = script_store_module.get_script_store().register(
+            name=name, path=str(path)
+        )
+        return script["id"]
+
+    def _register_legacy(self, body: str, *, name: str, filename: str) -> str:
+        """A row as it exists in every database that predates this column."""
+        script_id = self._register(body, name=name, filename=filename)
+        with database.get_db_connection() as conn:
+            conn.execute(
+                "UPDATE agent_scripts SET parameters_json = NULL WHERE id = ?",
+                (script_id,),
+            )
+            conn.commit()
+        return script_id
+
+    def _flow(self, script_id: str, args: list[str] | None = None) -> list[dict]:
+        step: dict = {
+            "id": "run_nightly_script",
+            "type": "shell",
+            "name": "야간 스크립트 실행",
+            "description": "밤마다 스크립트를 돌린다.",
+            "script_id": script_id,
+        }
+        if args is not None:
+            step["script_args"] = args
+        return [
+            step,
+            {
+                "id": "diagnose",
+                "type": "llm",
+                "name": "진단",
+                "description": "종료코드가 0이 아니면 원인을 찾는다.",
+            },
+        ]
+
+    def _commit(self, flow: list[dict], **extra):
+        session = create_builder_session(system_prompt="test")
+        session.messages.append(
+            {"role": "user", "content": "매일 밤 스크립트를 실행하고 실패하면 알려줘"}
+        )
+        body = {"session_id": session.session_id, "draft": _draft(flow)}
+        body.update(extra)
+        with mock.patch.multiple(
+            agents,
+            get_cached_browser_readiness_sync=mock.Mock(return_value=READY_RUNTIME),
+            get_browser_runtime_readiness=mock.AsyncMock(return_value=READY_RUNTIME),
+        ):
+            return self.client.post("/api/agent/builder/commit", json=body)
+
+    # --- the refusal ------------------------------------------------------
+
+    def test_a_step_that_passes_nothing_to_a_script_that_needs_two_is_refused(self):
+        script_id = self._register(PROPOSED_SCRIPT, name="야간 점검", filename="nightly.sh")
+
+        response = self._commit(self._flow(script_id))
+
+        self.assertEqual(response.status_code, 400, response.text)
+        payload = response.json()
+        # A single class of "cannot be saved as written", one status code, one
+        # error string the existing clients already recognise — without which
+        # the refusal would not parse and could not be handed back to the
+        # conversation.
+        self.assertEqual(payload["error"], "workflow_contract_blocked")
+        self.assertTrue(payload["can_save_incomplete"])
+
+        blocking = payload["blocking"]
+        self.assertEqual(len(blocking), 1, blocking)
+        finding = blocking[0]
+        self.assertEqual(finding["code"], "script_parameters_unfilled")
+        self.assertEqual(finding["step_id"], "run_nightly_script")
+        detail = finding["detail"]
+        self.assertEqual(detail["script_id"], script_id)
+        self.assertEqual(detail["script_name"], "야간 점검")
+        self.assertEqual(detail["field"], "script_args")
+        self.assertEqual(detail["parameter_names"], ["CHECK_DIR", "HEALTH_URL"])
+        self.assertEqual(
+            [entry["description"] for entry in detail["missing_parameters"]],
+            ["여유 공간을 확인할 디렉터리", "확인할 헬스 엔드포인트"],
+        )
+
+        # Named in the sentence, because that sentence is what the user reads
+        # and what the Configurator is asked to turn into questions.
+        self.assertIn("야간 점검", finding["ask"])
+        self.assertIn("CHECK_DIR", finding["ask"])
+        self.assertIn("HEALTH_URL", finding["ask"])
+        self.assertIn(finding["ask"], payload["detail"])
+
+        self.assertEqual(agent_store.get_agent_store().count_agents(), 0)
+
+    def test_the_same_step_with_its_arguments_filled_commits(self):
+        script_id = self._register(PROPOSED_SCRIPT, name="야간 점검", filename="nightly.sh")
+
+        response = self._commit(
+            self._flow(script_id, ["/Users/me/project", "https://example.com/health"])
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(agent_store.get_agent_store().count_agents(), 1)
+        readiness = response.json()["commit_result"]["readiness"]
+        self.assertTrue(readiness["ok"])
+        stored = agent_store.get_agent_store().get_agent(response.json()["agent"]["id"])
+        self.assertEqual(
+            stored["flow_json"][0]["script_args"],
+            ["/Users/me/project", "https://example.com/health"],
+        )
+
+    def test_a_script_registered_before_the_interface_existed_still_commits(self):
+        # The migration case. That row's requirement is unknown, and unknown
+        # is not grounds to refuse someone's work — if it were, this change
+        # would break every workflow saved before today.
+        script_id = self._register_legacy(
+            PROPOSED_SCRIPT, name="구버전 스크립트", filename="legacy.sh"
+        )
+        self.assertIsNone(
+            script_store_module.get_script_store().get(script_id)["parameters"]
+        )
+
+        response = self._commit(self._flow(script_id))
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(agent_store.get_agent_store().count_agents(), 1)
+        self.assertTrue(response.json()["commit_result"]["readiness"]["ok"])
+
+    def test_the_escape_hatch_still_saves_it_and_says_what_is_missing(self):
+        script_id = self._register(PROPOSED_SCRIPT, name="야간 점검", filename="nightly.sh")
+
+        response = self._commit(self._flow(script_id), commit_incomplete=True)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        readiness = response.json()["commit_result"]["readiness"]
+        self.assertFalse(readiness["ok"])
+        self.assertTrue(readiness["saved_incomplete"])
+        self.assertIn("CHECK_DIR", readiness["message"])
+
+
+DISK_WATCH_FLOW = [
+    {
+        "id": "usage_gate",
+        "type": "condition",
+        "name": "사용률 90% 초과 판정",
+        "description": "루트 디스크 사용률이 90%를 넘었는지 비교한다.",
+        "branches": [
+            {
+                "label": "90% 초과",
+                "when": {"left": "{{disk_check.USED_PCT}}", "op": "gt", "right": "90"},
+                "target_step_id": "diagnose",
+            },
+            {"label": "정상", "when": None, "target_step_id": "healthy_note"},
+        ],
+    },
+    {
+        "id": "diagnose",
+        "type": "llm",
+        "name": "AI 디스크 진단",
+        "description": "원인을 진단한다.",
+        "observation": "{{disk_check}} 단계의 표준 출력과 종료 코드",
+    },
+    {
+        "id": "alert",
+        "type": "notify",
+        "name": "경고 알림 전송",
+        "description": "진단 결과를 보낸다.",
+        "on_success": {"type": "end"},
+        "notify": {"title": "경고", "body": "확인 필요", "level": "warning"},
+    },
+    {
+        "id": "healthy_note",
+        "type": "notify",
+        "name": "정상 기록",
+        "description": "한 줄만 남긴다.",
+        "on_success": {"type": "end"},
+        "notify": {"title": "정상", "body": "임계치 아래", "level": "info"},
+    },
+]
+
+
+class DoomedPredicateGateTest(unittest.TestCase):
+    """The reported commit, refused through the door it came in.
+
+    Built through the dashboard: the Configurator proposed a disk-usage
+    script, it was approved and registered with its parameters, and the agent
+    committed with four steps and no shell step at all. `usage_gate` compares
+    `{{disk_check.USED_PCT}}` and no step named `disk_check` existed, so
+    `condition_eval` would raise `unbound_reference` on every run and the step
+    would take neither arm. `analyze_workflow` had exactly one thing to say
+    about it, and it was a warning about prose.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self._original_db_path = database.DB_PATH
+        database.DB_PATH = self.dir / "doomed_predicate_gate.db"
+        agent_store._agent_store = None
+        schedule_store._store = None
+        script_store_module._script_store = None
+        database.init_db()
+        reset_browser_readiness_cache()
+
+        app = FastAPI()
+        app.include_router(agents.router)
+        app.dependency_overrides[verify_api_key] = lambda: "test-api-key"
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        agent_store._agent_store = None
+        schedule_store._store = None
+        script_store_module._script_store = None
+        database.DB_PATH = self._original_db_path
+        reset_browser_readiness_cache()
+        self._tmp.cleanup()
+
+    def _commit(self, flow: list[dict], *, session=None, **extra):
+        session = session or create_builder_session(system_prompt="test")
+        body = {"session_id": session.session_id, "draft": _draft(flow)}
+        body.update(extra)
+        with mock.patch.multiple(
+            agents,
+            get_cached_browser_readiness_sync=mock.Mock(return_value=READY_RUNTIME),
+            get_browser_runtime_readiness=mock.AsyncMock(return_value=READY_RUNTIME),
+        ):
+            return self.client.post("/api/agent/builder/commit", json=body)
+
+    def _register(self, name: str, filename: str) -> dict:
+        path = self.dir / filename
+        path.write_text("#!/usr/bin/env bash\necho USED_PCT=1\n")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        return script_store_module.get_script_store().register(name=name, path=str(path))
+
+    def test_the_reported_flow_is_refused_and_names_the_unresolvable_value(self):
+        response = self._commit(DISK_WATCH_FLOW)
+
+        self.assertEqual(response.status_code, 400, response.text)
+        payload = response.json()
+        self.assertEqual(payload["error"], "workflow_contract_blocked")
+        self.assertTrue(payload["can_save_incomplete"])
+
+        blocking = payload["blocking"]
+        self.assertEqual(len(blocking), 1, blocking)
+        finding = blocking[0]
+        self.assertEqual(finding["code"], "branch_predicate_unresolvable")
+        self.assertEqual(finding["step_id"], "usage_gate")
+        self.assertEqual(finding["detail"]["reference"], "disk_check.USED_PCT")
+        self.assertIn("{{disk_check.USED_PCT}}", finding["ask"])
+        self.assertIn(finding["ask"], payload["detail"])
+
+        # The prose heuristic is still a warning and still says what it said.
+        self.assertEqual(
+            [w["code"] for w in payload["warnings"]],
+            ["possible_unknown_step_reference"],
+        )
+        self.assertEqual(agent_store.get_agent_store().count_agents(), 0)
+
+    def test_a_satisfiable_predicate_commits(self):
+        script = self._register("Check disk usage", "disk.sh")
+        flow = [
+            {
+                "id": "disk_check",
+                "type": "shell",
+                "name": "Check disk usage",
+                "description": "루트 사용률을 읽는다.",
+                "script_id": script["id"],
+            },
+            *[dict(step) for step in DISK_WATCH_FLOW],
+        ]
+        flow[1] = {
+            **DISK_WATCH_FLOW[0],
+            "branches": [
+                {
+                    "label": "실패",
+                    "when": {
+                        "left": "{{steps.disk_check.exit_code}}",
+                        "op": "not_equals",
+                        "right": "0",
+                    },
+                    "target_step_id": "diagnose",
+                },
+                {"label": "정상", "when": None, "target_step_id": "healthy_note"},
+            ],
+        }
+        flow[2] = {**DISK_WATCH_FLOW[1], "observation": "앞 단계의 표준 출력"}
+
+        response = self._commit(flow)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(agent_store.get_agent_store().count_agents(), 1)
+        self.assertTrue(response.json()["commit_result"]["readiness"]["ok"])
+
+    def test_an_approved_script_no_step_runs_is_refused(self):
+        session = create_builder_session(system_prompt="test")
+        script = self._register("Check disk usage", "disk.sh")
+        session.apply_registered_script(
+            script=script, step_id="disk_check", request_name="Check disk usage"
+        )
+        # The approval wired a step in; this is the draft the *next* turn
+        # produced, with that step gone again.
+        response = self._commit(DISK_WATCH_FLOW, session=session)
+
+        self.assertEqual(response.status_code, 400, response.text)
+        codes = [f["code"] for f in response.json()["blocking"]]
+        self.assertIn("approved_script_unused", codes)
+        finding = next(
+            f for f in response.json()["blocking"] if f["code"] == "approved_script_unused"
+        )
+        self.assertEqual(finding["detail"]["script_id"], script["id"])
+        self.assertIn("Check disk usage", finding["ask"])
+        self.assertEqual(agent_store.get_agent_store().count_agents(), 0)
+
+    def test_the_same_session_commits_once_a_step_runs_the_script(self):
+        session = create_builder_session(system_prompt="test")
+        script = self._register("Check disk usage", "disk.sh")
+        draft = session.apply_registered_script(
+            script=script, step_id="disk_check", request_name="Check disk usage"
+        )
+        self.assertEqual([step.id for step in draft.flow], ["disk_check"])
+
+        flow = [
+            {
+                "id": "disk_check",
+                "type": "shell",
+                "name": "Check disk usage",
+                "description": "루트 사용률을 읽는다.",
+                "script_id": script["id"],
+            },
+            {
+                "id": "note",
+                "type": "notify",
+                "name": "기록",
+                "description": "결과를 남긴다.",
+                "on_success": {"type": "end"},
+                "notify": {"title": "결과", "body": "완료", "level": "info"},
+            },
+        ]
+        response = self._commit(flow, session=session)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(agent_store.get_agent_store().count_agents(), 1)
+
+    def test_the_escape_hatch_still_saves_a_deliberately_unused_script(self):
+        session = create_builder_session(system_prompt="test")
+        script = self._register("Check disk usage", "disk.sh")
+        session.apply_registered_script(
+            script=script, step_id="disk_check", request_name="Check disk usage"
+        )
+        response = self._commit(
+            [
+                {
+                    "id": "note",
+                    "type": "notify",
+                    "name": "기록",
+                    "description": "결과를 남긴다.",
+                    "on_success": {"type": "end"},
+                    "notify": {"title": "결과", "body": "완료", "level": "info"},
+                }
+            ],
+            session=session,
+            commit_incomplete=True,
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        readiness = response.json()["commit_result"]["readiness"]
+        self.assertFalse(readiness["ok"])
+        self.assertTrue(readiness["saved_incomplete"])
+        self.assertIn("Check disk usage", readiness["message"])
+
+    def test_a_session_that_approved_nothing_is_judged_exactly_as_before(self):
+        response = self._commit(
+            [
+                {
+                    "id": "note",
+                    "type": "notify",
+                    "name": "기록",
+                    "description": "결과를 남긴다.",
+                    "on_success": {"type": "end"},
+                    "notify": {"title": "결과", "body": "완료", "level": "info"},
+                }
+            ]
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["commit_result"]["readiness"]["ok"])
 
 
 if __name__ == "__main__":

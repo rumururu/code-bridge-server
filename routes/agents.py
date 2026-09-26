@@ -27,7 +27,8 @@ import uuid
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 
-from agent.configurator import (
+from agent.run_briefing import failure_briefing_block
+from code_bridge_core.configurator import (
     BuilderSession,
     build_configurator_system_prompt,
     build_configurator_turn_prompt,
@@ -36,8 +37,13 @@ from agent.configurator import (
     get_builder_session,
     looks_like_manual_timing,
     resolve_task_draft_workdir,
+    revision_briefing_block,
     task_goal_from_draft,
 )
+from pydantic import BaseModel, Field
+
+from agent import builder_tool_policy
+from agent.capability_registry import detected_mcp_server_configs
 from agent.agent_models import (
     AgentCreate,
     AgentArtifactCreate,
@@ -71,6 +77,12 @@ from agent.agent_origin import (
     assert_patch_reaches_execution,
     resolve_agent_origin,
 )
+from agent.agent_revision import (
+    AgentNotRevisableError,
+    agent_patch_from_draft,
+    draft_from_agent,
+    memory_seeds_to_add,
+)
 from agent.agent_store import (
     AgentStoreConflictError,
     PseudoAgentProtectedError,
@@ -83,9 +95,11 @@ from agent.browser_action_adapter import (
 )
 from agent.browser_session_store import get_browser_session_store
 from agent.capability_registry import refresh_capability_registry
+from agent.flow_revision import compute_flow_revision
 from agent.schedule_store import compute_next_fire_at, get_schedule_store
 from agent.scheduler import get_scheduler
 from agent.task_orchestrator import (
+    continue_paused_run,
     complete_connector_request,
     execute_task_orchestration,
     execute_task_step_adapter,
@@ -94,19 +108,22 @@ from agent.task_orchestrator import (
 )
 from agent.browser_action_executor import execute_browser_actions
 from agent.tool_artifacts import ARTIFACT_ROOT, record_tool_action_result
-from agent.workflow_contract import (
+from code_bridge_core.workflow_contract import (
     BROWSER_STEP_TYPES,
     CODE_BROWSER_RUNTIME_UNAVAILABLE,
     CODE_UNKNOWN_STEP_REFERENCE,
     CODE_UNRESOLVED_BROWSER_TARGET,
     ContractReport,
     analyze_workflow,
+    referenced_script_ids,
 )
-from agent.workflow_v2 import WorkflowNormalizationError, normalize_workflow
-from agent.workflow_step_schema import get_step_schema as get_workflow_step_schema_payload
+from code_bridge_core.workflow_v2 import ALLOWED_STEP_TYPES, WorkflowNormalizationError, normalize_workflow
+from code_bridge_core.workflow_step_schema import get_step_schema as get_workflow_step_schema_payload
 from approvals.approval_service import decide_approval
 from approvals.approval_store import get_approval_store
 from chat.chat_session_service import create_chat_session, get_chat_provider_selection
+from llm.llm_settings import list_alternative_chat_providers
+from llm.provider_errors import PROVIDER_ERROR_QUOTA, classify_provider_error
 from audit.route_audit import record_api_action
 from core.database import get_project_db
 from policy.policy_gate import evaluate_direct_action_gate
@@ -124,7 +141,86 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 PSEUDO_AGENT_IDS = {"agent_legacy_chat", "agent_adhoc_dev"}
 BUILDER_CONVERSE_FAST_TIMEOUT_SECONDS = 20.0
+
+#: How long a *job* Configurator turn may take before it is abandoned.
+#: Measured, not guessed: 25 completed turns in this machine's server log ran
+#: 16s min / 25s median / 70s max, and three more produced no result line at
+#: all — the ones that hit the old 120s ceiling. A turn that writes a script is
+#: the slow one, and it is the turn the whole builder journey depends on.
+#:
+#: The job path is polled, so a generous ceiling costs patience and nothing
+#: else; the thing it must not do is come in *under* what a real turn needs.
+#: Every client's give-up point must sit above this value, or the client
+#: abandons a job the server is still honouring and the finished answer is
+#: dropped on the floor — which is what the app did at exactly 120s against a
+#: 120s server ceiling (lib/providers/builder_provider.dart `_converseViaJob`,
+#: server/dashboard/templates/agents.html `BUILDER_POLL_LIMIT`).
+BUILDER_CONVERSE_JOB_TIMEOUT_SECONDS = 240.0
+
+#: The same budget for a turn that can drive a browser.
+#:
+#: 240s was measured against a turn that only writes: the model reads the
+#: draft, thinks, and answers. A turn with MCP tools attached does something
+#: else as well — it loads pages, waits for editors to render, runs scripts in
+#: them — and that time is spent inside the turn, against the model's clock.
+#:
+#: Measured: asked to find out why a form fill failed, the Configurator made
+#: thirteen tool calls against a Naver editor and died at 240s with the answer
+#: unwritten. The permission waits were not the problem; those are already
+#: added back (`_collect_llm_response_text`). The page loads were.
+#:
+#: Waiting for a browser is a third kind of waiting, alongside waiting for a
+#: model and waiting for a person. It cannot be measured separately from here
+#: — the stream gives one gap covering both the tool and the thinking after it
+#: — so the budget is widened instead of subdivided. Only when the tools are
+#: actually attached: a design conversation with no tools keeps the tighter
+#: ceiling, and a wedged provider is still cut off.
+#:
+#: Every client's give-up point must outlast this, same rule as above:
+#: `BUILDER_POLL_LIMIT` (dashboard) and `_converseJobPollAttempts` (app).
+BUILDER_TOOL_TURN_TIMEOUT_SECONDS = 600.0
+
 BUILDER_CONVERSE_JOB_TTL = timedelta(minutes=30)
+
+
+#: How long a builder turn may sit waiting for a person to answer a tool
+#: permission request.
+#:
+#: Deliberately its own clock, and much longer than the model's. Waiting for a
+#: human is a different kind of waiting from waiting for a model, and measuring
+#: both on `BUILDER_CONVERSE_JOB_TIMEOUT_SECONDS` would make "still thinking"
+#: and "waiting for you" indistinguishable — a design conversation would die
+#: because someone stepped away for four minutes. The model's own budget is
+#: *extended* by however long a person took, so a slow answer never eats the
+#: time the model needs afterwards.
+#:
+#: Not unbounded: an unanswered job would otherwise hold a live LLM session
+#: open until the process restarts.
+BUILDER_PERMISSION_WAIT_SECONDS = 600.0
+
+
+@dataclass
+class BuilderPermissionRequest:
+    """One tool call the Configurator made, waiting on a person.
+
+    Carried on the job because the job is the only channel this surface has:
+    a builder turn is polled, not pushed, so the request reaches the user as
+    part of the next poll and the answer comes back through an endpoint. This
+    is the same shape the script-proposal flow already uses.
+    """
+
+    request_id: str
+    tool_name: str
+    tool_input: dict[str, Any]
+    #: Settled by the permission endpoint; the turn is parked on it.
+    decision: asyncio.Future[bool] | None = None
+
+    def view(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "tool_name": self.tool_name,
+            "input": self.tool_input,
+        }
 
 
 @dataclass
@@ -137,6 +233,8 @@ class BuilderConverseJob:
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     response: BuilderTurnResponse | None = None
     error: str | None = None
+    #: Set while `status == "waiting_for_permission"`.
+    permission: BuilderPermissionRequest | None = None
 
     def touch(self) -> None:
         self.updated_at = datetime.now(UTC)
@@ -208,6 +306,31 @@ def _with_script_names(flow: Any) -> Any:
     return annotated
 
 
+# How a server gets the kernel it is missing. Kept in one place because two
+# routes report its absence (the read below degrades, the write refuses) and a
+# reader who is told only "not installed" is stuck: the package is on no index,
+# so `pip install agent-flow-core` — the one thing anybody would try — fails.
+# The declaration that names it, and the command that installs it, are:
+#
+#   server/requirements-kernel.txt
+#   install/sync-local-install.sh --apply   (runs the line above, guarded)
+#
+# See server/requirements.txt's pointer comment for why it is a separate file.
+_KERNEL_INSTALL_COMMAND = (
+    "CODE_BRIDGE_FLOW_CORE_DIR=~/VSCodeProject/agent-flow-core "
+    "venv/bin/pip install -r requirements-kernel.txt"
+)
+_KERNEL_INSTALL_HINT = (
+    "Install it by redeploying with `install/sync-local-install.sh --apply`,"
+    " which installs the kernel declared in server/requirements-kernel.txt"
+    " into this server's venv when the agent-flow-core checkout is present."
+    " By hand, from the install directory: `" + _KERNEL_INSTALL_COMMAND + "`"
+    " (point CODE_BRIDGE_FLOW_CORE_DIR at the checkout if it lives elsewhere)."
+    " It is not on a package index, so `pip install agent-flow-core` alone"
+    " will not find it."
+)
+
+
 def _flow_graph_view(flow_json: Any) -> dict[str, Any]:
     """The kernel graph view of a stored workflow — or the reason there is none.
 
@@ -244,8 +367,9 @@ def _flow_graph_view(flow_json: Any) -> dict[str, Any]:
                     "This server's Python environment has no agent-flow-core"
                     " kernel, so the graph view cannot be derived. The"
                     " workflow itself is unaffected — flow_json is the canon"
-                    " and runs exactly as stored."
+                    " and runs exactly as stored. " + _KERNEL_INSTALL_HINT
                 ),
+                "remedy": _KERNEL_INSTALL_COMMAND,
                 "detail": str(exc),
             }
         }
@@ -293,7 +417,38 @@ def _flow_graph_view(flow_json: Any) -> dict[str, Any]:
             }
         }
 
-    return {"flow_graph": flow.model_dump(by_alias=True)}
+    return {
+        "flow_graph": flow.model_dump(by_alias=True),
+        "flow_graph_issues": _flow_graph_issues(flow),
+    }
+
+
+def _flow_graph_issues(flow: Any) -> list[dict[str, Any]]:
+    """The kernel gate's verdict on a graph this server drew — as data.
+
+    ``agent_flow_core.validate.validate_flow`` has said ``step.unreachable``
+    about a step with no way in since it was written, and the product never
+    asked: the derivation drew the morning-check agent's ``analyze_failure``
+    as a second root for weeks while the kernel would have named it on the
+    first read. Every issue rides out, warnings included — the canvas is
+    where a person can see it, so this is where it has to be published.
+    An empty list means the gate is clean, and a client can tell that from
+    "this server does not run the gate" (key absent).
+    """
+    try:
+        from agent_flow_core.validate import validate_flow
+    except ImportError:  # kernel absent — flow_graph itself is absent too
+        return []
+    try:
+        issues = validate_flow(flow, allowed_step_types=ALLOWED_STEP_TYPES)
+    except Exception as exc:  # the gate must never take the read down
+        logger.exception("flow_graph validation failed")
+        return [{
+            "code": "gate.failed",
+            "severity": "warning",
+            "message": f"The kernel gate raised instead of answering: {type(exc).__name__}: {exc}",
+        }]
+    return [issue.model_dump(by_alias=True, exclude_none=True) for issue in issues]
 
 
 _ACTIVE_RUN_STATUSES = ("queued", "starting", "running")
@@ -304,6 +459,25 @@ _ACTIVE_RUN_STATUSES = ("queued", "starting", "running")
 # so the one agent that needed the user was the one they had no reason to open.
 # `agent/scheduler.py::_WAITING_RUN_STATUSES` is the same set for the same runs.
 _WAITING_RUN_STATUSES = ("blocked", "waiting_for_user", "waiting_user")
+
+
+def _open_repair_proposal_view(agent_id: str) -> dict[str, Any] | None:
+    """The one open repair proposal for this agent, reduced for a list card."""
+    try:
+        from agent.repair_proposals import get_repair_proposal_store
+
+        proposal = get_repair_proposal_store().open_for_agent(agent_id)
+    except Exception:
+        return None
+    if not proposal:
+        return None
+    return {
+        "id": proposal["id"],
+        "kind": proposal["kind"],
+        "summary": proposal["summary"],
+        "applicable": proposal["applicable"],
+        "created_at": proposal["created_at"],
+    }
 
 
 def _agent_run_activity(agent_id: str) -> dict[str, Any]:
@@ -348,6 +522,7 @@ def _agent_run_activity(agent_id: str) -> dict[str, Any]:
     return {
         "last_fire_at": _as_utc_iso(latest_stamp) if latest_stamp else None,
         "last_run_status": str(last_run.get("status") or "") or None,
+        "open_repair_proposal": _open_repair_proposal_view(agent_id),
         "active_run_count": sum(
             1 for run in runs if run.get("status") in _ACTIVE_RUN_STATUSES
         ),
@@ -400,6 +575,16 @@ def _agent_with_next_fire(
     builder-commit) share this serializer and stay off it too: they echo what
     was just saved, and the caller that wants the derived view reads the agent
     back. Turning it on for a caller is one keyword away if that changes.
+
+    ``flow_revision`` is *not* behind that flag, and is on the list route too.
+    It is one sha256 over a small JSON document — nothing next to the
+    per-step model building the graph view does — and it has to be on every
+    read that a writer might have started from, or a client that read the
+    agent from the list and then saved has nothing to hold. It rides on the
+    write responses for the same reason: a client that just saved needs the
+    revision it now holds, and paying for a second read to learn it would make
+    every save two round trips. See :mod:`agent.flow_revision` for what it
+    covers and why it is a content hash rather than ``updated_at``.
     """
     agent_id = str(agent["id"])
     next_fire = compute_next_fire_at(agent_id)
@@ -407,6 +592,11 @@ def _agent_with_next_fire(
     payload = {
         **agent,
         "flow_json": _with_script_names(agent.get("flow_json")),
+        # The *stored* workflow, deliberately not the annotated copy on the
+        # line above: `script_name`/`script_path` are read-time display sugar
+        # from another table, and a revision that moved when somebody renamed
+        # a script would refuse saves over a write no workflow writer made.
+        "flow_revision": compute_flow_revision(agent.get("flow_json")),
         "next_fire_at": next_fire.isoformat() if next_fire else None,
         **_agent_run_activity(agent_id),
         "activation": activation,
@@ -414,7 +604,25 @@ def _agent_with_next_fire(
     }
     if include_flow_graph:
         payload.update(_flow_graph_view(agent.get("flow_json")))
+        # Same convention as flow_graph_issues: [] means "looked, nothing
+        # failed"; an absent key means this server does not brief.
+        payload["failure_briefing"] = _failure_briefing(agent_id) or {"runs": []}
     return payload
+
+
+def _failure_briefing(agent_id: str) -> dict[str, Any] | None:
+    """The agent's failure briefing, or ``None`` when it cannot be built.
+
+    A briefing is an input to a proposal, never a reason a read or a prompt
+    fails: any error here is logged and the caller proceeds without it.
+    """
+    try:
+        from agent.run_briefing import build_run_briefing
+
+        return build_run_briefing(agent_id)
+    except Exception:
+        logger.exception("failure briefing unavailable for agent %s", agent_id)
+        return None
 
 
 def _resolve_agent_task(agent_id: str, task_id: str | None) -> dict[str, Any] | None:
@@ -792,15 +1000,38 @@ def _commit_summary(
     agent_fact: dict[str, Any],
     task_fact: dict[str, Any],
     schedule_fact: dict[str, Any],
+    runs_unattended: bool | None = None,
 ) -> str:
-    """One sentence a user can act on, covering only what actually exists."""
-    lines = [f"에이전트 '{agent_fact.get('name') or agent_fact['id']}'을(를) 만들었습니다."]
+    """One sentence a user can act on, covering only what actually exists.
+
+    ``runs_unattended`` is passed in rather than re-derived from
+    ``schedule_fact`` because a revision commit normally creates no schedule
+    and the agent runs on the one it already had. Deriving it here would print
+    "이 에이전트는 스스로 실행되지 않습니다" under an agent that fires every six
+    hours — the exact false statement about unattended running that
+    ``commit_result`` was introduced to stop. ``None`` keeps the original
+    derivation for callers that have no better answer.
+    """
+    label = agent_fact.get("name") or agent_fact["id"]
+    lines = [
+        f"에이전트 '{label}'을(를) 수정했습니다."
+        if agent_fact.get("updated")
+        else f"에이전트 '{label}'을(를) 만들었습니다."
+    ]
     if task_fact.get("created"):
         lines.append(f"작업을 만들었습니다: {task_fact.get('goal') or task_fact['id']}.")
+    elif task_fact.get("reason") == "existing_task_kept":
+        lines.append(str(task_fact.get("message") or ""))
     else:
         lines.append("실행할 작업은 만들지 않았습니다.")
-    lines.append(str(schedule_fact.get("message") or ""))
-    if not schedule_fact.get("created"):
+    if task_fact.get("reason") != "existing_task_kept":
+        lines.append(str(schedule_fact.get("message") or ""))
+    unattended = (
+        bool(schedule_fact.get("created"))
+        if runs_unattended is None
+        else runs_unattended
+    )
+    if not unattended:
         lines.append("이 에이전트는 스스로 실행되지 않습니다. 직접 실행해야 합니다.")
     return " ".join(line for line in lines if line)
 
@@ -873,7 +1104,7 @@ def _fold_flow_graph_input(
             "This server's Python environment has no agent-flow-core kernel,"
             " so a flow_graph request body cannot be folded into flow_json."
             " Nothing was saved. Send the workflow as flow_json instead —"
-            " that is the stored canon and needs no kernel."
+            " that is the stored canon and needs no kernel. " + _KERNEL_INSTALL_HINT
         )
         return None, JSONResponse(
             status_code=422,
@@ -882,6 +1113,7 @@ def _fold_flow_graph_input(
                 "reason": "kernel_not_installed",
                 "detail": detail,
                 "message": detail,
+                "remedy": _KERNEL_INSTALL_COMMAND,
                 "exception": str(exc),
             },
         )
@@ -918,17 +1150,75 @@ def _fold_flow_graph_input(
         )
 
 
+def _flow_revision_conflict_response(
+    agent_id: str,
+    *,
+    expected: str,
+    current: str,
+) -> JSONResponse:
+    """Refuse a write whose precondition names a workflow that has moved.
+
+    ``409``, and nothing is written — not the workflow, not the fields beside
+    it. A precondition is a statement about the whole request ("I am editing
+    that version of this agent"), so half-applying it would leave the caller
+    holding a revision that matches nothing and an agent that is partly
+    somebody else's edit and partly theirs.
+
+    The body follows ``unsupported_topology``'s shape rather than summarising:
+    a machine code under ``error``, the full sentence under both ``detail``
+    and ``message`` (FastAPI clients read one, this project's own clients read
+    the other), plus the two revisions. Both of them, not just the current
+    one — a client that logged the refusal can then say exactly which version
+    it was holding, which is the difference between "somebody else saved" and
+    "my own earlier save is the one I am now conflicting with".
+    """
+    detail = (
+        "Nothing was saved. This agent's workflow changed after you read it."
+        f" The request declared if_flow_revision='{expected}', and the stored"
+        f" workflow is now revision '{current}'. Another writer — the canvas,"
+        " the app's edit screen, the dashboard, or a script — replaced it in"
+        " between. Read the agent again (GET /api/agent/agents/"
+        f"{agent_id}, or the canvas graph read), carry your edits onto what is"
+        " there now, and send the save again with the revision you just read."
+        " This request was refused precisely so the other writer's version is"
+        " still intact to read."
+    )
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": "flow_revision_conflict",
+            "reason": "flow_revision_conflict",
+            "detail": detail,
+            "message": detail,
+            "agent_id": agent_id,
+            "expected_flow_revision": expected,
+            "current_flow_revision": current,
+        },
+    )
+
+
 class BuilderCommitBody(BuilderCommitRequest):
-    """The commit request, plus the one answer only this gate ever asks for.
+    """The commit request, plus the answers only this gate ever asks for.
 
     ``commit_incomplete`` is not part of what a draft *is*, so it does not
     belong on ``BuilderCommitRequest``: it is the caller's reply to a refusal
     this route made ("yes, save it anyway, I know it will stall"). Keeping it
     on the route's own body model puts the escape hatch beside the gate that
     offers it and leaves the shared draft model describing only the draft.
+
+    ``if_flow_revision`` is the same optimistic-concurrency precondition
+    :class:`AgentUpdateBody` carries, for the same race, and it is **optional
+    here for a different reason**: a revision session already recorded the
+    revision it was opened against, and *that* is checked whether the client
+    sends anything or not. Sending it is how a client that has re-read the
+    agent since — say the canvas saved from another tab and the app refreshed
+    — states the baseline it is holding now. Both are checked; either one
+    being stale refuses the commit. A creation commit has no baseline to be
+    stale against and ignores it.
     """
 
     commit_incomplete: bool = False
+    if_flow_revision: str | None = None
 
 
 class AgentCreateBody(AgentCreate):
@@ -957,10 +1247,21 @@ class AgentUpdateBody(AgentUpdate):
     ``flow_graph`` (see :class:`AgentCreateBody`) is popped the same way: it
     is folded into a ``flow_json`` patch entry before the patch reaches the
     store, and never travels as its own column.
+
+    ``if_flow_revision`` is the optimistic-concurrency precondition: "apply
+    this only if the stored workflow is still the one I read". It is a body
+    field rather than an ``If-Match`` header because the doors that wrap this
+    route — ``routes/canvas_api.py`` and ``routes/dashboard_agents.py`` —
+    delegate by *calling the handler as a function*, not by re-issuing an HTTP
+    request. A header would have to be threaded through every one of those
+    call sites as an extra parameter and would be silently dropped by any that
+    forgot; this model is the seam they already cross, so a door that forwards
+    the body forwards the precondition with it.
     """
 
     commit_incomplete: bool = False
     flow_graph: dict[str, Any] | None = None
+    if_flow_revision: str | None = None
 
 
 def _flow_has_browser_step(flow: Any) -> bool:
@@ -1000,10 +1301,43 @@ async def _browser_readiness_for_contract(flow: Any) -> dict[str, Any] | None:
         return None
 
 
+def _scripts_for_contract(flow: Any) -> dict[str, dict[str, Any]] | None:
+    """The registry rows for the scripts this flow's shell steps name.
+
+    Injected rather than looked up inside the contract module, which stays a
+    pure function of what it is handed — the same arrangement as
+    ``browser_readiness`` above, and for the same reason: the analysis has to
+    be callable without a database behind it.
+
+    A failed lookup returns ``None``, which makes no claim about any shell
+    step. Refusing a commit because the script table could not be read would
+    turn a database hiccup into "your workflow is broken", which is a
+    different and false statement.
+    """
+    script_ids = referenced_script_ids(flow)
+    if not script_ids:
+        return None
+    try:
+        from agent.script_store import get_script_store
+
+        store = get_script_store()
+        found = {
+            script_id: row
+            for script_id in script_ids
+            for row in (store.get(script_id),)
+            if row
+        }
+    except Exception:  # pragma: no cover - a save must not depend on this
+        logger.warning("script lookup for contract check failed", exc_info=True)
+        return None
+    return found or None
+
+
 async def _check_workflow_contract(
     flow: Any,
     *,
     commit_incomplete: bool,
+    approved_scripts: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[ContractReport, JSONResponse | None]:
     """Run the builder-runtime contract check for a workflow about to be saved.
 
@@ -1020,9 +1354,20 @@ async def _check_workflow_contract(
     ``commit_result.readiness`` — it is the answer to a real case: a draft
     someone wants to keep working on tomorrow, whose browser target they do not
     know yet. The runtime adapter still parks such a run honestly.
+
+    ``approved_scripts`` is passed only by the builder commit, which is the
+    only caller that knows which scripts this author approved on the way here.
+    Every other door — the canvas save, ``PATCH /agents/{id}``, the create
+    route — leaves it ``None``, so a workflow saved from there is judged
+    exactly as it was before this existed.
     """
     readiness = await _browser_readiness_for_contract(flow)
-    report = analyze_workflow(flow, browser_readiness=readiness)
+    report = analyze_workflow(
+        flow,
+        browser_readiness=readiness,
+        scripts=_scripts_for_contract(flow),
+        approved_scripts=approved_scripts,
+    )
     if report.has_blocking and not commit_incomplete:
         return report, _contract_refusal_response(report)
     return report, None
@@ -1135,12 +1480,42 @@ def _contract_readiness_fact(
     }
 
 
+class ProviderTurnError(RuntimeError):
+    """An LLM turn that failed, with the backend that failed it attached.
+
+    The provider is not decoration. A failure message alone cannot say
+    "Codex is out of allowance, and Claude is installed" — the caller has to
+    know *which* provider spoke to work out what else could. Subclasses
+    ``RuntimeError`` so every existing ``except RuntimeError`` handler keeps
+    catching it unchanged.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_id: str | None,
+        provider_name: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider_id = provider_id
+        self.provider_name = provider_name
+
+
 async def run_configurator_turn(
     session: BuilderSession,
     *,
     timeout: float = 120.0,
+    job: "BuilderConverseJob | None" = None,
 ) -> str:
-    """Run one Configurator turn through the selected LLM provider."""
+    """Run one Configurator turn through the selected LLM provider.
+
+    Note which provider that is: the app-wide chat selection
+    (``llm.selected_company``), **not** ``draft.provider_id``. The draft's
+    provider is which backend the *finished agent* will run on later; this one
+    is which backend writes it. They are unrelated settings and a failure here
+    is about this one.
+    """
 
     selection = get_chat_provider_selection()
     llm_session = await create_chat_session(
@@ -1148,22 +1523,168 @@ async def run_configurator_turn(
         str(Path.cwd()),
         selection,
     )
+    await _isolate_builder_session(llm_session)
+    await _attach_builder_mcp_servers(llm_session)
     prompt = build_configurator_turn_prompt(session)
     try:
-        return await asyncio.wait_for(
-            _collect_llm_response_text(llm_session, prompt),
-            timeout=timeout,
+        # The timeout is applied inside rather than wrapped around: a turn
+        # that parks on a person must not spend the model's budget waiting
+        # for them, and only the reader knows when that is happening.
+        return await _collect_llm_response_text(
+            llm_session, prompt, timeout=timeout, job=job
         )
     except asyncio.TimeoutError:
         with suppress(Exception):
             await llm_session.abort_current_turn()
         raise
+    except ProviderTurnError:
+        raise
+    except RuntimeError as exc:
+        # Re-raised, not swallowed: the same failure, now carrying the name of
+        # the backend that produced it.
+        raise ProviderTurnError(
+            str(exc),
+            provider_id=getattr(selection, "provider_id", None),
+            provider_name=getattr(selection, "provider_name", None),
+        ) from exc
 
 
-async def _collect_llm_response_text(llm_session: Any, prompt: str) -> str:
+def builder_turn_timeout_seconds() -> float:
+    """The model's budget for one Configurator turn, on this machine, now.
+
+    Two numbers, chosen by whether the turn can reach a browser. Reading the
+    setting rather than a flag on the session keeps this answerable before the
+    session exists, and keeps it the same question
+    `_attach_builder_mcp_servers` asks.
+    """
+
+    try:
+        enabled = builder_tool_policy.builder_mcp_enabled()
+    except Exception:
+        # The setting lives in a database, and this is the first thing the job
+        # path asks for — before the turn, before the session, before anything
+        # that would otherwise have opened it. When it cannot be read the
+        # answer is the *tighter* budget, never the wider one: a turn granted
+        # ten minutes because a lookup failed is a wedged provider held open
+        # for ten minutes.
+        logger.warning(
+            "builder_turn_timeout_setting_unreadable — using the plain budget",
+            exc_info=True,
+        )
+        return BUILDER_CONVERSE_JOB_TIMEOUT_SECONDS
+    if enabled:
+        return BUILDER_TOOL_TURN_TIMEOUT_SECONDS
+    return BUILDER_CONVERSE_JOB_TIMEOUT_SECONDS
+
+
+async def _isolate_builder_session(llm_session: Any) -> None:
+    """Keep this conversation's tool decisions inside this process.
+
+    The CLI loads `~/.claude/settings.json` unless told not to, and a
+    `permissions.allow` entry there pre-approves a tool before any code here
+    runs — `can_use_tool` is not consulted, no card is shown, and nothing
+    reaches the audit trail. On this machine that entry was `"mcp__playwright"`
+    with `defaultMode: auto`, and a design conversation drove a browser through
+    four navigations to an external site with nobody asked.
+
+    That file is the user's own configuration for their editor, and it is not
+    wrong: it says what *they* have decided to let their CLI do. It is simply
+    not an answer to "may this server's Agent Builder use a tool on my
+    behalf" — a question `builder.allow_mcp_tools` exists to ask, and whose
+    documented promise ("each call is still put to the person, one at a time")
+    that file silently overrode.
+
+    Unconditional, not tied to the MCP setting: a builder session has no
+    project and should never take its permissions from a file on disk,
+    whichever way the toggle is set.
+    """
+
+    setter = getattr(llm_session, "set_setting_isolation", None)
+    if setter is None:
+        # A provider with no notion of filesystem settings. Nothing to isolate.
+        return
+    await setter(True)
+
+
+async def _attach_builder_mcp_servers(llm_session: Any) -> None:
+    """Make the machine's configured MCP servers reachable from this turn.
+
+    Reachable is not the same as usable: every call still goes through
+    `can_use_tool`, and `builder_tool_policy` decides whether it is even put
+    to the user. Attaching nothing when the setting is off is the belt to that
+    braces — a design conversation on a fresh install cannot see a server,
+    let alone call one, so a bug in the asking path cannot become a bug in the
+    boundary.
+
+    Servers come from the same registry an agent run uses
+    (`detected_mcp_server_configs`), so the two surfaces can never disagree
+    about what exists on this machine.
+    """
+
+    if not builder_tool_policy.builder_mcp_enabled():
+        return
+    setter = getattr(llm_session, "set_mcp_servers", None)
+    if setter is None:
+        # A provider that carries no MCP. Nothing to do, and nothing to warn
+        # about: the tools simply will not exist and a call would be refused.
+        return
+    configs = detected_mcp_server_configs()
+    if not configs:
+        return
+    # WARNING, like every other operational fact this module records: the
+    # server runs at that level, so an `info` line here is written to nowhere
+    # and "did the design conversation get tools?" becomes unanswerable from
+    # the log — which is exactly the question an audit trail exists for.
+    logger.warning("builder_mcp_attached servers=%s", ",".join(sorted(configs)))
+    await setter(configs)
+
+
+async def _collect_llm_response_text(
+    llm_session: Any,
+    prompt: str,
+    *,
+    timeout: float,
+    job: "BuilderConverseJob | None" = None,
+) -> str:
+    """Read one turn to its result, answering any tool call along the way.
+
+    Tool calls are *answered*, never ignored, and that is this function's
+    whole history. `ClaudeSession.can_use_tool` publishes a `control_request`
+    and then parks on a future until something settles it. The chat surface
+    settles it with a permission card over its websocket; this path had no
+    equivalent, so the event fell through, the callback was never answered,
+    and the turn sat silent until the job timeout — four minutes to produce
+    nothing, for what should have been an immediate reply either way.
+
+    What the answer is comes from `builder_tool_policy`: shell and file tools
+    are refused outright, and an MCP tool is refused too unless the user has
+    switched the asking on. When it is on, the job parks in
+    `waiting_for_permission`, the request rides out on the next poll, and a
+    person answers through the permission endpoint.
+
+    **The model's clock stops while a person is deciding.** `timeout` is the
+    model's budget and the deadline is pushed out by however long a human
+    took, because a design conversation should not die because someone
+    stepped away. The wait itself is bounded separately
+    (`BUILDER_PERMISSION_WAIT_SECONDS`) so an unanswered job cannot hold an
+    LLM session open for ever.
+    """
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     chunks: list[str] = []
     result_text: str | None = None
-    async for event in llm_session.send_message(prompt):
+    stream = llm_session.send_message(prompt)
+
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        try:
+            event = await asyncio.wait_for(stream.__anext__(), remaining)
+        except StopAsyncIteration:
+            break
+
         event_type = event.get("type")
         if event_type == "result":
             result = event.get("result")
@@ -1175,11 +1696,148 @@ async def _collect_llm_response_text(llm_session: Any, prompt: str) -> str:
             if text:
                 chunks.append(text)
             continue
+        if event_type == "control_request":
+            request = event.get("request")
+            if not isinstance(request, dict) or request.get("subtype") != "can_use_tool":
+                continue
+            resumed, waited = await _answer_builder_tool_request(
+                llm_session, request, job
+            )
+            # The refusal or approval *resumes* the turn: the session yields
+            # the rest of it, so the loop reads that stream from here on.
+            deadline += waited
+            if resumed is None:
+                break
+            stream = resumed
+            continue
         if event_type == "error":
             error = event.get("error")
             message = error.get("message") if isinstance(error, dict) else None
             raise RuntimeError(message or "LLM provider returned an error")
     return result_text if result_text is not None else "".join(chunks)
+
+
+async def _answer_builder_tool_request(
+    llm_session: Any,
+    request: dict[str, Any],
+    job: "BuilderConverseJob | None",
+) -> tuple[Any, float]:
+    """Decide one tool call and resume the turn.
+
+    Returns the resumed event stream (or `None` when the session cannot be
+    answered at all) and how long a person was allowed to think, which the
+    caller adds back to the model's own budget.
+    """
+
+    tool_name = request.get("tool_name")
+    tool_input = request.get("input")
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+
+    approve = getattr(llm_session, "approve_pending_permissions_and_retry", None)
+    deny = getattr(llm_session, "deny_pending_permissions", None)
+    if deny is None:
+        # A provider whose session cannot be answered. Ending here beats
+        # waiting out the timeout for a stream with nothing left to yield.
+        logger.warning("builder_tool_call_unanswerable tool=%s", tool_name)
+        return None, 0.0
+
+    if not builder_tool_policy.may_ask(tool_name):
+        logger.warning(
+            "builder_tool_call_refused tool=%s mcp=%s asking_enabled=%s",
+            tool_name,
+            builder_tool_policy.is_mcp_tool(tool_name),
+            builder_tool_policy.builder_mcp_enabled(),
+        )
+        _audit_builder_tool_decision(job, tool_name, tool_input, allowed=False, asked=False)
+        return deny(builder_tool_policy.refusal_reason(tool_name)), 0.0
+
+    if job is None or approve is None:
+        # Eligible, but there is no job to carry the question out to anyone.
+        logger.warning("builder_tool_call_unaskable tool=%s", tool_name)
+        _audit_builder_tool_decision(job, tool_name, tool_input, allowed=False, asked=False)
+        return deny(builder_tool_policy.refusal_reason(tool_name)), 0.0
+
+    allowed, waited = await _await_builder_permission(job, tool_name, tool_input)
+    _audit_builder_tool_decision(job, tool_name, tool_input, allowed=allowed, asked=True)
+    if allowed:
+        return approve(), waited
+    return deny(BUILDER_TOOL_DECLINED), waited
+
+
+#: What the model is told when the *person* said no, as opposed to the policy.
+#: Kept apart from `builder_tool_policy.refusal_reason` because they are
+#: different facts: one is "this is never available here", the other is "you
+#: were asked about and the answer was no". Telling the model the first when
+#: the second happened would send it looking for a setting to change.
+BUILDER_TOOL_DECLINED = (
+    "The person declined that tool call. Do not repeat it. Continue with what "
+    "you already know, ask them for the fact directly, or design the check as "
+    "a step in the agent so it runs when the agent runs."
+)
+
+
+async def _await_builder_permission(
+    job: "BuilderConverseJob",
+    tool_name: Any,
+    tool_input: dict[str, Any],
+) -> tuple[bool, float]:
+    """Park the job on a person, and report their answer and how long it took."""
+
+    loop = asyncio.get_running_loop()
+    decision: asyncio.Future[bool] = loop.create_future()
+    job.permission = BuilderPermissionRequest(
+        request_id=uuid.uuid4().hex,
+        tool_name=str(tool_name),
+        tool_input=tool_input,
+        decision=decision,
+    )
+    job.status = "waiting_for_permission"
+    job.touch()
+    started = loop.time()
+    try:
+        allowed = await asyncio.wait_for(decision, BUILDER_PERMISSION_WAIT_SECONDS)
+    except asyncio.TimeoutError:
+        # Nobody answered. Refused rather than left hanging: the alternative
+        # holds an LLM session open until the process restarts.
+        logger.warning("builder_tool_permission_expired tool=%s", tool_name)
+        allowed = False
+    finally:
+        waited = loop.time() - started
+        job.permission = None
+        job.status = "running"
+        job.touch()
+    return allowed, waited
+
+
+def _audit_builder_tool_decision(
+    job: "BuilderConverseJob | None",
+    tool_name: Any,
+    tool_input: dict[str, Any],
+    *,
+    allowed: bool,
+    asked: bool,
+) -> None:
+    """Record every decision, including the ones nobody was asked about.
+
+    A refusal the policy made on its own is as much a fact about what this
+    machine did as an approval someone typed, and an audit that only kept the
+    approvals would make a conversation that quietly tried twenty tools look
+    identical to one that tried none.
+    """
+
+    record_api_action(
+        operation="provider.tool",
+        details={
+            "surface": "agent_builder",
+            "tool_name": str(tool_name),
+            "input": tool_input,
+            "asked_user": asked,
+            "session_id": getattr(job, "session_id", None),
+            "job_id": getattr(job, "id", None),
+        },
+        success=allowed,
+        status_code=200 if allowed else 403,
+    )
 
 
 def _extract_assistant_text(message: Any) -> str:
@@ -1228,7 +1886,7 @@ def _reject_unapproved_shell_steps(draft: AgentDraft) -> None:
     message because that is what the user sees in the flow editor, and the
     pending proposal's name is there because approving it is the fix.
 
-    ``normalize_workflow`` refuses the same thing (``agent/workflow_v2.py``),
+    ``normalize_workflow`` refuses the same thing (``code_bridge_core/workflow_v2.py``),
     with a message written for whoever wrote the JSON. This runs first so the
     person who never saw any JSON gets told which of *their* steps is unbuilt
     and what to approve. Both refusals answer with 400 — see RESULT_004.
@@ -1301,17 +1959,115 @@ def _task_draft_has_content(task_draft: TaskDraft) -> bool:
     )
 
 
-def _get_or_create_builder_session(body: BuilderTurn) -> BuilderSession:
+def _get_or_create_builder_session(
+    body: BuilderTurn,
+) -> tuple[BuilderSession | None, JSONResponse | None]:
+    """Resolve the session this turn belongs to, or the refusal that stops it.
+
+    Returns ``(session, None)`` or ``(None, refusal)`` — the same shape as
+    ``_check_workflow_contract`` and ``_fold_flow_graph_input``, so every gate
+    on this router reads alike.
+
+    ``body.agent_id`` opens a **revision**: the stored agent is converted into
+    the draft the conversation starts from (:func:`agent.agent_revision.
+    draft_from_agent`, which refuses rather than converting lossily) and the
+    workflow's revision is recorded as the version this proposal is built on.
+    Both happen before any LLM call, so an agent that must not be opened costs
+    nothing and says why.
+
+    A ``draft`` sent alongside ``agent_id`` on the opening turn is honoured, as
+    it always was — the client may have local edits it wants the conversation
+    to start from — but the *source* is still the stored agent, so the commit
+    still updates rather than creates.
+    """
     session = get_builder_session(body.session_id)
-    if session is None:
-        system_prompt = build_configurator_system_prompt([])
-        session = create_builder_session(
-            system_prompt=system_prompt,
-            draft=body.draft,
+    if session is not None:
+        mismatch = _revision_target_mismatch(session, body)
+        if mismatch is not None:
+            return None, mismatch
+        session.set_client_draft(body.draft)
+        return session, None
+
+    system_prompt = build_configurator_system_prompt([])
+    if not body.agent_id:
+        return (
+            create_builder_session(system_prompt=system_prompt, draft=body.draft),
+            None,
+        )
+
+    agent = _store().get_agent(body.agent_id)
+    if not agent:
+        raise HTTPException(
+            status_code=404, detail=f"Agent '{body.agent_id}' not found"
+        )
+    if agent.get("is_pseudo"):
+        return None, _pseudo_agent_protected_response()
+
+    memories = _store().list_memories(body.agent_id, include_pinned=True, limit=500)
+    try:
+        source_draft = draft_from_agent(agent, memories=memories or [])
+    except AgentNotRevisableError as exc:
+        # 409, matching `agent_prompt_not_editable` on `PATCH /agents/{id}`:
+        # the request is well-formed and the server understood it: it is the
+        # state of the stored agent that makes it impossible right now, and
+        # the same request succeeds once that state is fixed.
+        return None, JSONResponse(status_code=409, content=exc.to_view())
+
+    flow_revision = compute_flow_revision(agent.get("flow_json"))
+    session = create_builder_session(
+        system_prompt=system_prompt
+        + revision_briefing_block(
+            agent_id=str(agent["id"]),
+            agent_name=str(agent.get("name") or agent["id"]),
+            draft=source_draft,
+            flow_revision=flow_revision,
+        )
+        # What the agent's recent runs did (AGENT_SELF_REPAIR_SPEC §1.2):
+        # a revision session opens knowing why the person came.
+        + failure_briefing_block(_failure_briefing(str(agent["id"]))),
+        draft=body.draft or source_draft,
+        source_agent_id=str(agent["id"]),
+        source_flow_revision=flow_revision,
+    )
+    return session, None
+
+
+def _revision_target_mismatch(
+    session: BuilderSession, body: BuilderTurn
+) -> JSONResponse | None:
+    """Refuse a turn that points an existing conversation at a different agent.
+
+    Retargeting silently would be the worst of both: the briefing in the
+    system prompt still describes the first agent, the draft in hand is still
+    the first agent's, and the commit would write all of it onto the second
+    one. Opening a new session is the fix, and it is one field to drop.
+    """
+    if not body.agent_id or body.agent_id == session.source_agent_id:
+        return None
+    if session.source_agent_id is None:
+        detail = (
+            "이 대화는 새 에이전트를 만드는 대화로 시작했습니다. 도중에 기존 "
+            f"에이전트 '{body.agent_id}' 편집으로 바꿀 수 없습니다. session_id 없이 "
+            "agent_id만 보내 새 대화를 시작하세요."
         )
     else:
-        session.set_client_draft(body.draft)
-    return session
+        detail = (
+            f"이 대화는 에이전트 '{session.source_agent_id}'를 편집하는 대화입니다. "
+            f"도중에 '{body.agent_id}' 편집으로 바꿀 수 없습니다 — 지금까지의 드래프트와 "
+            "설명은 모두 앞의 에이전트 것이라 그대로 저장하면 다른 에이전트의 설정을 "
+            "덮어씁니다. session_id 없이 새 대화를 시작하세요."
+        )
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": "builder_session_agent_mismatch",
+            "reason": "builder_session_agent_mismatch",
+            "detail": detail,
+            "message": detail,
+            "session_agent_id": session.source_agent_id,
+            "requested_agent_id": body.agent_id,
+        },
+    )
 
 
 def _builder_response(
@@ -1321,12 +2077,17 @@ def _builder_response(
     status: str = "completed",
     job_id: str | None = None,
     error: str | None = None,
+    error_kind: str | None = None,
+    error_provider_id: str | None = None,
+    error_provider_name: str | None = None,
+    provider_alternatives: list[dict[str, Any]] | None = None,
 ) -> BuilderTurnResponse:
     return BuilderTurnResponse(
         session_id=session.session_id,
         assistant_message=assistant_message,
         updated_draft=session.current_draft,
         is_ready_to_commit=session.is_ready_to_commit,
+        assessment=session.assessment,
         should_offer_task=False,
         task_draft=session.task_draft,
         # Every response carries the conversation's script proposals, not just
@@ -1343,6 +2104,12 @@ def _builder_response(
         # fallback draft any more — a failed LLM call reports status=failed.
         fallback=False,
         error=error,
+        error_kind=error_kind,
+        error_provider_id=error_provider_id,
+        error_provider_name=error_provider_name,
+        provider_alternatives=provider_alternatives,
+        source_agent_id=session.source_agent_id,
+        source_flow_revision=session.source_flow_revision,
     )
 
 
@@ -1351,6 +2118,8 @@ def _configurator_failure_response(
     *,
     reason: str | None = None,
     job_id: str | None = None,
+    provider_id: str | None = None,
+    provider_name: str | None = None,
 ) -> BuilderTurnResponse:
     """Report an LLM failure as a failure.
 
@@ -1359,18 +2128,74 @@ def _configurator_failure_response(
     answer, so a transport failure read as "the model produced nonsense" —
     worse than returning nothing. The draft is left untouched and the caller
     sees status=failed plus the real reason.
+
+    One thing is added to that report and nothing is taken away. When the
+    reason is the selected provider saying it is out of allowance, the payload
+    also carries which provider that was and which *other* installed providers
+    could answer instead. The turn still fails, the draft is still untouched,
+    and the server still does not switch anything — the difference is that the
+    client can now offer the switch rather than leaving the user at a dead end
+    with a backend sitting idle two settings away.
     """
     session.touch()
+    error_kind = classify_provider_error(reason)
+    alternatives: list[dict[str, Any]] | None = None
+    if error_kind == PROVIDER_ERROR_QUOTA:
+        try:
+            found = list_alternative_chat_providers(exclude_company_id=provider_id)
+        except Exception as exc:  # noqa: BLE001 - probing must never mask the failure
+            logger.warning("builder_provider_alternatives_failed error=%s", exc)
+            found = []
+        # An empty list is not an offer. Omitting the key keeps the payload
+        # honest: there is nothing else installed to switch to.
+        alternatives = found or None
     return _builder_response(
         session,
-        assistant_message=_configurator_failure_message(reason=reason),
+        assistant_message=_configurator_failure_message(
+            reason=reason,
+            error_kind=error_kind,
+            provider_name=provider_name,
+            alternatives=alternatives,
+        ),
         status="failed",
         job_id=job_id,
         error=reason,
+        error_kind=error_kind,
+        error_provider_id=provider_id,
+        error_provider_name=provider_name,
+        provider_alternatives=alternatives,
     )
 
 
-def _configurator_failure_message(*, reason: str | None = None) -> str:
+def _configurator_failure_message(
+    *,
+    reason: str | None = None,
+    error_kind: str | None = None,
+    provider_name: str | None = None,
+    alternatives: list[dict[str, Any]] | None = None,
+) -> str:
+    if error_kind == PROVIDER_ERROR_QUOTA:
+        # A quota block is not "try again in a moment" — Codex's own message
+        # names a date weeks out. Saying "잠시 후 다시 시도" here would be the
+        # one piece of advice guaranteed not to work, so this branch says what
+        # actually happened and what is left on the machine.
+        who = provider_name or "선택된 LLM"
+        parts = [f"{who}의 사용량 한도에 걸려 이번 턴이 실패했습니다. 초안은 만들지 않았습니다."]
+        if alternatives:
+            names = ", ".join(str(item.get("name") or item.get("company_id")) for item in alternatives)
+            parts.append(
+                f"이 서버에 설치되어 바로 쓸 수 있는 다른 제공자가 있습니다: {names}."
+                " 아래에서 전환하면 같은 요청을 그대로 다시 보냅니다."
+            )
+        else:
+            parts.append(
+                "이 서버에는 대신 쓸 수 있는 다른 LLM 제공자가 설치되어 있지 않습니다."
+                " 설정에서 다른 제공자를 설치하거나 한도가 풀린 뒤에 다시 시도해 주세요."
+            )
+        if reason:
+            parts.append(f"원인: {reason}")
+        return "\n".join(parts)
+
     parts = [
         "에이전트 빌더 LLM 호출이 실패했습니다. 초안은 만들지 않았습니다.",
         "잠시 후 다시 시도하거나, 서버의 LLM 설정을 확인해 주세요.",
@@ -1429,6 +2254,11 @@ def _job_payload(job: BuilderConverseJob) -> dict[str, Any]:
     }
     if job.error:
         payload["error"] = job.error
+    if job.permission is not None:
+        # The whole reason the request rides the poll: this surface has no
+        # push channel, so a question can only reach the user as part of the
+        # answer to "is it done yet?".
+        payload["permission_request"] = job.permission.view()
     if job.response is not None:
         payload["result"] = job.response.model_dump(mode="json", exclude_none=True)
         # Duplicate the completed result's legacy fields at the top level so a
@@ -1456,7 +2286,12 @@ async def _run_builder_converse_job(job_id: str) -> None:
     try:
         job.status = "running"
         job.touch()
-        raw_response = await run_configurator_turn(session, timeout=120.0)
+        # Picked here rather than inside the turn so the timeout message and the
+        # log line below quote the budget that was actually in force.
+        turn_timeout = builder_turn_timeout_seconds()
+        raw_response = await run_configurator_turn(
+            session, timeout=turn_timeout, job=job
+        )
         job.response = _apply_successful_configurator_response(
             session,
             raw_response=raw_response,
@@ -1466,7 +2301,18 @@ async def _run_builder_converse_job(job_id: str) -> None:
         job.status = "completed"
         job.error = None
     except asyncio.TimeoutError:
-        job.error = "Configurator LLM timed out."
+        job.error = f"Configurator LLM timed out after {turn_timeout:.0f}s."
+        # Logged, because until now it was not. A successful turn writes
+        # `builder_configurator_turn` (code_bridge_core.configurator) and a timed-out one
+        # wrote nothing at all, so the only trace a timeout left in the server
+        # log was the *absence* of a line — which is how three of them sat
+        # unnoticed on this machine until someone went looking for the gaps.
+        logger.warning(
+            "builder_configurator_timeout session_id=%s job_id=%s timeout=%.0fs",
+            session.session_id,
+            job.id,
+            turn_timeout,
+        )
         job.response = _configurator_failure_response(
             session,
             reason=job.error,
@@ -1479,6 +2325,8 @@ async def _run_builder_converse_job(job_id: str) -> None:
             session,
             reason=job.error,
             job_id=job.id,
+            provider_id=getattr(exc, "provider_id", None),
+            provider_name=getattr(exc, "provider_name", None),
         )
         job.status = "failed"
     finally:
@@ -1494,6 +2342,111 @@ async def _run_builder_converse_job(job_id: str) -> None:
         logger.warning("builder_script_proposal_drafting_failed error=%s", exc)
 
 
+def _commit_revision(
+    *,
+    session: BuilderSession,
+    body: BuilderCommitBody,
+    draft: AgentDraft,
+    flow_json: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+    """Write an approved revision onto the agent it was opened from.
+
+    Returns ``(agent, None)`` or ``(None, refusal)``. Every gate here refuses
+    *before* the store is touched, so a refused revision leaves the agent
+    exactly as the other writer left it — and leaves the builder session
+    intact, so the author can re-open, redo the edit and commit again rather
+    than losing the conversation.
+
+    Three gates, in the order that gives the most actionable answer first:
+
+    1. **The agent is still there** and is not a pseudo-agent.
+    2. **The workflow has not moved** since this conversation was opened
+       (:mod:`agent.flow_revision`). The session's own captured revision is
+       checked whether the client sent a precondition or not — an AI proposal
+       is built on a version, and committing it onto a different one is
+       exactly the silent overwrite ``if_flow_revision`` exists to stop. A
+       client-supplied ``if_flow_revision`` is checked as well, so a client
+       holding a *newer* baseline than the conversation does not get to skip
+       the conversation's.
+    3. **The patch reaches execution** (:mod:`agent.agent_origin`). The
+       converter already refuses to open a file-backed agent, so this can only
+       fire when the mapping changed mid-conversation — which is precisely
+       when a guard that is only at the door would let the write through.
+
+    ``policy_overrides_json`` is not in the patch and is therefore not
+    written; ``AgentStore.update_agent`` assigns only the columns it is given,
+    so whatever the agent had it still has. See
+    :mod:`agent.agent_revision` for why that is the answer for the one stored
+    field an ``AgentDraft`` cannot carry.
+    """
+    store = _store()
+    agent_id = str(session.source_agent_id)
+    existing = store.get_agent(agent_id)
+    if not existing:
+        detail = (
+            f"이 대화가 편집하던 에이전트 '{agent_id}'가 더 이상 없습니다. 저장하지 "
+            "않았습니다. 삭제되었거나 보관된 상태이므로, 이 내용을 새 에이전트로 "
+            "만들려면 agent_id 없이 새 대화를 시작하세요."
+        )
+        return None, JSONResponse(
+            status_code=404,
+            content={
+                "error": "agent_not_found",
+                "reason": "agent_not_found",
+                "detail": detail,
+                "message": detail,
+                "agent_id": agent_id,
+            },
+        )
+    if existing.get("is_pseudo"):
+        return None, _pseudo_agent_protected_response()
+
+    current_revision = compute_flow_revision(existing.get("flow_json"))
+    for expected in (session.source_flow_revision, body.if_flow_revision):
+        if expected is not None and expected != current_revision:
+            return None, _flow_revision_conflict_response(
+                agent_id,
+                expected=str(expected),
+                current=current_revision,
+            )
+
+    patch = agent_patch_from_draft(draft)
+    patch["flow_json"] = flow_json
+    try:
+        assert_patch_reaches_execution(
+            agent=existing,
+            patch=patch,
+            origin=resolve_agent_origin(agent_id),
+        )
+    except AgentPromptNotEditableError as exc:
+        return None, JSONResponse(
+            status_code=409,
+            content={
+                "error": "agent_prompt_not_editable",
+                "reason": "agent_prompt_not_editable",
+                "detail": str(exc),
+                "message": str(exc),
+                "origin": exc.origin.to_view(),
+            },
+        )
+
+    try:
+        agent = store.update_agent(agent_id, patch)
+    except PseudoAgentProtectedError:
+        return None, _pseudo_agent_protected_response()
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+
+    existing_memories = store.list_memories(agent_id, include_pinned=True, limit=500)
+    for content in memory_seeds_to_add(draft, existing=existing_memories or []):
+        store.add_memory(
+            agent_id=agent_id,
+            content=content,
+            source_event_type="builder_seed",
+        )
+    return agent, None
+
+
 def _validate_task_draft(task_draft: TaskDraft) -> None:
     goal = getattr(task_draft, "goal", None)
     if not isinstance(goal, str) or not goal.strip():
@@ -1501,6 +2454,229 @@ def _validate_task_draft(task_draft: TaskDraft) -> None:
             status_code=422,
             detail="TaskDraft missing required field: goal",
         )
+
+
+class GraphSuggestBody(BaseModel):
+    """Ask for revised-workflow proposals for one agent's graph (T-I1-18)."""
+
+    intent: str = Field(min_length=1, max_length=4000)
+    # The flow as the client currently has it — a canvas mid-edit sends its
+    # draft so proposals build on what the user sees, not on the last save.
+    # Absent means "the stored workflow".
+    flow: list[dict[str, Any]] | None = None
+
+
+# --- device permissions (asked from the phone, applied over adb) -----------
+
+class DevicePermissionRequest(BaseModel):
+    serial: str = Field(min_length=1, max_length=64)
+    package: str = Field(min_length=1, max_length=200)
+    kind: str = Field(min_length=1, max_length=64)
+    reason: str = Field(default="", max_length=1000)
+    agent_id: str | None = None
+    run_id: str | None = None
+    # Macro kinds (app_google_sign_in): the account to pick, the button's
+    # label, and the substring of the home screen's dump that proves success.
+    account_email: str | None = Field(default=None, max_length=200)
+    sign_in_label: str | None = Field(default=None, max_length=100)
+    success_anchor: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/devices/permissions/request", dependencies=[Depends(verify_api_key)], response_model=None)
+async def request_device_permission_route(body: DevicePermissionRequest) -> dict[str, Any] | JSONResponse:
+    """Ask for a permission on a connected device.
+
+    Applied at once when policy allows; otherwise a pending approval that any
+    paired phone can decide, after which the server runs the adb command and
+    verifies it took. The server never grants one without a decision.
+    """
+    from agent.device_permissions import request_device_permission
+
+    result = await asyncio.to_thread(
+        request_device_permission,
+        serial=body.serial, package=body.package, kind=body.kind, reason=body.reason,
+        agent_id=body.agent_id, run_id=body.run_id,
+        extra={"account_email": body.account_email, "sign_in_label": body.sign_in_label, "success_anchor": body.success_anchor},
+    )
+    if result.get("status") == "refused":
+        return JSONResponse(status_code=400, content=result)
+    return result
+
+
+@router.get("/devices/permissions/kinds", dependencies=[Depends(verify_api_key)], response_model=None)
+async def list_device_permission_kinds() -> dict[str, Any]:
+    from agent.device_permissions import KINDS
+
+    return {"kinds": [{"kind": k, "label": v["label"]} for k, v in KINDS.items()]}
+
+
+# --- repair proposals (AGENT_SELF_REPAIR_SPEC §2.5) ---------------------------
+
+class RepairProposalDecision(BaseModel):
+    reason: str | None = Field(default=None, max_length=2000)
+    run_now: bool = False
+
+
+@router.get("/agents/{agent_id}/repair-proposals", dependencies=[Depends(verify_api_key)], response_model=None)
+async def list_repair_proposals(agent_id: str, limit: int = Query(default=20, ge=1, le=200)) -> dict[str, Any]:
+    """Proposals for this agent, newest first; the open one (if any) is first."""
+    from agent.repair_proposals import get_repair_proposal_store
+
+    _require_agent(agent_id)
+    proposals = []
+    for proposal in get_repair_proposal_store().list_for_agent(agent_id, limit=limit):
+        # The canvas adopts a proposal as a graph, exactly as it adopts a
+        # suggest proposal: the view rides along, or the reason there is none.
+        if proposal.get("flow_json") is not None:
+            proposal = {**proposal, **_flow_graph_view(proposal["flow_json"])}
+        proposals.append(proposal)
+    return {"proposals": proposals}
+
+
+@router.post("/agents/{agent_id}/repair-proposals/{proposal_id}/accept", dependencies=[Depends(verify_api_key)], response_model=None)
+async def accept_repair_proposal(agent_id: str, proposal_id: str, body: RepairProposalDecision | None = None) -> dict[str, Any] | JSONResponse:
+    """Apply a proposal — through the same save a person makes from the canvas.
+
+    ``if_flow_revision`` is the proposal's base: a flow that moved underneath
+    it answers 409 exactly as a stale canvas would, and the proposal is
+    marked superseded rather than applied over the newer save.
+    """
+    from agent.repair_proposals import (
+        APPLICABLE_KINDS, STATUS_ACCEPTED, STATUS_SUPERSEDED, get_repair_proposal_store,
+    )
+
+    _require_agent(agent_id)
+    store = get_repair_proposal_store()
+    proposal = store.get(proposal_id)
+    if not proposal or proposal["agent_id"] != agent_id:
+        raise HTTPException(status_code=404, detail="repair proposal not found")
+    if proposal["status"] != "proposed":
+        raise HTTPException(status_code=409, detail=f"repair proposal is {proposal['status']}")
+    if proposal["kind"] not in APPLICABLE_KINDS or proposal.get("flow_json") is None:
+        raise HTTPException(
+            status_code=409,
+            detail="this proposal describes something a person has to do; there is nothing the server can apply",
+        )
+    update = AgentUpdateBody(flow_json=proposal["flow_json"], if_flow_revision=proposal.get("base_flow_revision"))
+    result = await update_agent(agent_id, update)
+    if isinstance(result, JSONResponse):
+        if result.status_code == 409:
+            store.resolve(proposal_id, status=STATUS_SUPERSEDED, resolved_by="flow_changed")
+        return result
+    applied = result.get("agent", result) if isinstance(result, dict) else {}
+    resolved = store.resolve(
+        proposal_id, status=STATUS_ACCEPTED, resolved_by="user",
+        applied_flow_revision=applied.get("flow_revision") if isinstance(applied, dict) else None,
+    )
+    run: dict[str, Any] | None = None
+    if body and body.run_now:
+        task = _resolve_agent_task(agent_id, None)
+        if task:
+            prepared = await asyncio.to_thread(prepare_task_orchestration, task["id"], auto_start=True, dry_run=False)
+            execution = (prepared or {}).get("execution")
+            run = (prepared or {}).get("run")
+            if isinstance(execution, dict):
+                asyncio.create_task(execute_task_orchestration(execution))
+    return {"proposal": resolved, "agent": applied, "run": run}
+
+
+@router.post("/agents/{agent_id}/repair-proposals/{proposal_id}/reject", dependencies=[Depends(verify_api_key)], response_model=None)
+async def reject_repair_proposal(agent_id: str, proposal_id: str, body: RepairProposalDecision | None = None) -> dict[str, Any]:
+    """Decline a proposal. The reason rides into the next briefing, so the same proposal is not made twice."""
+    from agent.repair_proposals import STATUS_REJECTED, get_repair_proposal_store
+
+    _require_agent(agent_id)
+    store = get_repair_proposal_store()
+    proposal = store.get(proposal_id)
+    if not proposal or proposal["agent_id"] != agent_id:
+        raise HTTPException(status_code=404, detail="repair proposal not found")
+    if proposal["status"] != "proposed":
+        raise HTTPException(status_code=409, detail=f"repair proposal is {proposal['status']}")
+    return {"proposal": store.resolve(proposal_id, status=STATUS_REJECTED, resolved_by="user", reject_reason=(body.reason if body else None))}
+
+
+@router.post(
+    "/agents/{agent_id}/graph/suggest",
+    dependencies=[Depends(verify_api_key)],
+    response_model=None,
+)
+async def suggest_agent_graph(agent_id: str, body: GraphSuggestBody) -> dict[str, Any]:
+    """Propose revised workflows for one agent. Nothing is saved.
+
+    T-I1-17 decided where this door lives: on the key-gated agent router (and
+    its keyless dashboard mirror), **never** on `/api/canvas/*` — a leaked
+    canvas token must not become LLM spend. The phone's WebView reaches it
+    through the app, which holds the paired key.
+
+    Every proposal shown to a person has passed the T-I1-19 gate
+    (`graph_suggest.validate_proposals`): normalized by the same function
+    every save runs, checked by `analyze_workflow`, dropped — not repaired —
+    on failure. `flow_revision` echoes the *stored* revision so the client
+    can send it back as `if_flow_revision` when the reviewed proposal is
+    eventually saved.
+    """
+    from code_bridge_core import graph_suggest
+
+    agent = _require_agent(agent_id)
+    if agent.get("is_pseudo"):
+        return _pseudo_agent_protected_response()
+
+    stored_flow = normalize_workflow(agent.get("flow_json"))
+    base_flow = body.flow if body.flow is not None else stored_flow
+
+    prompt = graph_suggest.build_suggest_prompt(
+        agent_name=str(agent.get("name") or agent_id),
+        agent_system_prompt=str(agent.get("system_prompt") or ""),
+        flow=base_flow,
+        intent=body.intent,
+        briefing=_failure_briefing(agent_id),
+    )
+
+    selection = get_chat_provider_selection()
+    llm_session = await create_chat_session(
+        f"agent-graph-suggest-{agent_id}-{uuid.uuid4().hex[:8]}",
+        str(Path.cwd()),
+        selection,
+    )
+    try:
+        # No job, so a tool call is refused rather than asked about — same
+        # arrangement as step debug above: a synchronous request has nowhere
+        # to park a question.
+        raw = await _collect_llm_response_text(llm_session, prompt, timeout=120.0)
+    except asyncio.TimeoutError as exc:
+        with suppress(Exception):
+            await llm_session.abort_current_turn()
+        raise HTTPException(
+            status_code=503,
+            detail="제안 생성이 시간 안에 끝나지 않았습니다. 다시 시도해 주세요.",
+        ) from exc
+
+    parsed = graph_suggest.parse_suggest_response(raw)
+    proposals, dropped = graph_suggest.validate_proposals(
+        parsed.proposals,
+        scripts=_scripts_for_contract(
+            [step for proposal in parsed.proposals for step in proposal.get("flow", [])]
+        ),
+    )
+    return {
+        "proposals": [
+            {
+                **proposal.to_payload(),
+                # The same derived graph view the agent read carries, so the
+                # canvas can draw and adopt a proposal without owning the
+                # list-to-graph conversion (the graph stays a server-derived
+                # view of the canonical list, same as everywhere else).
+                **_flow_graph_view(proposal.flow),
+            }
+            for proposal in proposals
+        ],
+        # Named so a client can say "2개 제안 중 1개는 검증에서 탈락" instead
+        # of silently showing less than the model produced.
+        "dropped": dropped,
+        "warnings": parsed.warnings,
+        "assessment": parsed.assessment.model_dump() if parsed.assessment else None,
+        "flow_revision": compute_flow_revision(agent.get("flow_json")),
+    }
 
 
 @router.post(
@@ -1512,8 +2688,11 @@ def _validate_task_draft(task_draft: TaskDraft) -> None:
 async def builder_converse(
     body: BuilderTurn,
     background_tasks: BackgroundTasks,
-) -> BuilderTurnResponse:
-    session = _get_or_create_builder_session(body)
+) -> BuilderTurnResponse | JSONResponse:
+    session, refusal = _get_or_create_builder_session(body)
+    if refusal is not None:
+        return refusal
+    assert session is not None
 
     if not session.lock.acquire(blocking=False):
         raise HTTPException(
@@ -1535,7 +2714,12 @@ async def builder_converse(
                 reason="Configurator LLM timed out before the fast response window.",
             )
         except RuntimeError as exc:
-            return _configurator_failure_response(session, reason=str(exc))
+            return _configurator_failure_response(
+                session,
+                reason=str(exc),
+                provider_id=getattr(exc, "provider_id", None),
+                provider_name=getattr(exc, "provider_name", None),
+            )
 
         response = _apply_successful_configurator_response(
             session,
@@ -1560,9 +2744,12 @@ async def builder_converse(
 async def create_builder_converse_job(
     body: BuilderTurn,
     background_tasks: BackgroundTasks,
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     _clear_expired_builder_converse_jobs()
-    session = _get_or_create_builder_session(body)
+    session, refusal = _get_or_create_builder_session(body)
+    if refusal is not None:
+        return refusal
+    assert session is not None
     if session.lock.locked():
         raise HTTPException(
             status_code=409,
@@ -1604,6 +2791,46 @@ async def get_builder_converse_job(job_id: str) -> dict[str, Any]:
     if job is None:
         raise HTTPException(status_code=404, detail=f"Builder job '{job_id}' not found")
     return _job_payload(job)
+
+
+class BuilderPermissionDecision(BaseModel):
+    """The person's answer to one tool call the Configurator asked about."""
+
+    allow: bool
+
+
+@router.post(
+    "/builder/converse/jobs/{job_id}/permission",
+    dependencies=[Depends(verify_api_key)],
+    response_model=None,
+)
+async def answer_builder_permission(
+    job_id: str, body: BuilderPermissionDecision
+) -> dict[str, Any]:
+    """Answer the tool call a builder turn is parked on.
+
+    404 when there is no such job, 409 when it is not waiting — a second
+    answer to an already-settled request is a race between two open clients,
+    and the honest reply is that there is nothing to answer rather than
+    silently doing nothing.
+    """
+
+    job = BUILDER_CONVERSE_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Builder job '{job_id}' not found")
+    pending = job.permission
+    if pending is None or pending.decision is None or pending.decision.done():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Builder job '{job_id}' is not waiting for a tool decision.",
+        )
+    pending.decision.set_result(bool(body.allow))
+    return {
+        "job_id": job.id,
+        "request_id": pending.request_id,
+        "tool_name": pending.tool_name,
+        "allowed": bool(body.allow),
+    }
 
 
 @router.post(
@@ -1651,35 +2878,69 @@ async def builder_commit(body: BuilderCommitBody) -> dict[str, Any] | JSONRespon
     contract_report, refusal = await _check_workflow_contract(
         flow_json,
         commit_incomplete=body.commit_incomplete,
+        # What this conversation promised the user, checked against what they
+        # are about to save. `_reject_unapproved_shell_steps` above refuses a
+        # shell step naming no script; this refuses a script the user approved
+        # that no step names — the same broken promise from the other end.
+        approved_scripts=session.approved_scripts,
     )
     if refusal is not None:
         return refusal
 
     store = _store()
-    agent = store.create_agent(
-        name=(draft.name or "").strip(),
-        description=draft.description,
-        system_prompt=draft.system_prompt,
-        provider_id=draft.provider_id,
-        model=draft.model,
-        tools_json=[tool.model_dump() for tool in draft.tools],
-        flow_json=flow_json,
-        policy_overrides_json={},
-    )
-    for memory_seed in draft.memory_seeds:
-        if memory_seed.strip():
-            store.add_memory(
-                agent_id=agent["id"],
-                content=memory_seed.strip(),
-                source_event_type="builder_seed",
-            )
+    if session.source_agent_id:
+        agent, refusal = _commit_revision(
+            session=session,
+            body=body,
+            draft=draft,
+            flow_json=flow_json,
+        )
+        if refusal is not None:
+            return refusal
+        assert agent is not None
+        agent_fact: dict[str, Any] = {
+            "created": False,
+            "updated": True,
+            "id": agent["id"],
+            "name": agent.get("name"),
+        }
+    else:
+        agent = store.create_agent(
+            name=(draft.name or "").strip(),
+            description=draft.description,
+            system_prompt=draft.system_prompt,
+            provider_id=draft.provider_id,
+            model=draft.model,
+            tools_json=[tool.model_dump() for tool in draft.tools],
+            flow_json=flow_json,
+            policy_overrides_json={},
+        )
+        for memory_seed in draft.memory_seeds:
+            if memory_seed.strip():
+                store.add_memory(
+                    agent_id=agent["id"],
+                    content=memory_seed.strip(),
+                    source_event_type="builder_seed",
+                )
+        agent_fact = {
+            "created": True,
+            "updated": False,
+            "id": agent["id"],
+            "name": agent.get("name"),
+        }
 
     result: dict[str, Any] = {"agent": agent}
-    agent_fact: dict[str, Any] = {
-        "created": True,
-        "id": agent["id"],
-        "name": agent.get("name"),
-    }
+    # A revision never grows a second task or a second schedule. The agent's
+    # existing task is the one its schedule fires, and adding another would
+    # give one agent two goals firing on two clocks — which reads, from the
+    # outside, exactly like the duplicate-agent bug this feature exists to
+    # end. An agent that genuinely has no task yet still gets one, because
+    # that is a gap being filled rather than a decision being overwritten.
+    if session.source_agent_id and task_draft is not None:
+        activation = store.get_agent_activation_summary(agent["id"])
+        if activation.get("has_assigned_tasks"):
+            task_draft = None
+            task_origin = "existing_task_kept"
     if task_draft is not None:
         goal = str(task_draft.goal).strip()
         # Resolve the folder the conversation named *here*, at the moment the
@@ -1724,6 +2985,20 @@ async def builder_commit(body: BuilderCommitBody) -> dict[str, Any] | JSONRespon
         )
         if schedule is not None:
             result["schedule"] = schedule
+    elif task_origin == "existing_task_kept":
+        task_fact = {
+            "created": False,
+            "reason": "existing_task_kept",
+            "message": (
+                "이 에이전트에는 이미 실행할 작업이 있어 새 작업을 만들지 않았습니다. "
+                "기존 작업과 예약은 그대로입니다."
+            ),
+        }
+        schedule_fact = {
+            "created": False,
+            "reason": "existing_schedule_kept",
+            "message": "기존 예약을 그대로 두었습니다.",
+        }
     else:
         task_fact = {
             "created": False,
@@ -1741,10 +3016,26 @@ async def builder_commit(body: BuilderCommitBody) -> dict[str, Any] | JSONRespon
         contract_report,
         saved_incomplete=bool(body.commit_incomplete and contract_report.has_blocking),
     )
+    # The single question the user actually asked: will this run by itself?
+    # On a revision the answer usually comes from a schedule this commit did
+    # not touch, so reading only what *this* request created would report a
+    # six-hourly agent as manual-only the moment somebody edited it.
+    kept_existing_task = task_fact.get("reason") == "existing_task_kept"
+    if kept_existing_task:
+        runs_unattended = bool(
+            store.get_agent_activation_summary(agent["id"]).get(
+                "has_enabled_schedules"
+            )
+        )
+    else:
+        runs_unattended = bool(
+            schedule_fact.get("created") and schedule_fact.get("enabled")
+        )
     summary = _commit_summary(
         agent_fact=agent_fact,
         task_fact=task_fact,
         schedule_fact=schedule_fact,
+        runs_unattended=runs_unattended if kept_existing_task else None,
     )
     # The summary is the sentence a user reads instead of the payload. A saved
     # workflow that will stall belongs in that sentence, not only in a field
@@ -1755,8 +3046,7 @@ async def builder_commit(body: BuilderCommitBody) -> dict[str, Any] | JSONRespon
         "agent": agent_fact,
         "task": task_fact,
         "schedule": schedule_fact,
-        # The single question the user actually asked: will this run by itself?
-        "runs_unattended": bool(schedule_fact.get("created") and schedule_fact.get("enabled")),
+        "runs_unattended": runs_unattended,
         "readiness": readiness_fact,
         "summary": summary,
     }
@@ -1857,9 +3147,10 @@ async def builder_debug_step(body: BuilderStepDebugRequest) -> dict[str, Any]:
         selection,
     )
     try:
-        assistant_text = await asyncio.wait_for(
-            _collect_llm_response_text(llm_session, prompt),
-            timeout=120.0,
+        # No job, so a tool call here is refused rather than asked about —
+        # step debug is a synchronous request with nowhere to put a question.
+        assistant_text = await _collect_llm_response_text(
+            llm_session, prompt, timeout=120.0
         )
     except asyncio.TimeoutError as exc:
         with suppress(Exception):
@@ -1930,7 +3221,7 @@ def _builder_step_has_external_send_action(actions: list[dict[str, Any]]) -> boo
 async def get_workflow_step_schema() -> dict[str, Any]:
     """Every workflow step type's fields, ready to draw a form from.
 
-    Single source: `agent.workflow_step_schema` derives this from the same
+    Single source: `code_bridge_core.workflow_step_schema` derives this from the same
     `WORKFLOW_STEP_SCHEMA` that `normalize_workflow_step` enforces, so a
     field a client renders here is guaranteed to be one the server will
     accept, and a field the server accepts cannot silently go unrendered —
@@ -2153,9 +3444,20 @@ async def run_agent_once(
 
     execution = prepared.get("execution")
     if isinstance(execution, dict):
+        if body.max_steps is not None:
+            # Same door, one extra instruction. A stepped run is not a second
+            # execution path — that is the property this route exists to keep
+            # (see above), and it would be lost the moment "walk it one step"
+            # got its own pipeline.
+            execution = {**execution, "max_steps": body.max_steps}
         _spawn_background(execute_task_orchestration(execution))
 
-    return {**prepared, "real_run": True, "dry_run": False}
+    return {
+        **prepared,
+        "real_run": True,
+        "dry_run": False,
+        **({"max_steps": body.max_steps} if body.max_steps is not None else {}),
+    }
 
 
 @router.patch("/agents/{agent_id}", dependencies=[Depends(verify_api_key)], response_model=None)
@@ -2181,6 +3483,44 @@ async def update_agent(
     # normalize step and the contract gate — sees a graph-shaped update on
     # exactly the terms of a flow_json one.
     flow_graph = patch.pop("flow_graph", None)
+    # And the precondition, which is a claim about the stored row rather than
+    # a value to store. See :mod:`agent.flow_revision`.
+    if_flow_revision = patch.pop("if_flow_revision", None)
+
+    existing = None
+    if if_flow_revision is not None:
+        # Checked *first*, before the fold and before the contract gate, and
+        # that ordering is the useful one: a client whose baseline has moved
+        # is going to have to re-read and redo the edit anyway, so telling it
+        # "the workflow moved" beats telling it something structural about a
+        # graph it is about to throw away. Neither gate writes, so this is a
+        # choice about which answer is most actionable, not about safety.
+        existing = _store().get_agent(agent_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        current_revision = compute_flow_revision(existing.get("flow_json"))
+        if current_revision != if_flow_revision:
+            return _flow_revision_conflict_response(
+                agent_id,
+                expected=str(if_flow_revision),
+                current=current_revision,
+            )
+    # A patch that sends no precondition is applied the way it always was.
+    # This is a **compatibility affordance, not an oversight**, and it is load
+    # bearing for callers that exist today and send nothing:
+    #   * `routes/dashboard_agents.py`'s agent patch mirror (the desktop
+    #     dashboard's own screens);
+    #   * every `AgentUpdate` caller in the Flutter app other than the
+    #     workflow edit screen — the agent list's rename/enable paths, which
+    #     patch a field the workflow race does not touch;
+    #   * `server/cli/` and any operator script patching an agent by hand.
+    # Making the precondition mandatory would break all of those on the day it
+    # shipped, to protect against a race none of them are in. The two writers
+    # that *are* in it — the canvas (`routes/canvas_api.py`) and the app's
+    # workflow edit screen (`lib/screens/agent/agent_builder_screen.dart`) —
+    # both send it, and both are covered because both send it: this guard is
+    # only ever as good as the writers that opt in, which is why those two
+    # opting in is part of the same change rather than a follow-up.
     if flow_graph is not None:
         if "flow_json" in patch:
             return _flow_input_conflict_response()
@@ -2200,7 +3540,10 @@ async def update_agent(
         )
         if refusal is not None:
             return refusal
-    existing = _store().get_agent(agent_id)
+    # Already read above when a precondition was checked; re-reading would be
+    # a second query for a row nothing has written since.
+    if existing is None:
+        existing = _store().get_agent(agent_id)
     if existing:
         try:
             assert_patch_reaches_execution(
@@ -2458,6 +3801,65 @@ async def create_run(body: AgentRunCreate) -> dict[str, Any]:
     return {"run": run}
 
 
+@router.get("/runs/waiting", dependencies=[Depends(verify_api_key)], response_model=None)
+async def list_runs_waiting_for_a_person(
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Every run that stopped and is waiting for a person, newest first.
+
+    The phone's reason for existing at 3am. Until this route there was no way
+    to ask "what needs me?" — a client had to already know *which* agent was
+    stuck, list that agent's runs, and notice the status. With a dozen agents
+    that is a dozen requests and a guess, and the answer box is four screens
+    past the guess.
+
+    Which statuses those are is decided here rather than by the caller, from
+    the orchestrator's own set. A client that hard-codes ``waiting_for_user``
+    silently stops seeing ``blocked`` runs the day one is added, and the
+    failure mode is invisible: an empty list looks exactly like nothing to do.
+
+    Each row carries the run, the agent's name and the checkpoint, so a list
+    can be drawn from one request. The checkpoint is what makes a row worth
+    reading — "무엇을 기다리는지" — and fetching it per row would be an N+1
+    over exactly the runs a person is most impatient about.
+    """
+    from agent.task_orchestrator import WAITING_RUN_STATUSES
+
+    store = _store()
+    runs = store.list_runs(statuses=sorted(WAITING_RUN_STATUSES), limit=limit)
+
+    agent_names: dict[str, str] = {}
+    waiting: list[dict[str, Any]] = []
+    for run in runs:
+        run_id = run.get("id")
+        if not isinstance(run_id, str):
+            continue
+        agent_id = run.get("agent_id")
+        if isinstance(agent_id, str) and agent_id and agent_id not in agent_names:
+            agent = store.get_agent(agent_id)
+            agent_names[agent_id] = (
+                (agent or {}).get("name") or ""
+            ) if isinstance(agent, dict) else ""
+        checkpoint: dict[str, Any] | None = None
+        try:
+            found = store.get_run_checkpoint(run_id)
+            if isinstance(found, dict):
+                checkpoint = found.get("checkpoint")
+        except Exception:
+            # A row with no readable checkpoint is still worth listing: the run
+            # *is* waiting, and dropping it here would hide the very thing this
+            # route exists to surface. It renders with the run's own title.
+            logger.exception("could not read checkpoint for waiting run %s", run_id)
+        waiting.append(
+            {
+                "run": run,
+                "agent_name": agent_names.get(agent_id or "", ""),
+                "checkpoint": checkpoint,
+            }
+        )
+    return {"waiting": waiting}
+
+
 @router.get("/runs", dependencies=[Depends(verify_api_key)], response_model=None)
 async def list_runs(
     project_name: str | None = None,
@@ -2502,13 +3904,39 @@ async def get_run_checkpoint(run_id: str) -> dict[str, Any]:
 
 
 @router.post("/runs/{run_id}/resume", dependencies=[Depends(verify_api_key)], response_model=None)
-async def resume_run(run_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
-    """Resume a run from its active workflow checkpoint."""
+async def resume_run(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    max_steps: int | None = Query(default=None, ge=1),
+) -> dict[str, Any]:
+    """Resume a run from its active workflow checkpoint.
+
+    ``max_steps`` carries the same meaning it has on ``run-once``: how many
+    steps *this* continuation may run before pausing again. `1` is the "next
+    step" button — press it, watch one step, press it again. Absent runs the
+    rest, which is what resuming has always done.
+    """
     run = _require_run(run_id)
+    # A paused run has no checkpoint — it stopped without asking anybody
+    # anything — so the checkpoint door would 409 on it. Same continuation
+    # either way from the caller's side: one button, "carry on".
+    if run.get("status") == "paused":
+        try:
+            result = continue_paused_run(run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"Agent run '{run_id}' not found")
+        execution = result.get("execution")
+        if isinstance(execution, dict):
+            if max_steps is not None:
+                execution = {**execution, "max_steps": max_steps}
+            background_tasks.add_task(execute_task_orchestration, execution)
+        return result
     task_id = run.get("task_id")
     if not isinstance(task_id, str) or not task_id:
         raise HTTPException(status_code=409, detail="Run is not linked to a task.")
-    return await resume_task(task_id, background_tasks)
+    return await resume_task(task_id, background_tasks, max_steps=max_steps)
 
 
 @router.post("/runs/{run_id}/feedback", dependencies=[Depends(verify_api_key)], response_model=None)
@@ -2583,6 +4011,19 @@ async def list_run_events(
             limit=limit,
         )
     }
+
+
+@router.get("/runs/{run_id}/steps", dependencies=[Depends(verify_api_key)], response_model=None)
+async def list_run_steps(run_id: str) -> dict[str, Any]:
+    """Return the orchestration steps this one run recorded.
+
+    Not the same thing as ``/tasks/{task_id}/steps``: an agent owns a single
+    task and every run of it appends to that task, so the task-scoped read
+    answers with the agent's entire history. The dashboard's run detail used
+    that read and rendered all of it under whichever run you clicked.
+    """
+    run = _require_run(run_id)
+    return {"run": run, "steps": _store().list_run_steps(run_id)}
 
 
 @router.post("/runs/{run_id}/artifacts", dependencies=[Depends(verify_api_key)], response_model=None)
@@ -3503,7 +4944,11 @@ async def start_task(
 
 
 @router.post("/tasks/{task_id}/resume", dependencies=[Depends(verify_api_key)], response_model=None)
-async def resume_task(task_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+async def resume_task(
+    task_id: str,
+    background_tasks: BackgroundTasks,
+    max_steps: int | None = Query(default=None, ge=1),
+) -> dict[str, Any]:
     """Resume a task from its active workflow checkpoint."""
     try:
         result = resume_task_orchestration(task_id)
@@ -3513,6 +4958,8 @@ async def resume_task(task_id: str, background_tasks: BackgroundTasks) -> dict[s
         raise HTTPException(status_code=404, detail=f"Agent task '{task_id}' not found")
     execution = result.get("execution")
     if isinstance(execution, dict):
+        if max_steps is not None:
+            execution = {**execution, "max_steps": max_steps}
         background_tasks.add_task(execute_task_orchestration, execution)
     return result
 

@@ -5,6 +5,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# Shared authoring contract (kernel track G) — the shape of "what the model
+# understood and silently assumed", adopted as a response field by T-I1-20.
+from agent_flow_core.authoring import Assessment
+
 JsonContainer = dict[str, Any] | list[Any]
 
 
@@ -170,11 +174,24 @@ class TaskDraft(BaseModel):
 
 
 class BuilderTurn(BaseModel):
-    """Request body for an Agent Builder Configurator turn."""
+    """Request body for an Agent Builder Configurator turn.
+
+    ``agent_id`` is what turns this from "design me an agent" into "improve
+    the one I have". It is read only when a session is being **opened** — the
+    first turn, the one with no ``session_id`` — because that is when the
+    server converts the stored agent into the draft the conversation starts
+    from and records the workflow revision the proposal is built on. On a
+    later turn the session already knows which agent it belongs to; sending a
+    different id there is refused rather than silently retargeting a
+    conversation halfway through.
+
+    Omitting it keeps the create-only behaviour every existing client has.
+    """
 
     session_id: str | None = None
     user_message: str = Field(min_length=1)
     draft: AgentDraft | None = None
+    agent_id: str | None = None
 
 
 class ScriptProposalView(BaseModel):
@@ -215,6 +232,14 @@ class BuilderTurnResponse(BaseModel):
     assistant_message: str
     updated_draft: AgentDraft
     is_ready_to_commit: bool
+    # The model's own reading of the request (kernel `authoring.Assessment`,
+    # T-I1-20): what it understood, what it silently assumed, and what is
+    # still open — so a client can render assumptions separately from prose
+    # and turn each open question into a tappable follow-up. Serialized with
+    # this API's snake_case field names; absent (exclude_none) whenever the
+    # turn produced none, so older clients see the exact payload they always
+    # did.
+    assessment: Assessment | None = None
     should_offer_task: bool = Field(default=False, deprecated=True)
     task_draft: TaskDraft | None = None
     script_proposals: list[ScriptProposalView] = Field(default_factory=list)
@@ -222,6 +247,33 @@ class BuilderTurnResponse(BaseModel):
     job_id: str | None = None
     fallback: bool = False
     error: str | None = None
+    # Which agent this conversation will update on commit, or absent when it
+    # will create one. The route serialises with `response_model_exclude_none`,
+    # so a creation turn's payload is byte-identical to what it was before this
+    # field existed — an older client cannot start rendering "editing agent
+    # None".
+    source_agent_id: str | None = None
+    # The workflow revision the revision was opened against, so a client can
+    # send it back as `if_flow_revision` and, more usefully, can tell the user
+    # *which* version they are editing when the commit is refused as stale.
+    source_flow_revision: str | None = None
+    # --- What kind of failure this was, when it was one ------------------
+    #
+    # `error` alone is the provider's raw sentence, which a client can print
+    # but cannot act on. These three say enough to act: what kind of failure
+    # (`error_kind`, currently only "quota" — see llm.provider_errors, which
+    # answers None whenever it is unsure), which backend produced it, and what
+    # else is installed on this machine that could answer instead.
+    #
+    # `provider_alternatives` is an *offer*, never a substitution: nothing on
+    # the server switches provider on its own. A client renders it as a choice
+    # and the user makes it. Absent on a healthy turn, and on a failure whose
+    # kind is not recognised — the same `response_model_exclude_none` rule the
+    # fields above rely on keeps those payloads unchanged for older clients.
+    error_kind: str | None = None
+    error_provider_id: str | None = None
+    error_provider_name: str | None = None
+    provider_alternatives: list[dict[str, Any]] | None = None
 
     @field_validator("should_offer_task", mode="before")
     @classmethod
@@ -312,6 +364,15 @@ class AgentRunOnceRequest(BaseModel):
     cwd: str | None = None
     prompt: str | None = None
     capabilities: list[str] = Field(default_factory=list)
+    #: Stop after this many steps, leaving the run `paused` for
+    #: ``POST /runs/{id}/resume`` to carry on. `1` walks a workflow one step at
+    #: a time; absent runs it to the end, which is what every caller did before
+    #: this existed.
+    #:
+    #: There was no way to look at a workflow mid-flight. Diagnosing one broken
+    #: browser step took six all-or-nothing runs, each read afterwards out of
+    #: stored evidence rather than watched.
+    max_steps: int | None = Field(default=None, ge=1)
 
 
 class AgentRunCreate(BaseModel):

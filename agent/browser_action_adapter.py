@@ -7,6 +7,8 @@ Playwright-backed adapter when the runtime has a browser available.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import re
 import time
@@ -15,6 +17,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from agent.action_vocabulary import (
+    KIND_NUMBER,
+    ActionParam,
+    ActionType,
+    vocabulary_block,
+    vocabulary_payload,
+)
 from agent.tool_artifacts import ARTIFACT_ROOT
 from system.browser_preferences import (
     BrowserLaunchPlan,
@@ -636,26 +645,173 @@ _EXTRACT_MAX_CHARS = 200_000
 #: `test_browser_action_vocabulary.py` fails if this list and the dispatch below
 #: disagree, which is the only thing keeping documentation and behaviour from
 #: drifting apart.
-BROWSER_ACTION_VOCABULARY: tuple[tuple[str, str], ...] = (
-    ("navigate", 'go to a URL — {"type":"navigate","url":"https://..."}'),
-    ("click", 'click an element — {"type":"click","selector":"..."} (also "check"/"uncheck"). '
-              'Prefer an exact selector: :has-text("등록") also matches "임시등록"'),
-    ("type", 'real keystrokes — {"type":"type","selector":"...","text":"..."}. '
-             "Required for rich-text editors, which ignore a set value"),
-    ("fill", 'set a field value directly — {"type":"fill","selector":"input,textarea","text":"..."}. '
-             "Faster, but only works on plain inputs"),
-    ("press", 'send a key — {"type":"press","selector":"...","key":"Enter"}'),
-    ("wait", 'pause — {"type":"wait","timeout_ms":3000}'),
-    (
+#: Reused across actions. `selector` is required wherever the adapter calls
+#: `_selector(action)` and hands the result straight to Playwright: an action
+#: with no target does not park politely on the browser side either — it is
+#: refused by `_requires_user_target` before it ever reaches the page.
+_SELECTOR_PARAM_REQUIRED = ActionParam(
+    "selector",
+    "Selector",
+    label_ko="셀렉터",
+    required=True,
+    help_en="CSS selector or Playwright selector",
+    help_ko="CSS 또는 Playwright 셀렉터",
+)
+
+_TEXT_PARAM = ActionParam(
+    "text",
+    "Text",
+    label_ko="텍스트",
+    required=True,
+    help_en="the value to enter",
+    help_ko="입력할 값",
+)
+
+_TIMEOUT_MS_PARAM = ActionParam(
+    "timeout_ms",
+    "Timeout (ms)",
+    label_ko="제한 시간(ms)",
+    kind=KIND_NUMBER,
+    help_en="default 5000",
+    help_ko="기본 5000",
+)
+
+BROWSER_ACTION_VOCABULARY: tuple[ActionType, ...] = (
+    ActionType(
+        "navigate",
+        "Navigate",
+        'go to a URL — {"type":"navigate","url":"https://..."}',
+        params=(
+            ActionParam(
+                "url",
+                "URL",
+                required=True,
+                help_en="absolute URL",
+                help_ko="전체 URL",
+            ),
+        ),
+        label_ko="이동",
+        note_ko='URL로 이동 — {"type":"navigate","url":"https://..."}',
+    ),
+    ActionType(
+        "click",
+        "Click",
+        'click an element — {"type":"click","selector":"..."} (also "check"/"uncheck"). '
+        'Prefer an exact selector: :has-text("등록") also matches "임시등록"',
+        params=(_SELECTOR_PARAM_REQUIRED,),
+        label_ko="클릭",
+        note_ko='요소 클릭 — {"type":"click","selector":"..."} ("check"/"uncheck"도 동일). '
+        '정확한 셀렉터를 쓸 것: :has-text("등록")은 "임시등록"에도 매칭됨',
+    ),
+    ActionType(
+        "type",
+        "Type",
+        'real keystrokes — {"type":"type","selector":"...","text":"..."}. '
+        "Required for rich-text editors, which ignore a set value",
+        params=(_SELECTOR_PARAM_REQUIRED, _TEXT_PARAM),
+        label_ko="타이핑",
+        note_ko='실제 키 입력 — {"type":"type","selector":"...","text":"..."}. '
+        "리치텍스트 에디터는 값을 직접 설정해도 무시하므로 이 방식이 필요함",
+    ),
+    ActionType(
+        "fill",
+        "Fill",
+        'set a field value directly — {"type":"fill","selector":"input,textarea","text":"..."}. '
+        "Faster, but only works on plain inputs",
+        params=(_SELECTOR_PARAM_REQUIRED, _TEXT_PARAM),
+        label_ko="값 채우기",
+        note_ko='필드 값을 직접 설정 — {"type":"fill","selector":"input,textarea","text":"..."}. '
+        "더 빠르지만 일반 input에서만 동작함",
+    ),
+    ActionType(
+        "press",
+        "Press",
+        'send a key — {"type":"press","selector":"...","key":"Enter"}. '
+        "The selector is not optional: a press with no target stops the step",
+        params=(
+            _SELECTOR_PARAM_REQUIRED,
+            ActionParam(
+                "key",
+                "Key",
+                label_ko="키",
+                required=True,
+                help_en='e.g. Enter, Escape, Control+A',
+                help_ko="예: Enter, Escape, Control+A",
+            ),
+        ),
+        label_ko="키 입력",
+        note_ko='키 전송 — {"type":"press","selector":"...","key":"Enter"}. '
+        "셀렉터는 필수임: target 없는 press는 스텝을 중단시킴",
+    ),
+    ActionType(
+        "wait",
+        "Wait",
+        'pause — {"type":"wait","timeout_ms":3000}. '
+        'With a selector it waits for that element instead of the whole time',
+        params=(
+            ActionParam(
+                "selector",
+                "Selector",
+                label_ko="셀렉터",
+                help_en="wait for this element to appear; omit to just sleep",
+                help_ko="이 요소가 나타날 때까지 대기. 비우면 시간만 대기",
+            ),
+            ActionParam(
+                "timeout_ms",
+                "Timeout (ms)",
+                label_ko="제한 시간(ms)",
+                kind=KIND_NUMBER,
+                help_en="5000 waiting for a selector, 1000 sleeping",
+                help_ko="셀렉터 대기 기본 5000, 단순 대기 기본 1000",
+            ),
+        ),
+        label_ko="대기",
+        note_ko='대기 — {"type":"wait","timeout_ms":3000}. '
+        "셀렉터를 지정하면 전체 시간 대신 그 요소가 나타날 때까지만 기다림",
+    ),
+    ActionType(
         "assert",
+        "Assert",
         'check the page — {"type":"assert","kind":"text_visible","value":"..."} | '
         '{"kind":"url_contains","value":"..."} | {"kind":"url_not_contains","value":"..."}. '
         "url_not_contains is how a step proves it was not bounced to a login page",
+        params=(
+            ActionParam(
+                "kind",
+                "Kind",
+                label_ko="종류",
+                required=True,
+                help_en="text_visible | url_contains | url_not_contains | "
+                "page_state_readable (or leave it and give a selector)",
+                help_ko="text_visible | url_contains | url_not_contains | "
+                "page_state_readable (또는 셀렉터만 지정)",
+            ),
+            ActionParam(
+                "value",
+                "Value",
+                label_ko="값",
+                help_en="the text or URL fragment to check for",
+                help_ko="확인할 텍스트 또는 URL 조각",
+            ),
+            ActionParam(
+                "selector",
+                "Selector",
+                label_ko="셀렉터",
+                help_en="wait for this element instead of a kind",
+                help_ko="종류 대신 이 요소를 기다림",
+            ),
+            _TIMEOUT_MS_PARAM,
+        ),
+        label_ko="검증",
+        note_ko='페이지 검증 — {"type":"assert","kind":"text_visible","value":"..."} | '
+        '{"kind":"url_contains","value":"..."} | {"kind":"url_not_contains","value":"..."}. '
+        "url_not_contains는 로그인 페이지로 튕겨나지 않았음을 증명하는 방법임",
     ),
-    (
+    ActionType(
         "extract",
+        "Extract",
         'read a value and name it for later actions — '
-        '{"type":"extract","name":"cafe_id","source":"html","pattern":"clubid=(\\\\d+)"}. '
+        '{"type":"extract","name":"cafe_id","source":"html","pattern":"clubid=(\\d+)"}. '
         'Also {"selector":"...","attribute":"href"} for a link. '
         'Any later action may then use {{cafe_id}} inside url/selector/text — '
         "including in a later *step* of the same run. "
@@ -663,8 +819,73 @@ BROWSER_ACTION_VOCABULARY: tuple[tuple[str, str], ...] = (
         "instead of hardcoding one account's id. "
         f'Reading a whole page keeps {_EXTRACT_DEFAULT_CHARS} chars unless you '
         f'raise "max_chars" (up to {_EXTRACT_MAX_CHARS})',
+        params=(
+            ActionParam(
+                "name",
+                "Name",
+                label_ko="이름",
+                required=True,
+                help_en="binds the value as {{name}} for later actions — "
+                "an extract with no name reads the page and keeps nothing",
+                help_ko="값을 {{이름}}으로 묶어 이후 action에서 사용. "
+                "이름이 없으면 읽기만 하고 아무것도 남기지 않습니다",
+            ),
+            ActionParam(
+                "selector",
+                "Selector",
+                label_ko="셀렉터",
+                help_en="element to read; omit to read the whole page",
+                help_ko="읽을 요소. 비우면 페이지 전체",
+            ),
+            ActionParam(
+                "source",
+                "Source",
+                label_ko="소스",
+                help_en='"html" to search the raw HTML (where ids live) instead '
+                "of visible text",
+                help_ko='"html"이면 보이는 텍스트 대신 원본 HTML에서 찾습니다',
+            ),
+            ActionParam(
+                "pattern",
+                "Pattern",
+                label_ko="정규식",
+                help_en="regex; group 1 becomes the value",
+                help_ko="정규식. 그룹 1이 값이 됩니다",
+            ),
+            ActionParam(
+                "attribute",
+                "Attribute",
+                label_ko="속성",
+                help_en='read an attribute instead of text, e.g. "href"',
+                help_ko='텍스트 대신 속성을 읽습니다 (예: "href")',
+            ),
+            ActionParam(
+                "max_chars",
+                "Max chars",
+                label_ko="최대 글자수",
+                kind=KIND_NUMBER,
+                help_en=f"default {_EXTRACT_DEFAULT_CHARS}, up to {_EXTRACT_MAX_CHARS}",
+                help_ko=f"기본 {_EXTRACT_DEFAULT_CHARS}, 최대 {_EXTRACT_MAX_CHARS}",
+            ),
+        ),
+        label_ko="추출",
+        note_ko='값을 읽어 이후 action이 쓸 이름을 붙임 — '
+        '{"type":"extract","name":"cafe_id","source":"html","pattern":"clubid=(\\d+)"}. '
+        '링크는 {"selector":"...","attribute":"href"}로. '
+        '이후 어떤 action이든 url/selector/text 안에서 {{cafe_id}}를 쓸 수 있음 — '
+        "같은 run의 이후 *step*에서도 가능. "
+        "계정마다 다른 id를 하드코딩하는 대신, 실행 시점에만 존재하는 id를 가진 "
+        "페이지에 도달하는 방법임. "
+        f'페이지 전체를 읽으면 "max_chars"를 올리지 않는 한 {_EXTRACT_DEFAULT_CHARS}자까지만 '
+        f'유지함 (최대 {_EXTRACT_MAX_CHARS}자)',
     ),
-    ("screenshot", 'capture evidence — {"type":"screenshot"}'),
+    ActionType(
+        "screenshot",
+        "Screenshot",
+        'capture evidence — {"type":"screenshot"}',
+        label_ko="스크린샷",
+        note_ko='증거 캡처 — {"type":"screenshot"}',
+    ),
 )
 
 #: Named separately because the answer to "can I use it?" is no, and a model
@@ -674,28 +895,59 @@ BROWSER_ACTIONS_NOT_EXECUTED: tuple[str, ...] = ("select", "evaluate")
 
 def browser_action_vocabulary_block() -> str:
     """The vocabulary as prompt text, for whoever authors these actions."""
-    lines = ["browser_action `actions` — the full set:"]
-    lines += [f"  {name:<11} {note}" for name, note in BROWSER_ACTION_VOCABULARY]
-    lines.append(
-        "  " + "/".join(BROWSER_ACTIONS_NOT_EXECUTED)
-        + "   NOT executed — a step using these stops and asks the user"
+    return vocabulary_block(
+        "browser_action `actions` — the full set:",
+        BROWSER_ACTION_VOCABULARY,
+        not_executed=BROWSER_ACTIONS_NOT_EXECUTED,
+        footer=(
+            "A URL, selector or value left as a placeholder (configured_… ) or as an "
+            "unfilled {{name}} stops the step and asks, so name a real target or an "
+            "{{name}} some earlier extract fills.",
+            "Every browser_action step starts on a blank page. Cookies carry over "
+            "from the previous browser step (so a login survives), but the page it "
+            "left open does not — `_prepare_browser_session_for_execution` hands the next "
+            "step the storage state and nothing else. So each browser step must "
+            "navigate to the page it works on, even if the step before it was "
+            "already there. Splitting `navigate` into one step and `fill` into the "
+            "next cannot work: the second step waits for a selector on a blank page "
+            "and times out. Put the whole page interaction in one step, or repeat "
+            "the navigate at the top of each.",
+        ),
     )
-    lines.append(
-        "  A URL, selector or value left as a placeholder (configured_… ) or as an "
-        "unfilled {{name}} stops the step and asks, so name a real target or an "
-        "{{name}} some earlier extract fills."
-    )
-    return "\n".join(lines)
+
+
+def browser_action_vocabulary_payload() -> list[dict[str, Any]]:
+    """The same vocabulary as JSON, for a client that draws an action editor."""
+    return vocabulary_payload(BROWSER_ACTION_VOCABULARY)
 
 
 def _attach_dialog_recorder(page: Any, sink: list[str]) -> None:
-    """Record `alert`/`confirm` text so a refusal cannot pass as success.
+    """Record `alert`/`confirm` text, then settle the dialog.
 
-    Playwright auto-dismisses dialogs, which is what keeps an unattended run
-    from hanging — but it also means the site's own words about why it refused
-    are thrown away. Measured: submitting a cafe post with an empty body raised
-    an alert, Playwright dismissed it, and the step reported `completed` with
-    nothing posted.
+    Playwright auto-dismisses dialogs only while **nothing** is listening for
+    them. Attaching a listener turns that off and makes the handler
+    responsible: an unhandled dialog stays on screen and the action that
+    opened it never returns.
+
+    This function used to only record, so it took the responsibility without
+    discharging it. Measured on a cafe post: `click` on the submit button
+    logged
+
+        - waiting for element to be visible, enabled and stable
+        - element is visible, enabled and stable
+        - scrolling into view if needed
+        - done scrolling
+        - performing click action
+
+    and then hung for the full thirty seconds. Not an overlay and not an
+    unstable element — the click *was* performed, opened a dialog, and waited
+    for someone to answer it. The code added so a refusal could not pass as
+    success was what stopped the step from finishing at all.
+
+    Dismissing is the restored behaviour, not a new choice: it is what
+    happened before anything listened, and it keeps an unattended run moving.
+    The message is kept either way, so a submit that a dialog refused still
+    reads as a refusal rather than a success.
 
     A fake page without `.on` is common in tests, so a missing hook is not an
     error here.
@@ -703,8 +955,26 @@ def _attach_dialog_recorder(page: Any, sink: list[str]) -> None:
     on = getattr(page, "on", None)
     if not callable(on):
         return
+
+    def _record_and_settle(dialog: Any) -> None:
+        sink.append(str(getattr(dialog, "message", "") or ""))
+        # Best-effort, and never raised: a dialog that cannot be dismissed is
+        # already the worse problem, and letting this throw inside Playwright's
+        # event loop would lose the message as well as the step.
+        dismiss = getattr(dialog, "dismiss", None)
+        if not callable(dismiss):
+            return
+        try:
+            result = dismiss()
+            # Async page objects hand back a coroutine; schedule it rather
+            # than leaving it unawaited.
+            if inspect.isawaitable(result):
+                asyncio.ensure_future(result)
+        except Exception:  # noqa: BLE001 - diagnostics must never fail the step
+            logger.debug("dialog could not be dismissed", exc_info=True)
+
     try:
-        on("dialog", lambda dialog: sink.append(str(getattr(dialog, "message", "") or "")))
+        on("dialog", _record_and_settle)
     except Exception:  # noqa: BLE001 - diagnostics must never fail the step
         logger.debug("dialog recorder could not be attached", exc_info=True)
 

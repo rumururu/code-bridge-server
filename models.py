@@ -1,6 +1,6 @@
 """Pydantic models for Code Bridge API."""
 
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -180,6 +180,21 @@ class LlmProviderInstallJobStatus(BaseModel):
     stdout_tail: str = ""
     stderr_tail: str = ""
     output: str = ""
+
+
+class McpServerUpsert(BaseModel):
+    """Request body for registering one MCP server with Code Bridge.
+
+    ``config`` is a raw ``mcpServers`` entry — the same shape `~/.claude.json`
+    and `.mcp.json` use, and the only shape the launch path knows how to
+    translate. It is deliberately untyped here: `system/mcp_registry.py`
+    validates it by running the real translator over it, so this model cannot
+    accept a shape the launcher would later drop. It may contain credentials
+    (``env``, ``headers``), which is why no response ever echoes it back.
+    """
+
+    name: str
+    config: dict[str, Any]
 
 
 class IpLoginUpdate(BaseModel):

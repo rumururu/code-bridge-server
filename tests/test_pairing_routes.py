@@ -20,6 +20,7 @@ from pairing.pairing import (
 from pairing.pairing_page_service import PairingPageRenderResult
 from remote.remote_access_service import PairVerifyFlowResult
 from routes.deps import require_localhost_only, verify_api_key
+from routes import pairing  # noqa: E402
 from routes.pairing import router as pairing_router
 
 
@@ -239,6 +240,20 @@ class PairingRoutesTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"exists": True, "used": False, "expired": False})
+
+    def test_get_token_status_for_a_vanished_token_spends_no_budget(self):
+        # The dashboard's pairing page polls the token it was shown; once the
+        # QR expires that token is gone, and twenty such polls used to lock
+        # 127.0.0.1 out of pairing for five minutes. A well-formed miss is
+        # not an enumeration attempt (the token is 128 bits).
+        status = PairTokenStatus(exists=False, used=False, expired=True)
+        valid_token = "0123456789abcdef0123456789abcdef"
+        with patch("routes.pairing.get_pair_token_status_for_current_server", return_value=status), \
+             patch.object(pairing._token_status_limiter, "record_attempt") as record:
+            for _ in range(25):
+                response = self.client.get(f"/api/pair/token-status/{valid_token}")
+                self.assertEqual(response.status_code, 200)
+        record.assert_not_called()
 
     def test_get_token_status_rejects_malformed_token(self):
         # The route should reject obviously-wrong tokens cheaply (400),

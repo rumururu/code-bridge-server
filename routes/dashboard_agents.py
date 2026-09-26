@@ -23,7 +23,7 @@ from agent.agent_models import (
     BuilderTurn,
     DryRunRequest,
 )
-from approvals.approval_models import ApprovalDecisionCreate
+from approvals.approval_models import ApprovalDecisionCreate, ApprovalRequestCreate
 from approvals.approver_channel import CHANNEL_DESKTOP
 from agent.script_models import (
     ScriptDraftRequest,
@@ -135,6 +135,18 @@ async def get_builder_converse_job(job_id: str) -> dict[str, Any]:
     return await agents_routes.get_builder_converse_job(job_id)
 
 
+@router.post("/builder/converse/jobs/{job_id}/permission", response_model=None)
+async def answer_builder_permission(
+    job_id: str, body: agents_routes.BuilderPermissionDecision
+) -> dict[str, Any]:
+    """Answer a tool call the Configurator asked about.
+
+    Mirrored here for the same reason the rest of the builder is: the
+    dashboard talks from localhost with no API key, and this is the surface
+    where a person is sitting in front of the conversation that asked."""
+    return await agents_routes.answer_builder_permission(job_id, body)
+
+
 @router.post("/builder/commit", response_model=None)
 async def builder_commit(body: BuilderCommitBody) -> Any:
     """Persist the agent the builder conversation has been assembling."""
@@ -150,6 +162,30 @@ async def get_workflow_step_schema() -> dict[str, Any]:
     like every other agent-builder read below.
     """
     return await agents_routes.get_workflow_step_schema()
+
+
+@router.post("/agents/{agent_id}/graph/suggest", response_model=None)
+async def suggest_agent_graph(agent_id: str, body: "agents_routes.GraphSuggestBody") -> Any:
+    """Same proposals the phone gets, behind localhost instead of a key.
+
+    The T-I1-17 door for the desktop canvas: the dashboard listener already
+    holds LLM power (`builder/converse` above), so offering suggestions here
+    adds no surface a canvas token could leak.
+    """
+    return await agents_routes.suggest_agent_graph(agent_id, body)
+
+
+@router.get("/mcp-servers", response_model=None)
+async def list_detected_mcp_servers() -> dict[str, Any]:
+    """Same catalog the phone gets from `/api/system/mcp-servers/detected`.
+
+    The `mcp-servers` option source's keyless mirror (see
+    `workflow_step_schema.OPTION_SOURCES`), so the dashboard's step editor can
+    fill the `mcp_tool` server picker without holding an API key.
+    """
+    from . import system_settings as system_settings_routes
+
+    return await system_settings_routes.list_detected_mcp_servers()
 
 
 @router.get("/browser-runtime/readiness", response_model=None)
@@ -274,6 +310,22 @@ async def run_agent_once(agent_id: str, body: AgentRunOnceRequest) -> dict[str, 
     return await agents_routes.run_agent_once(agent_id, body)
 
 
+@router.post("/runs/{run_id}/resume", response_model=None)
+async def resume_run(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    max_steps: int | None = Query(default=None, ge=1),
+) -> dict[str, Any]:
+    """Same resume the phone gets from ``/api/agent/runs/{id}/resume``.
+
+    Mirrored here because the canvas needs it: walking a workflow one step at
+    a time is `max_steps=1` on the run, then the same on each continuation,
+    and the canvas talks to the dashboard router. A thin mirror, not a second
+    implementation.
+    """
+    return await agents_routes.resume_run(run_id, background_tasks, max_steps=max_steps)
+
+
 # --- Tasks and schedules -------------------------------------------------
 #
 # An agent on its own never fires. It runs because a task is assigned to it and
@@ -290,6 +342,42 @@ async def list_runs(
 ) -> dict[str, Any]:
     """Recent runs — what the dashboard's status view is built from."""
     return await agents_routes.list_runs(agent_id=agent_id, status=status, limit=limit)
+
+
+@router.post("/devices/permissions/request", response_model=None)
+async def request_device_permission_route(body: agents_routes.DevicePermissionRequest) -> dict[str, Any] | JSONResponse:
+    return await agents_routes.request_device_permission_route(body)
+
+
+@router.get("/devices/permissions/kinds", response_model=None)
+async def list_device_permission_kinds() -> dict[str, Any]:
+    return await agents_routes.list_device_permission_kinds()
+
+
+@router.get("/agents/{agent_id}/repair-proposals", response_model=None)
+async def list_repair_proposals(agent_id: str, limit: int = Query(default=20, ge=1, le=200)) -> dict[str, Any]:
+    return await agents_routes.list_repair_proposals(agent_id, limit=limit)
+
+
+@router.post("/agents/{agent_id}/repair-proposals/{proposal_id}/accept", response_model=None)
+async def accept_repair_proposal(agent_id: str, proposal_id: str, body: agents_routes.RepairProposalDecision | None = None) -> dict[str, Any] | JSONResponse:
+    return await agents_routes.accept_repair_proposal(agent_id, proposal_id, body)
+
+
+@router.post("/agents/{agent_id}/repair-proposals/{proposal_id}/reject", response_model=None)
+async def reject_repair_proposal(agent_id: str, proposal_id: str, body: agents_routes.RepairProposalDecision | None = None) -> dict[str, Any]:
+    return await agents_routes.reject_repair_proposal(agent_id, proposal_id, body)
+
+
+@router.get("/runs/{run_id}/steps", response_model=None)
+async def list_run_steps(run_id: str) -> dict[str, Any]:
+    """The steps of one run — what the run detail pane is built from.
+
+    The pane used to read ``/tasks/{task_id}/steps`` instead. Every run of an
+    agent shares that agent's single task, so each run opened the whole
+    history: one click on a two-step run rendered 386 steps from 193 runs.
+    """
+    return await agents_routes.list_run_steps(run_id)
 
 
 @router.get("/tasks/{task_id}/steps", response_model=None)
@@ -510,9 +598,26 @@ for _sub_prefix in ("/cli-agents", "/subagents"):
         )
 
 
+# Local agents that are not LLM runs — the feedback agent is the first — file
+# their approval requests here rather than on the api-key listener: they run
+# on this machine with no paired-device key, and the dashboard listener is the
+# one bound to localhost. Going through `request_approval_for_operation` is
+# what puts them under the policy engine: a standing rule for their operation
+# can now actually match, and the audit log sees the request.
+@router.post("/approvals/request", response_model=None)
+async def request_approval(body: ApprovalRequestCreate) -> Any:
+    return await approvals_routes.request_approval(body)
+
+
 @router.get("/approvals/pending", response_model=None)
 async def list_pending_approvals(run_id: str | None = None) -> dict[str, Any]:
     return await approvals_routes.list_pending_approvals(run_id=run_id)
+
+
+# After `/approvals/pending`: a path parameter declared earlier would swallow it.
+@router.get("/approvals/{approval_id}", response_model=None)
+async def get_approval(approval_id: str) -> dict[str, Any]:
+    return approvals_routes.get_approval_with_decision(approval_id)
 
 
 @router.post("/approvals/{approval_id}/decision", response_model=None)

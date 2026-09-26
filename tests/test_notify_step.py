@@ -22,7 +22,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 from agent import notification_store
-from agent.workflow_v2 import ALLOWED_STEP_TYPES, normalize_workflow_step
+from code_bridge_core.workflow_v2 import ALLOWED_STEP_TYPES, normalize_workflow_step
 from core import database
 
 
@@ -143,7 +143,7 @@ class NotifyStepTest(unittest.TestCase):
         A workflow that could carry a command line is remote code execution
         behind whatever standing rule lets it run unattended.
         """
-        from agent.workflow_v2 import WorkflowNormalizationError
+        from code_bridge_core.workflow_v2 import WorkflowNormalizationError
 
         with self.assertRaises(WorkflowNormalizationError):
             normalize_workflow_step({"id": "run", "type": "shell", "name": "Run"}, index=1)

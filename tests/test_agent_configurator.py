@@ -11,12 +11,86 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-import agent.configurator as configurator  # noqa: E402
+import code_bridge_core.configurator as configurator  # noqa: E402
 from agent.agent_models import WorkflowStep  # noqa: E402
-from agent.configurator import (  # noqa: E402
+from code_bridge_core.configurator import (  # noqa: E402
     build_configurator_system_prompt,
     create_builder_session,
 )
+
+
+class AssessmentBlockTest(unittest.TestCase):
+    """T-I1-20: the model's judgement summary rides a third fenced block."""
+
+    DRAFT = (
+        "```draft\n"
+        '{"name": "A", "description": "d", "system_prompt": "p",'
+        ' "provider_id": "anthropic", "tools": [], "flow": []}\n'
+        "```\n"
+    )
+
+    def test_a_valid_block_reaches_the_session_as_the_kernel_contract(self) -> None:
+        session = configurator.create_builder_session(system_prompt="test")
+        parsed = session.apply_llm_response(
+            "네, 알겠습니다.\n"
+            + self.DRAFT
+            + "```assessment\n"
+            + '{"intent_understanding": "디스크 감시 봇",'
+            + ' "assumptions": [{"field": "task_draft.schedule", "assumed": "daily 09:00"}],'
+            + ' "open_questions": ["어느 볼륨을 감시할까요?"]}\n'
+            + "```",
+            user_message="디스크 봇 만들어줘",
+        )
+        self.assertIsNotNone(parsed.assessment)
+        self.assertEqual(parsed.assessment.intent_understanding, "디스크 감시 봇")
+        self.assertEqual(parsed.assessment.assumptions[0].field, "task_draft.schedule")
+        self.assertEqual(parsed.assessment.open_questions, ["어느 볼륨을 감시할까요?"])
+        self.assertIs(session.assessment, parsed.assessment)
+        # The block never leaks into the user-facing prose.
+        self.assertNotIn("assessment", parsed.assistant_message)
+        self.assertNotIn("intent_understanding", parsed.assistant_message)
+
+    def test_camel_case_spelling_is_accepted(self) -> None:
+        # The kernel model populates by name and by alias; a model that emits
+        # Infergraph's spelling is not punished for it.
+        parsed = configurator.parse_configurator_response(
+            self.DRAFT
+            + '```assessment\n{"openQuestions": ["질문?"]}\n```'
+        )
+        self.assertEqual(parsed.assessment.open_questions, ["질문?"])
+
+    def test_an_invalid_block_is_dropped_with_a_warning_not_fabricated(self) -> None:
+        parsed = configurator.parse_configurator_response(
+            self.DRAFT
+            + '```assessment\n{"assumptions": ["a bare string"]}\n```'
+        )
+        self.assertIsNone(parsed.assessment)
+        self.assertTrue(
+            any("assessment" in warning for warning in parsed.warnings)
+        )
+
+    def test_an_empty_block_is_none_not_an_empty_shape(self) -> None:
+        parsed = configurator.parse_configurator_response(
+            self.DRAFT + "```assessment\n{}\n```"
+        )
+        self.assertIsNone(parsed.assessment)
+
+    def test_a_turn_without_a_block_clears_the_previous_one(self) -> None:
+        # Per-turn, not cumulative: last turn's assumptions shown against this
+        # turn's draft would misattribute them.
+        session = configurator.create_builder_session(system_prompt="test")
+        session.apply_llm_response(
+            self.DRAFT + '```assessment\n{"open_questions": ["질문?"]}\n```',
+            user_message="u1",
+        )
+        self.assertIsNotNone(session.assessment)
+        session.apply_llm_response(self.DRAFT, user_message="u2")
+        self.assertIsNone(session.assessment)
+
+    def test_the_prompt_asks_for_the_block(self) -> None:
+        prompt = build_configurator_system_prompt()
+        self.assertIn("```assessment", prompt)
+        self.assertIn("open_questions", prompt)
 
 
 class AgentConfiguratorTest(unittest.TestCase):
@@ -1608,7 +1682,7 @@ class SpokenDailyScheduleTest(unittest.TestCase):
     """
 
     def test_a_spoken_period_before_the_hour_is_read(self) -> None:
-        from agent.configurator import _extract_schedule  # noqa: PLC0415
+        from code_bridge_core.configurator import _extract_schedule  # noqa: PLC0415
 
         cases = {
             "매일 오전 9시": "daily 09:00",
@@ -1628,7 +1702,7 @@ class SpokenDailyScheduleTest(unittest.TestCase):
     def test_a_weekly_phrase_is_still_not_a_daily_one(self) -> None:
         # "매주 월요일 오전 9시" has no daily reading, and inventing one would
         # silently run a weekly job seven times a week.
-        from agent.configurator import _extract_schedule  # noqa: PLC0415
+        from code_bridge_core.configurator import _extract_schedule  # noqa: PLC0415
 
         self.assertIsNone(_extract_schedule("매주 월요일 오전 9시"))
 

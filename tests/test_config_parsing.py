@@ -32,7 +32,8 @@ server:
 
         cfg = Config(config_path=path)
 
-        self.assertEqual(cfg.weekly_budget_usd, 100.0)
+        # An unparseable budget means no budget, not an invented $100.
+        self.assertEqual(cfg.weekly_budget_usd, 0.0)
         self.assertEqual(cfg.usage_window_days, 1)
         self.assertEqual(cfg.heartbeat_interval_minutes, 5)
 

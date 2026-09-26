@@ -60,7 +60,11 @@ server:
   cors_origins: {cors_origins}
 
   # LLM usage tracking
-  weekly_budget_usd: 100.0
+  # weekly_budget_usd is unset by default: no budget, no "% of budget" on
+  # the usage screens. Set it (e.g. 50.0) only if you want turn costs — an
+  # API-rate estimate, not a bill on a subscription plan — measured against
+  # a weekly figure of your choosing.
+  # weekly_budget_usd: 50.0
   usage_window_days: 7
 
   # Heartbeat interval for presence updates (minutes)
@@ -178,9 +182,18 @@ server:
 
     @property
     def weekly_budget_usd(self) -> float:
-        """Weekly budget in USD used for usage percentage display."""
-        raw_value = self._get_server_value("weekly_budget_usd", 100.0)
-        return self._parse_float(raw_value, 100.0, minimum=0.0)
+        """Weekly budget in USD, or ``0.0`` when the operator has not set one.
+
+        Zero means "no budget": ``get_weekly_summary`` reports
+        ``has_budget: false`` and no percentage. The default used to be 100.0,
+        which nobody chose — and since the cost it is compared against is the
+        CLI's API-rate estimate (not something a subscription user is billed),
+        every usage screen showed figures like "207.96% of $100" that meant
+        nothing. An invalid value also falls back to no budget rather than to
+        an invented one.
+        """
+        raw_value = self._get_server_value("weekly_budget_usd", 0.0)
+        return self._parse_float(raw_value, 0.0, minimum=0.0)
 
     @property
     def usage_window_days(self) -> int:
@@ -206,6 +219,33 @@ server:
     def remote_access_enabled(self) -> bool:
         """Whether remote access via Cloudflare Tunnel is enabled. Defaults to True."""
         return self._get_server_value("remote_access_enabled", True)
+
+    @property
+    def canvas_external_enabled(self) -> bool:
+        """Whether ``/api/canvas/*`` answers tunnel requests. Defaults to True.
+
+        The canvas exists because the workflow has to be editable from a
+        phone, and the phone arrives through the tunnel — so closing this by
+        default would ship the feature switched off. It is here so an operator
+        who wants the canvas on the desk only can say so, without the routes
+        having to be moved to the dashboard-only listener.
+
+        Note this switches the *API* front, not the static bundle: the bundle
+        holds no authority and stays served either way.
+        """
+        return self._get_server_value("canvas_external_enabled", True)
+
+    @property
+    def canvas_bundle_dir(self) -> str | None:
+        """Override for where the built canvas bundle lives.
+
+        ``None`` (the default) means ``server/webui/canvas/``, which is where
+        ``install/sync-local-install.sh`` puts it because it rsyncs
+        ``server/`` verbatim. An override only makes sense for a developer
+        pointing at a live Vite build output.
+        """
+        value = self._get_server_value("canvas_bundle_dir", None)
+        return str(value) if value else None
 
     @property
     def accessible_folders(self) -> list[str]:

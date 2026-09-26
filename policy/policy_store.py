@@ -82,6 +82,17 @@ class PolicyRuleStore:
         normalized_effect = effect.strip().lower()
         if normalized_effect not in ALLOWED_RULE_EFFECTS:
             raise ValueError(f"Unsupported policy effect: {effect}")
+        # Same grant already standing -> hand it back instead of stacking a
+        # twin. Every "always allow" tap on the phone used to append a row, so
+        # one operation accumulated four identical rules that all matched the
+        # same requests; revoking one left the other three, which read as
+        # "still allowed" for no visible reason. Only unexpired rules count as
+        # duplicates: re-granting after an expiry is a new decision.
+        existing = self.find_effective_rule(
+            operation=operation.strip(), scope_candidates=[scope.strip() or "global"]
+        )
+        if existing is not None and existing["effect"] == normalized_effect:
+            return existing
         rule_id = _new_id()
         with get_db_connection() as conn:
             conn.execute(

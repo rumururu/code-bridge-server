@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -30,6 +30,28 @@ logger = logging.getLogger(__name__)
 PAIRED_ACCOUNTS_PATH = runtime_path("paired_accounts.json", Path.home() / ".code-bridge" / "paired_accounts.json")
 
 
+#: securetoken error codes after which a refresh token never works again.
+PERMANENT_REFRESH_REJECTIONS = frozenset(
+    {"USER_NOT_FOUND", "USER_DISABLED", "TOKEN_EXPIRED", "INVALID_REFRESH_TOKEN"}
+)
+
+
+def _permanent_rejection(response: Any) -> Optional[str]:
+    """The permanent error code in a failed securetoken answer, or ``None``.
+
+    Transient failures (a 5xx, a quota message, a malformed body) return
+    ``None`` and keep being retried; only the codes above mean "stop".
+    """
+    try:
+        message = response.json().get("error", {}).get("message")
+    except Exception:
+        return None
+    if not isinstance(message, str):
+        return None
+    code = message.split(":", 1)[0].strip()
+    return code if code in PERMANENT_REFRESH_REJECTIONS else None
+
+
 @dataclass
 class PairedAccount:
     """A Firebase account paired with this server."""
@@ -40,10 +62,19 @@ class PairedAccount:
     refresh_token: Optional[str] = None
     paired_at: Optional[str] = None
     last_updated: Optional[str] = None
+    #: Why the refresh token was rejected for good (``USER_NOT_FOUND``, …),
+    #: and when. Set once; cleared by a re-pair. While set, the account is
+    #: skipped rather than refreshed again — see ``refresh_account_token``.
+    refresh_rejected: Optional[str] = None
+    refresh_rejected_at: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         data: dict[str, Any] = {"user_id": self.user_id}
+        if self.refresh_rejected:
+            data["refresh_rejected"] = self.refresh_rejected
+        if self.refresh_rejected_at:
+            data["refresh_rejected_at"] = self.refresh_rejected_at
         if self.email:
             data["email"] = self.email
         if self.id_token:
@@ -68,6 +99,8 @@ class PairedAccount:
             id_token=data.get("id_token"),
             refresh_token=data.get("refresh_token"),
             paired_at=data.get("paired_at"),
+            refresh_rejected=data.get("refresh_rejected"),
+            refresh_rejected_at=data.get("refresh_rejected_at"),
             last_updated=data.get("last_updated"),
         )
 
@@ -228,6 +261,10 @@ class PairedAccountsManager:
                 refresh_token=refresh_token or existing.refresh_token,
                 paired_at=existing.paired_at,
                 last_updated=now,
+                # A new refresh token is a new lease on the account; keep
+                # the rejection only while the old token is all we have.
+                refresh_rejected=None if refresh_token else existing.refresh_rejected,
+                refresh_rejected_at=None if refresh_token else existing.refresh_rejected_at,
             )
         else:
             # Add new
@@ -285,6 +322,15 @@ class PairedAccountsManager:
         if not account or not account.refresh_token:
             logger.warning("Cannot refresh token: account %s not found or no refresh token", user_id)
             return None
+        if account.refresh_rejected:
+            # Already answered for good — asking again on every heartbeat
+            # only fills the log (one deleted Apple-relay account produced
+            # an ERROR pair on every start for weeks).
+            logger.debug(
+                "Skipping refresh for %s: refresh token rejected (%s) at %s",
+                user_id, account.refresh_rejected, account.refresh_rejected_at,
+            )
+            return None
 
         try:
             async with httpx.AsyncClient() as client:
@@ -297,6 +343,26 @@ class PairedAccountsManager:
                 )
 
                 if response.status_code != 200:
+                    rejection = _permanent_rejection(response)
+                    if rejection:
+                        # securetoken says the refresh token will never work
+                        # again (the user is gone, disabled, or the token was
+                        # revoked). Remember that on the account so the next
+                        # heartbeat skips it instead of asking again, and say
+                        # once what a person can do about it.
+                        self._accounts[user_id] = replace(
+                            account,
+                            refresh_rejected=rejection,
+                            refresh_rejected_at=datetime.now(timezone.utc).isoformat(),
+                        )
+                        self._save()
+                        logger.warning(
+                            "Refresh token for %s (%s) rejected for good: %s. The account"
+                            " is skipped from now on; re-pair from the app to restore it,"
+                            " or remove it from paired accounts.",
+                            user_id, account.email or "no email", rejection,
+                        )
+                        return None
                     logger.error("Token refresh failed for %s: %s", user_id, response.text)
                     return None
 
@@ -396,6 +462,15 @@ class PairedAccountsManager:
         # Snapshot the items: refreshing a token replaces the stored account
         # object, and we do not want to mutate what we are iterating over.
         for user_id, account in list(self._accounts.items()):
+            if account.refresh_rejected:
+                # Answered for good (see refresh_account_token); a warning
+                # per heartbeat would be the same sentence forever.
+                logger.debug(
+                    "Skipping URL update for %s: refresh token rejected (%s)",
+                    user_id, account.refresh_rejected,
+                )
+                results[user_id] = False
+                continue
             id_token, refreshed = await self.ensure_valid_token(user_id, api_key)
 
             if not id_token:

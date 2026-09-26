@@ -35,6 +35,7 @@ import logging
 import os
 import threading
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 from core.runtime_paths import runtime_path
@@ -132,7 +133,14 @@ def _get_app() -> Any:
 
         try:
             cred = credentials.Certificate(str(path))
-            _app = firebase_admin.initialize_app(cred, name=_APP_NAME)
+            try:
+                # Already initialised under our name (a re-import, a reset
+                # in tests) — that app is ours; a second initialize_app
+                # raises "already exists" and would leave push off for the
+                # rest of the process.
+                _app = firebase_admin.get_app(name=_APP_NAME)
+            except ValueError:
+                _app = firebase_admin.initialize_app(cred, name=_APP_NAME)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             _warn_once(
                 "bad_key",
@@ -151,6 +159,7 @@ def send_to_tokens(
     body: str | None = None,
     notification_id: str | None = None,
     level: str | None = None,
+    data_extra: Mapping[str, str | None] | None = None,
 ) -> dict[str, list[str]]:
     """Best-effort push of one notification to a set of device tokens.
 
@@ -159,6 +168,14 @@ def send_to_tokens(
     (`pairing.PairingService.remove_push_token`) should stop tracking them
     so a dead install doesn't cost a network round-trip on every future
     notify.
+
+    ``data_extra`` rides along in the FCM data payload — how the phone knows
+    *where* a tap should land. A notification saying a run is waiting for you
+    is worth very little if opening it drops you on a list of sentences, which
+    is what happened while this only carried an id and a level: the run and
+    task ids existed at the call site and were thrown away here. Empty and
+    ``None`` values are dropped rather than sent as ``""``, so a client can
+    test presence instead of emptiness. FCM data values must be strings.
     """
     result: dict[str, list[str]] = {"delivered": [], "dropped": []}
     if not tokens:
@@ -176,6 +193,9 @@ def send_to_tokens(
     data = {"notification_id": notification_id or ""}
     if level:
         data["level"] = level
+    for key, value in (data_extra or {}).items():
+        if isinstance(value, str) and value:
+            data[key] = value
 
     for token in tokens:
         if not token:

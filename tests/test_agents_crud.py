@@ -12,7 +12,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 from agent import agent_store, schedule_store  # noqa: E402
-from agent.configurator import create_builder_session  # noqa: E402
+from code_bridge_core.configurator import create_builder_session  # noqa: E402
 from core import database  # noqa: E402
 from routes import agents  # noqa: E402
 from routes.deps import verify_api_key  # noqa: E402

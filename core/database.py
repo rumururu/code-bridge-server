@@ -22,7 +22,14 @@ DRY_RUN_SUPPORT_SCHEMA_VERSION = 2026060100
 AUDIT_REDACTED_CATEGORIES_SCHEMA_VERSION = 2026060500
 EVENT_PAIRING_COLUMNS_SCHEMA_VERSION = 2026060601
 BROWSER_SESSIONS_SCHEMA_VERSION = 2026061000
-AGENT_SCRIPTS_SCHEMA_VERSION = 2026072600
+# 2026082400 adds `parameters_json`, so a script can record which arguments it
+# cannot run without and the authoring gate can refuse a step that supplies
+# none. Bumped rather than edited in place, for the reason spelled out under
+# AGENT_NOTIFICATIONS below: the version is what decides whether the migration
+# runs, so every database that already recorded 2026072600 — which is every
+# database with a registered script in it — would otherwise never gain the
+# column, and every registration against it would fail on the missing key.
+AGENT_SCRIPTS_SCHEMA_VERSION = 2026082400
 # 2026081700 adds `reason`, so the once-a-day throttle can be per agent *and*
 # per kind of trouble. Bumped rather than edited in place: the version is what
 # decides whether this migration runs at all, so a database that already
@@ -32,6 +39,16 @@ CLI_AGENT_IMPORTS_SCHEMA_VERSION = 2026080900
 CLI_AGENT_SWEEPS_SCHEMA_VERSION = 2026080901
 CLI_AGENT_RENAME_SCHEMA_VERSION = 2026080902
 CLI_AGENT_SEEN_RESIDUE_SCHEMA_VERSION = 2026081200
+# The run-scoped step read (agent_store.list_run_steps) filters on run_id, and
+# only the (task_id, sequence) index existed — so a run's detail scanned every
+# step its task ever wrote to return the two that are its own. A new version
+# rather than a line added to the agent_cockpit block that creates the table:
+# that version is recorded in every existing database, so an edit there would
+# only ever reach a database created after it.
+RUN_SCOPED_STEP_INDEX_SCHEMA_VERSION = 2026090200
+# Repair proposals (AGENT_SELF_REPAIR_SPEC §2): a failed run's proposed fix,
+# kept until a person applies, rejects, or lets it expire.
+REPAIR_PROPOSALS_SCHEMA_VERSION = 2026090400
 
 _PSEUDO_AGENTS = [
     {
@@ -749,6 +766,14 @@ def _migrate_agent_scripts(conn: sqlite3.Connection) -> None:
     could carry an arbitrary command would be remote code execution behind
     whatever standing policy rule let it run unattended. Registering a script
     is a deliberate, auditable act; running one is then just a lookup.
+
+    ``parameters_json`` is the script's declared *interface* — which arguments
+    it needs before it can do anything. It is deliberately NULLable and has no
+    default, because NULL has to keep meaning **unknown**: every row written
+    before the column existed has one, and reading those as "declares no
+    parameters" would be the registry asserting something nobody checked.
+    ``'[]'`` is the different, stronger claim that the script was inspected and
+    takes nothing.
     """
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS agent_scripts (
@@ -758,6 +783,7 @@ def _migrate_agent_scripts(conn: sqlite3.Connection) -> None:
             path TEXT NOT NULL,
             interpreter TEXT NOT NULL DEFAULT 'bash',
             default_args_json TEXT NOT NULL DEFAULT '[]',
+            parameters_json TEXT,
             timeout_seconds INTEGER NOT NULL DEFAULT 3600,
             created_by TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -767,6 +793,9 @@ def _migrate_agent_scripts(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_scripts_path
         ON agent_scripts(path);
     """)
+    # Tables created before the column existed. No backfill: those rows'
+    # interface genuinely is unknown, and NULL is how the registry says so.
+    _add_column_if_missing(conn, "agent_scripts", "parameters_json", "TEXT")
 
 
 def _migrate_agent_notifications(conn: sqlite3.Connection) -> None:
@@ -1074,6 +1103,40 @@ def _migrate_cli_agent_rename(conn: sqlite3.Connection) -> None:
 
 
 
+def _migrate_run_scoped_step_index(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_agent_task_steps_run_sequence
+        ON agent_task_steps(run_id, sequence);
+    """)
+
+
+def _migrate_repair_proposals(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS agent_repair_proposals (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            run_id TEXT,
+            seen_runs_json TEXT NOT NULL DEFAULT '[]',
+            base_flow_revision TEXT,
+            briefing_json TEXT NOT NULL DEFAULT '{}',
+            diagnosis_json TEXT NOT NULL DEFAULT '{}',
+            kind TEXT NOT NULL DEFAULT 'unknown',
+            summary TEXT NOT NULL DEFAULT '',
+            flow_json TEXT,
+            human_actions_json TEXT NOT NULL DEFAULT '[]',
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'proposed',
+            reject_reason TEXT,
+            applied_flow_revision TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            resolved_at TIMESTAMP,
+            resolved_by TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_repair_proposals_agent_status
+        ON agent_repair_proposals(agent_id, status, created_at);
+    """)
+
+
 _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]], ...] = (
     (
         LEGACY_FOUNDATION_SCHEMA_VERSION,
@@ -1155,6 +1218,16 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
         CLI_AGENT_SEEN_RESIDUE_SCHEMA_VERSION,
         "cli_agent_seen_residue",
         _migrate_cli_agent_seen_residue,
+    ),
+    (
+        RUN_SCOPED_STEP_INDEX_SCHEMA_VERSION,
+        "run_scoped_step_index",
+        _migrate_run_scoped_step_index,
+    ),
+    (
+        REPAIR_PROPOSALS_SCHEMA_VERSION,
+        "repair_proposals",
+        _migrate_repair_proposals,
     ),
 )
 

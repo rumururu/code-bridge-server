@@ -10,7 +10,7 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
-from routes.deps import verify_api_key
+from routes.deps import verify_api_key, verify_api_key_or_localhost
 from routes.system_settings import router as system_settings_router
 from system.system_settings_service import SystemSettingsResult
 
@@ -20,6 +20,12 @@ class SystemSettingsRoutesTest(unittest.TestCase):
         app = FastAPI()
         app.include_router(system_settings_router)
         app.dependency_overrides[verify_api_key] = lambda: True
+        # `/llm/selection` guards with verify_api_key_or_localhost, which calls
+        # verify_api_key directly rather than through DI — so the override
+        # above does not reach it and this second one is what keeps these
+        # payload-shape tests about payloads. The auth behaviour of that
+        # dependency is covered on its own in LlmSelectionAccessTest below.
+        app.dependency_overrides[verify_api_key_or_localhost] = lambda: True
         self.client = TestClient(app)
 
     def tearDown(self):
@@ -190,6 +196,91 @@ class SystemSettingsRoutesTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json().get("finished"))
         self.assertIn("options", response.json())
+
+
+class LlmSelectionAccessTest(unittest.TestCase):
+    """Who may change the app-wide LLM selection.
+
+    The agents page tells a user their selected provider is out of quota and
+    offers to switch. That offer is only real if the page can act on it, and
+    the page holds no API key — it talks from localhost. So this route carries
+    `verify_api_key_or_localhost`, the same dependency its `/llm/access`
+    neighbour has carried all along.
+
+    Widening an auth dependency is exactly the change that deserves a test
+    saying what it did *not* widen: a tunnelled request is still refused, so
+    "reachable from the dashboard" never quietly became "reachable from the
+    internet".
+    """
+
+    def setUp(self):
+        app = FastAPI()
+        app.include_router(system_settings_router)
+        self.app = app
+
+    def _client(self, host: str) -> TestClient:
+        # TestClient reports a client host of "testclient", which
+        # `is_localhost_request` rightly does not consider local. Rewriting the
+        # ASGI scope is how these tests reach the real dependency instead of a
+        # stand-in for it — patching `is_localhost_request` would prove only
+        # that the patch works.
+        app = self.app
+
+        async def with_client_host(scope, receive, send):
+            if scope["type"] == "http":
+                scope = dict(scope)
+                scope["client"] = (host, 12345)
+            await app(scope, receive, send)
+
+        return TestClient(with_client_host)
+
+    def test_localhost_may_switch_provider_without_an_api_key(self):
+        with patch(
+            "routes.system_settings.update_llm_selection_for_current_server",
+            return_value=SystemSettingsResult(
+                success=True,
+                status_code=200,
+                payload={"selected": {"company_id": "anthropic", "model": "sonnet"}},
+            ),
+        ) as update:
+            with self._client("127.0.0.1") as client:
+                response = client.put(
+                    "/api/system/llm/selection",
+                    json={"company_id": "anthropic", "model": "sonnet"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        update.assert_called_once_with("anthropic", "sonnet")
+
+    def test_tunnelled_request_is_still_refused(self):
+        with patch(
+            "routes.system_settings.update_llm_selection_for_current_server",
+        ) as update:
+            with self._client("127.0.0.1") as client:
+                response = client.put(
+                    "/api/system/llm/selection",
+                    json={"company_id": "anthropic", "model": "sonnet"},
+                    # Cloudflare stamps these; routes.deps reads them as proof
+                    # the request arrived through the tunnel even though the
+                    # socket looks local.
+                    headers={"CF-Ray": "abc123", "CF-Connecting-IP": "203.0.113.7"},
+                )
+
+        self.assertIn(response.status_code, (401, 403))
+        update.assert_not_called()
+
+    def test_non_local_request_without_a_key_is_refused(self):
+        with patch(
+            "routes.system_settings.update_llm_selection_for_current_server",
+        ) as update:
+            with self._client("192.168.1.50") as client:
+                response = client.put(
+                    "/api/system/llm/selection",
+                    json={"company_id": "anthropic", "model": "sonnet"},
+                )
+
+        self.assertIn(response.status_code, (401, 403))
+        update.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -38,7 +38,14 @@ def _clear_cache():
     llm_settings.reset_antigravity_models_cache()
 
 
-def _completed(stdout: str = "gemini-3.1-pro-high\n", returncode: int = 0):
+#: `agy models` prints `<slug>\t<display name>`, and the display name is the
+#: half `--model` accepts. The old default here was a bare slug with no tab —
+#: a shape the CLI never emits — so this suite passed while the parser was
+#: dropping the tab and shipping `slug\tName` as the id. Selecting Antigravity
+#: then failed every builder turn. Verbatim CLI output on 2026-08-24.
+def _completed(
+    stdout: str = "gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n", returncode: int = 0
+):
     result = mock.Mock()
     result.stdout = stdout
     result.returncode = returncode
@@ -58,7 +65,7 @@ def test_cli_is_consulted_once_not_per_call():
             llm_settings._get_antigravity_models()
 
     assert run.call_count == 1, "the CLI must not be re-run for every caller"
-    assert [m["id"] for m in first] == ["gemini-3.1-pro-high"]
+    assert [m["id"] for m in first] == ["Gemini 3.1 Pro (High)"]
 
 
 def test_probe_timeout_is_short_enough_to_not_wedge_the_loop():
