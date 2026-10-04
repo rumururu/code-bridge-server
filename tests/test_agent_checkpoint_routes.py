@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ if str(SERVER_DIR) not in sys.path:
 
 from agent import agent_store, browser_session_store  # noqa: E402
 from agent.browser_action_adapter import BrowserActionAdapterResult  # noqa: E402
+from agent import task_orchestrator  # noqa: E402
 from core import database  # noqa: E402
 from routes import agents  # noqa: E402
 from routes.deps import verify_api_key  # noqa: E402
@@ -205,9 +207,14 @@ class AgentCheckpointRoutesTest(unittest.TestCase):
         self.assertEqual(task_response.status_code, 200, task_response.text)
         task = task_response.json()["task"]
 
+        browser_calls = []
+
         async def fake_execute_browser_actions(actions, *, context):
             self.assertEqual(context["workflow_step_id"], "open_page")
             self.assertEqual(actions[0]["type"], "navigate")
+            browser_calls.append(context)
+            if len(browser_calls) > 1:
+                return BrowserActionAdapterResult(status="completed")
             return BrowserActionAdapterResult(
                 status="waiting_for_user",
                 wait_reason="captcha_or_bot_challenge",
@@ -342,6 +349,8 @@ class AgentCheckpointRoutesTest(unittest.TestCase):
             handoff_complete_response.text,
         )
         self.assertTrue(handoff_complete_response.json()["browser_handoff_completed"])
+        self.assertEqual(len(browser_calls), 2)
+        self.assertEqual(browser_calls[1]["browser_session_id"], handoff["browser_session"]["id"])
         self.assertEqual(
             handoff_complete_response.json()["browser_session"]["status"],
             "resumed",
@@ -389,6 +398,52 @@ class AgentCheckpointRoutesTest(unittest.TestCase):
         sessions = browser_session_store.get_browser_session_store().list_for_run(run["id"])
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]["workflow_step_id"], "open_page")
+
+    def test_browser_handoff_resume_waits_again_when_login_is_incomplete(self):
+        _agent, task, run, step = self._waiting_fixture()
+        session = browser_session_store.get_browser_session_store().create(
+            run_id=run["id"], task_id=task["id"], step_id=step["id"],
+            workflow_step_id="captcha", status="waiting_for_user",
+        )
+        step_input = {
+            "workflow_step_id": "captcha",
+            "workflow_type": "browser_action",
+            "actions": [{"type": "navigate", "url": "https://example.test/login"}],
+            "on_failure": {"type": "manual_handoff", "resume": "same_step"},
+        }
+        output = dict(step["output"])
+        output["checkpoint"].update({
+            "workflow_type": "browser_action",
+            "browser_session_id": session["id"],
+        })
+        output["browser_session_id"] = session["id"]
+        self.store.update_task_step(step["id"], {"input": step_input, "output": output})
+        browser_session_store.get_browser_session_store().mark_resumed(session["id"])
+        self.store.append_step_user_response(
+            task_id=task["id"], step_id=step["id"], message="I tried login.",
+        )
+        seen_sessions = []
+
+        async def still_blocked(_actions, *, context):
+            seen_sessions.append(context["browser_session_id"])
+            return BrowserActionAdapterResult(
+                status="waiting_for_user", wait_reason="login_required",
+                prompt="Finish login, then resume.",
+            )
+
+        with patch("agent.task_orchestrator.execute_browser_actions", still_blocked):
+            asyncio.run(task_orchestrator._drive_workflow_steps(
+                task_id=task["id"], run_id=run["id"], provider_id="openai",
+                model=None, project_name="__global__", project_path=self._tmp.name,
+                launch_message="Resume browser step", steps=[self.store.get_task_step(step["id"])],
+            ))
+
+        checkpoint = self.store.get_task_checkpoint(task["id"])
+        self.assertEqual(seen_sessions, [session["id"]])
+        self.assertEqual(checkpoint["step"]["status"], "waiting_for_user")
+        self.assertEqual(checkpoint["checkpoint"]["browser_session_id"], session["id"])
+        self.assertEqual(self.store.get_run(run["id"])["status"], "waiting_for_user")
+        self.assertEqual(len(browser_session_store.get_browser_session_store().list_for_run(run["id"])), 1)
 
 
 if __name__ == "__main__":

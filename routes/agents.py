@@ -3686,6 +3686,7 @@ async def list_notifications(
     unread_only: bool = False,
     agent_id: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     """What agents have left for you since you last looked."""
     from agent.notification_store import get_notification_store
@@ -3693,7 +3694,7 @@ async def list_notifications(
     store = get_notification_store()
     return {
         "notifications": store.list_notifications(
-            unread_only=unread_only, agent_id=agent_id, limit=limit
+            unread_only=unread_only, agent_id=agent_id, limit=limit, offset=offset
         ),
         "unread_count": store.unread_count(),
     }
@@ -3982,6 +3983,8 @@ async def append_run_event(
     body: AgentEventCreate,
 ) -> dict[str, Any]:
     """Append a normalized provider/app event to a run."""
+    if body.event_type == "preflight.completed":
+        raise HTTPException(status_code=403, detail="reserved internal event type")
     event = _store().append_event(
         run_id=run_id,
         event_type=body.event_type,
@@ -4270,11 +4273,17 @@ async def run_preflight(
         "passed": passed_all,
         "results": command_results,
     }
-    store.append_event(
+    preflight_event = store.append_event(
         run_id=run_id,
         event_type="preflight.completed",
         app_event=summary,
     )
+    if preflight_event:
+        from core.database import get_db_connection
+        with get_db_connection() as conn:
+            conn.execute("INSERT INTO agent_preflight_evidence (event_id, run_id) VALUES (?, ?)",
+                         (preflight_event["id"], run_id))
+            conn.commit()
     artifact = store.add_artifact(
         run_id=run_id,
         kind="agent_preflight",

@@ -1,12 +1,15 @@
 import sys
+import asyncio
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.datastructures import Headers
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
@@ -14,7 +17,8 @@ if str(SERVER_DIR) not in sys.path:
 
 from agent import agent_store, browser_session_store  # noqa: E402
 from core import database  # noqa: E402
-from routes import agent_browser_rtc  # noqa: E402
+from routes import agent_browser_rtc, dashboard_agents, register_api_routers  # noqa: E402
+from routes.deps import start_periodic_reauth_task  # noqa: E402
 
 
 class _FakeBrowserRtcPeerSession:
@@ -207,6 +211,136 @@ class AgentBrowserRtcRoutesTest(unittest.TestCase):
 
         self.assertEqual(error["type"], "browser_rtc.error")
         self.assertEqual(error["code"], "no_active_browser_handoff")
+
+    def test_dashboard_websocket_boundary_and_api_listener_absence(self):
+        path = "/ws/dashboard/agent/tasks/task/browser-handoff/rtc"
+        api = FastAPI()
+        register_api_routers(api)
+        self.assertNotIn(path, {route.path for route in api.routes})
+
+        def allowed(client="127.0.0.1", origin="http://localhost:8000", host="localhost:8000", tunnel=False):
+            headers = {"origin": origin, "host": host}
+            if tunnel:
+                headers["cf-ray"] = "test"
+            return agent_browser_rtc._dashboard_ws_allowed(
+                SimpleNamespace(client=SimpleNamespace(host=client), headers=Headers(headers))
+            )
+
+        self.assertTrue(allowed())
+        self.assertFalse(allowed(client="203.0.113.1"))
+        self.assertFalse(allowed(tunnel=True))
+        self.assertFalse(allowed(origin="https://evil.example"))
+        self.assertFalse(allowed(origin="http://localhost:9999"))
+        self.assertFalse(allowed(origin=""))
+        self.assertFalse(allowed(origin="http://[invalid"))
+
+        websocket = SimpleNamespace(client=SimpleNamespace(host="203.0.113.1"), headers={
+            "host": "localhost:8000", "origin": "http://localhost:8000"}, close=AsyncMock())
+        with patch.object(agent_browser_rtc, "BrowserRtcPeerSession") as runtime:
+            asyncio.run(agent_browser_rtc.dashboard_browser_handoff_rtc_websocket(
+                websocket, "task", "session", "run", 1280, 720, 12.0, 70, "page"))
+            runtime.assert_not_called()
+        websocket.close.assert_awaited_once_with(code=1008, reason="dashboard_access_denied")
+
+    def test_dashboard_handoff_guards_and_delegation(self):
+        task, run, session = self._browser_handoff_fixture()
+        app = FastAPI()
+        app.include_router(dashboard_agents.router)
+        client = TestClient(app)
+        base = f"/api/dashboard/agent/tasks/{task['id']}/browser-handoff"
+        body = {"message": "done", "expected_browser_session_id": session["id"],
+                "expected_run_id": run["id"]}
+
+        with patch.object(dashboard_agents.agents_routes, "get_task_browser_handoff", new_callable=AsyncMock,
+                          return_value={"delegated": True}) as getter, patch.object(
+            dashboard_agents.agents_routes, "complete_task_browser_handoff", new_callable=AsyncMock,
+            return_value={"delegated": True}) as completer:
+            self.assertEqual(client.get(base).json(), {"delegated": True})
+            getter.assert_awaited_once_with(task["id"])
+            self.assertEqual(client.post(base + "/complete", json=body).json(), {"delegated": True})
+            completer.assert_awaited_once()
+            completer.reset_mock()
+            for changed in ({"expected_browser_session_id": "old"}, {"expected_run_id": "old"}):
+                self.assertEqual(client.post(base + "/complete", json={**body, **changed}).status_code, 409)
+            self.assertEqual(client.post(base + "/complete", json={"message": "done"}).status_code, 422)
+            completer.assert_not_awaited()
+
+            self.store.update_run_status(run["id"], "failed")
+            self.assertEqual(client.get(base).status_code, 409)
+            self.assertEqual(client.post(base + "/complete", json=body).status_code, 409)
+            self.store.update_run_status(run["id"], "running")
+            browser_session_store.get_browser_session_store().update(
+                session["id"], {"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)})
+            self.assertEqual(client.get(base).status_code, 409)
+            self.assertEqual(client.post(base + "/complete", json=body).status_code, 409)
+            completer.assert_not_awaited()
+
+    def test_dashboard_rtc_rejects_stale_before_runtime(self):
+        task, run, session = self._browser_handoff_fixture()
+        websocket = SimpleNamespace(close=AsyncMock())
+        with patch.object(agent_browser_rtc, "_dashboard_ws_allowed", return_value=True), patch.object(
+            agent_browser_rtc, "BrowserRtcPeerSession") as runtime:
+            asyncio.run(agent_browser_rtc.dashboard_browser_handoff_rtc_websocket(
+                websocket, task["id"], "old", run["id"], 1280, 720, 12.0, 70, "page"))
+            self.store.update_run_status(run["id"], "failed")
+            asyncio.run(agent_browser_rtc.dashboard_browser_handoff_rtc_websocket(
+                websocket, task["id"], session["id"], run["id"], 1280, 720, 12.0, 70, "page"))
+            self.store.update_run_status(run["id"], "running")
+            browser_session_store.get_browser_session_store().update(
+                session["id"], {"expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)})
+            asyncio.run(agent_browser_rtc.dashboard_browser_handoff_rtc_websocket(
+                websocket, task["id"], session["id"], run["id"], 1280, 720, 12.0, 70, "page"))
+            runtime.assert_not_called()
+        self.assertEqual(websocket.close.await_count, 3)
+
+    def test_dashboard_rtc_uses_shared_session_handler(self):
+        task, run, session = self._browser_handoff_fixture()
+        websocket = SimpleNamespace(close=AsyncMock())
+        with patch.object(agent_browser_rtc, "_dashboard_ws_allowed", return_value=True), patch.object(
+            agent_browser_rtc, "_serve_browser_handoff_rtc", new_callable=AsyncMock) as shared:
+            asyncio.run(agent_browser_rtc.dashboard_browser_handoff_rtc_websocket(
+                websocket, task["id"], session["id"], run["id"], 1280, 720, 12.0, 70, "page"))
+            shared.assert_awaited_once()
+            self.assertEqual(shared.await_args.kwargs["payload"]["browser_session"]["id"], session["id"])
+        websocket.close.assert_not_awaited()
+
+    def test_dashboard_periodic_validator_tracks_active_session_without_api_key(self):
+        task, run, session = self._browser_handoff_fixture()
+        headers = Headers({"host": "localhost:8000", "origin": "http://localhost:8000"})
+        websocket = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"), headers=headers)
+        validate = lambda _key: agent_browser_rtc._dashboard_rtc_validator(
+            websocket, task["id"], session["id"], run["id"])
+        self.assertTrue(validate(None).success)
+
+        async def exercise():
+            closed = asyncio.Event()
+
+            async def close(*, code, reason):
+                self.assertEqual((code, reason), (4001, "auth_invalid"))
+                closed.set()
+
+            websocket.close = close
+            with patch("routes.deps.validate_api_key_for_current_server") as api_validator:
+                periodic = start_periodic_reauth_task(
+                    websocket, None, interval_seconds=0.01, validator=validate)
+                try:
+                    await asyncio.sleep(0.03)
+                    self.assertFalse(closed.is_set())
+                    self.store.update_run_status(run["id"], "failed")
+                    await asyncio.wait_for(closed.wait(), timeout=1)
+                    api_validator.assert_not_called()
+                finally:
+                    periodic.cancel()
+                    try:
+                        await periodic
+                    except asyncio.CancelledError:
+                        pass
+
+        asyncio.run(exercise())
+        self.assertFalse(validate(None).success)
+        self.store.update_run_status(run["id"], "running")
+        websocket.client = SimpleNamespace(host="203.0.113.1")
+        self.assertFalse(validate(None).success)
 
 
 if __name__ == "__main__":

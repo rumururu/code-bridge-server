@@ -1,14 +1,16 @@
 import os
+import asyncio
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 from agent.browser_runtime_manager import (  # noqa: E402
+    BrowserRuntimeManager,
     LiveBrowserRuntime,
     _browser_launch_args,
     _headless_override,
@@ -66,6 +68,19 @@ def _clean_env(**overrides: str) -> dict[str, str]:
 
 
 class BrowserRuntimeManagerTest(unittest.TestCase):
+    def test_open_session_reuses_live_runtime_for_same_browser_session(self):
+        manager = BrowserRuntimeManager()
+        runtime = Mock()
+        runtime.set_viewport = AsyncMock()
+        manager._sessions["bs_login"] = runtime
+
+        with patch("agent.browser_runtime_manager.resolve_browser_launch_plan") as launch_plan:
+            result = asyncio.run(manager.open_session({"id": "bs_login"}))
+
+        self.assertIs(result, runtime)
+        runtime.set_viewport.assert_awaited_once_with(1280, 720)
+        launch_plan.assert_not_called()
+
     def test_headful_browser_defaults_to_offscreen_window(self):
         with patch.dict(os.environ, _clean_env(), clear=True):
             args = _browser_launch_args(

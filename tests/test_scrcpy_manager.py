@@ -13,6 +13,27 @@ from devices.scrcpy_manager import ScrcpyManager
 
 
 class ScrcpyManagerNodePathTest(unittest.TestCase):
+    def test_tracked_tango_guard_replaces_installed_entry_points(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp) / "dist"
+            service = dist / "src/server/goog-device/tango/TangoScrcpyService.mjs"
+            service.parent.mkdir(parents=True)
+            (dist / "tango-server.mjs").write_text("old")
+            service.write_text("old")
+            manager = ScrcpyManager(scrcpy_path=tmp)
+            manager._install_tango_guard()
+            self.assertIn("assertAllowedUdid", service.read_text())
+            self.assertIn("assertAllowedUdid", (dist / "tango-server.mjs").read_text())
+            with patch("devices.scrcpy_manager.shutil.copyfile") as copyfile:
+                manager._install_tango_guard()
+            copyfile.assert_not_called()
+
+    def test_tango_uses_existing_adb_without_new_required_configuration(self):
+        manager = ScrcpyManager()
+        with patch.dict(os.environ, {}, clear=True):
+            env = manager._subprocess_env()
+        self.assertNotIn("CODEBRIDGE_SCRCPY_ALLOWED_UDID", env)
+
     def test_resolve_adb_path_prefers_explicit_codebridge_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             explicit_adb = Path(tmp) / "custom-adb"

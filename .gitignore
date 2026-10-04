@@ -21,3 +21,8 @@ config.yaml
 scrcpy/
 server_info.json
 DS_Store
+
+# Local database backups are not release sources.
+*.db.*
+*.sqlite
+*.sqlite.*

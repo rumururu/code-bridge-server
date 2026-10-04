@@ -49,6 +49,8 @@ RUN_SCOPED_STEP_INDEX_SCHEMA_VERSION = 2026090200
 # Repair proposals (AGENT_SELF_REPAIR_SPEC §2): a failed run's proposed fix,
 # kept until a person applies, rejects, or lets it expire.
 REPAIR_PROPOSALS_SCHEMA_VERSION = 2026090400
+EXPERIENCE_REVIEW_SCHEMA_VERSION = 2026100300
+PREFLIGHT_EVIDENCE_SCHEMA_VERSION = 2026100301
 
 _PSEUDO_AGENTS = [
     {
@@ -1228,6 +1230,28 @@ _SCHEMA_MIGRATIONS: tuple[tuple[int, str, Callable[[sqlite3.Connection], None]],
         REPAIR_PROPOSALS_SCHEMA_VERSION,
         "repair_proposals",
         _migrate_repair_proposals,
+    ),
+    (
+        EXPERIENCE_REVIEW_SCHEMA_VERSION,
+        "experience_review",
+        lambda conn: conn.execute("""
+            CREATE TABLE IF NOT EXISTS agent_run_reviews (
+                run_id TEXT PRIMARY KEY REFERENCES agent_runs(id),
+                reviewed INTEGER NOT NULL,
+                reviewed_at TIMESTAMP,
+                actor TEXT
+            )
+        """),
+    ),
+    (
+        PREFLIGHT_EVIDENCE_SCHEMA_VERSION,
+        "preflight_evidence",
+        lambda conn: conn.execute("""
+            CREATE TABLE IF NOT EXISTS agent_preflight_evidence (
+                event_id TEXT PRIMARY KEY REFERENCES agent_events(id),
+                run_id TEXT NOT NULL REFERENCES agent_runs(id)
+            )
+        """),
     ),
 )
 

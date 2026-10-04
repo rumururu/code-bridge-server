@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 from system.autostart_service import get_autostart_status, set_autostart
 from core.config import get_config
-from dashboard.dashboard_page import render_agents_html, render_dashboard_html
+from dashboard.dashboard_page import render_agents_html, render_dashboard_html, render_experience_html
 from dashboard.dashboard_service import get_dashboard_overview_for_current_server
 from system.optional_services import FIREBASE_AVAILABLE, get_firebase_auth, get_active_tunnel_url
 from pairing.pairing_service import get_pairing_service
@@ -42,6 +42,7 @@ def _find_git_root() -> Path | None:
 
 GIT_ROOT = _find_git_root()
 SERVER_DIR = Path(__file__).parent.parent
+SERVER_DEVICE_ASSET = SERVER_DIR / "dashboard" / "assets" / "server-device-v1.png"
 DESKTOP_ARTIFACTS_DIR = GIT_ROOT / "dist" / "desktop_server_app" if GIT_ROOT else None
 DESKTOP_INSTALLERS = {
     "macos": {
@@ -99,13 +100,13 @@ async def root_redirect() -> RedirectResponse:
     include_in_schema=False,
     dependencies=[Depends(require_local_access)],
 )
-async def get_dashboard() -> HTMLResponse:
+async def get_dashboard(embedded: bool = False) -> HTMLResponse:
     """Serve the dashboard HTML page.
 
     This page is only accessible from local network.
     External access via Cloudflare Tunnel is blocked for security.
     """
-    return HTMLResponse(content=render_dashboard_html())
+    return HTMLResponse(content=render_dashboard_html(embedded=True) if embedded else render_experience_html())
 
 
 @router.get(
@@ -114,9 +115,9 @@ async def get_dashboard() -> HTMLResponse:
     include_in_schema=False,
     dependencies=[Depends(require_local_access)],
 )
-async def get_settings_page() -> HTMLResponse:
+async def get_settings_page(embedded: bool = False) -> HTMLResponse:
     """Serve the settings view of the console."""
-    return HTMLResponse(content=render_dashboard_html("settings"))
+    return HTMLResponse(content=render_dashboard_html("settings", embedded=True) if embedded else render_experience_html())
 
 
 @router.get(
@@ -125,14 +126,37 @@ async def get_settings_page() -> HTMLResponse:
     include_in_schema=False,
     dependencies=[Depends(require_local_access)],
 )
-async def get_agents_page() -> HTMLResponse:
+async def get_agents_page(embedded: bool = False) -> HTMLResponse:
     """Serve the standalone Agents page.
 
     Same local-only gate as the dashboard — it drives the
     ``/api/dashboard/agent/*`` endpoints, which are never mounted on the
     tunnel-exposed API app.
     """
-    return HTMLResponse(content=render_agents_html())
+    return HTMLResponse(content=render_agents_html(embedded=True) if embedded else render_experience_html())
+
+
+@router.get("/inbox", response_class=HTMLResponse, include_in_schema=False,
+            dependencies=[Depends(require_local_access)])
+@router.get("/projects", response_class=HTMLResponse, include_in_schema=False,
+            dependencies=[Depends(require_local_access)])
+@router.get("/runs/{run_id}", response_class=HTMLResponse, include_in_schema=False,
+            dependencies=[Depends(require_local_access)])
+async def get_experience_page() -> HTMLResponse:
+    """Serve bookmarkable views only on the Dashboard listener."""
+    return HTMLResponse(content=render_experience_html())
+
+
+@router.get(
+    "/dashboard/assets/server-device-v1.png",
+    include_in_schema=False,
+    dependencies=[Depends(require_local_access)],
+)
+async def get_server_device_asset() -> FileResponse:
+    """Serve the fixed Dashboard illustration to local clients."""
+    if not SERVER_DEVICE_ASSET.is_file():
+        raise HTTPException(status_code=404, detail="Dashboard asset not found")
+    return FileResponse(SERVER_DEVICE_ASSET, media_type="image/png")
 
 
 @router.get(

@@ -74,6 +74,10 @@ class DesktopPackagingFilterTest(unittest.TestCase):
             dist = server_dir / "scrcpy" / "dist"
             (dist / "node_modules" / "module").mkdir(parents=True)
             (dist / "__pycache__").mkdir()
+            guard = server_dir / "devices" / "tango"
+            guard.mkdir(parents=True)
+            for name in ("tango-server.mjs", "TangoScrcpyService.mjs", "control_decoder.mjs"):
+                (guard / name).write_text(f"guard:{name}")
 
             for path in [
                 dist / "bundle.js",
@@ -99,6 +103,9 @@ class DesktopPackagingFilterTest(unittest.TestCase):
             self.assertFalse((staged / "debug.log").exists())
             self.assertFalse((staged / "cache.sqlite3-shm").exists())
             self.assertFalse((staged / "__pycache__").exists())
+            self.assertEqual((staged / "tango-server.mjs").read_text(), "guard:tango-server.mjs")
+            self.assertEqual((staged / "src/server/goog-device/tango/TangoScrcpyService.mjs").read_text(), "guard:TangoScrcpyService.mjs")
+            self.assertEqual((staged / "src/server/goog-device/tango/control_decoder.mjs").read_text(), "guard:control_decoder.mjs")
 
 
 class DesktopPackagingCacheTest(unittest.TestCase):

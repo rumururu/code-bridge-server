@@ -92,6 +92,7 @@ class NotificationStore:
         level: str | None = None,
         reason: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         values: list[Any] = []
@@ -115,10 +116,11 @@ class NotificationStore:
             values.append(str(reason))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         values.append(max(1, min(int(limit), 200)))
+        values.append(max(0, int(offset)))
         with get_db_connection(use_row_factory=True) as conn:
             rows = conn.execute(
                 f"SELECT * FROM agent_notifications {where} "
-                "ORDER BY created_at DESC LIMIT ?",
+                "ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
                 tuple(values),
             ).fetchall()
         return [_row(row) for row in rows]

@@ -21,6 +21,28 @@ from .deps import verify_api_key
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 
 
+def _resume_status(approval: dict[str, Any], resumed: dict[str, Any] | None) -> str:
+    from agent.approval_resume import is_settling_run
+    from agent.agent_store import get_agent_store
+
+    run_id = approval.get("run_id")
+    if not run_id:
+        return "not_applicable"
+    if resumed is not None or is_settling_run(run_id):
+        return "pending"
+    store = get_agent_store()
+    run = store.get_run(run_id)
+    if run is None or run.get("status") in ("completed", "failed", "cancelled"):
+        return "not_applicable"
+    checkpoint_context = store.get_run_checkpoint(run_id)
+    checkpoint = checkpoint_context.get("checkpoint") if checkpoint_context else None
+    if isinstance(checkpoint, dict) and checkpoint.get("approval_id") == approval.get("id"):
+        return "recovery_required"
+    if run.get("status") in ("queued", "starting", "running"):
+        return "resumed"
+    return "recovery_required"
+
+
 @router.post("/request", dependencies=[Depends(verify_api_key)], response_model=None)
 async def request_approval(body: ApprovalRequestCreate) -> dict[str, Any] | JSONResponse:
     """Preflight an operation and create an approval request when required."""
@@ -33,6 +55,8 @@ async def request_approval(body: ApprovalRequestCreate) -> dict[str, Any] | JSON
         expires_at=body.expires_at,
     )
     if result.get("error"):
+        if result.get("conflict"):
+            raise HTTPException(status_code=409, detail=result["error"])
         return JSONResponse(status_code=403, content=result)
     # A request that came in over HTTP with no run behind it has nobody parked
     # on it, so nothing else will ring the phone for it.
@@ -99,17 +123,36 @@ async def apply_approval_decision(
     if result is None:
         raise HTTPException(status_code=404, detail=f"Approval '{approval_id}' not found")
     if result.get("error"):
-        return JSONResponse(status_code=403, content=result)
+        return JSONResponse(status_code=409 if result.get("conflict") else 403, content=result)
 
     # Recording the decision is not the point of pressing approve — the run
     # carrying on is. If this approval is the one a run is parked on, hand the
     # decision to the orchestrator and let it continue in the background; the
     # response comes back immediately either way.
-    resumed = await maybe_resume_run_for_decision(
-        result.get("approval"), decision=body.decision
-    )
+    resumed = await maybe_resume_run_for_decision(result.get("approval"), decision=result["decision"]["decision"])
     if resumed is not None:
         result = {**result, "resume": resumed}
+    result = {**result, "resume_status": _resume_status(result["approval"], resumed)}
+    return result
+
+
+@router.post("/{approval_id}/resume", dependencies=[Depends(verify_api_key)], response_model=None)
+async def resume_decided_approval(approval_id: str) -> dict[str, Any]:
+    """Retry a parked run using its existing decision; never decide again."""
+    approval = get_approval_store().get_request(approval_id)
+    if approval is None:
+        raise HTTPException(status_code=404, detail="approval not found")
+    decision = get_approval_store().get_latest_decision(approval_id)
+    if decision is None:
+        raise HTTPException(status_code=409, detail="approval has no stored decision")
+    status = _resume_status(approval, None)
+    resumed = None
+    if status == "recovery_required":
+        resumed = await maybe_resume_run_for_decision(approval, decision=decision["decision"])
+    result: dict[str, Any] = {"approval": approval, "decision": decision,
+                              "resume_status": _resume_status(approval, resumed)}
+    if resumed is not None:
+        result["resume"] = resumed
     return result
 
 

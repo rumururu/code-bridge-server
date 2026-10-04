@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
@@ -21,7 +24,88 @@ from .deps import is_websocket_from_tunnel, start_periodic_reauth_task
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["agent-browser-rtc"])
+dashboard_router = APIRouter(tags=["dashboard-agent-browser-rtc"])
 _ws_manager = get_ws_manager()
+
+
+def active_dashboard_handoff(task_id: str) -> dict[str, Any] | None:
+    payload = _active_browser_handoff_payload(task_id)
+    if payload is None:
+        return None
+    session = payload["browser_session"]
+    task = payload.get("task")
+    if not isinstance(task, dict) or str(task.get("run_id")) != str(session.get("run_id")):
+        return None
+    run = get_agent_store().get_run(str(session.get("run_id") or ""))
+    if run is None or run.get("status") in {"completed", "done", "failed", "blocked", "cancelled", "skipped"}:
+        return None
+    expires_at = session.get("expires_at")
+    try:
+        expiry = datetime.fromisoformat(expires_at) if isinstance(expires_at, str) else None
+    except ValueError:
+        return None
+    if expiry is None or expiry.tzinfo is None or expiry <= datetime.now(timezone.utc):
+        return None
+    return payload
+
+
+def _dashboard_ws_allowed(websocket: WebSocket) -> bool:
+    if is_websocket_from_tunnel(websocket) or not websocket.client or websocket.client.host not in {"127.0.0.1", "::1"}:
+        return False
+    origin = websocket.headers.get("origin")
+    host = websocket.headers.get("host")
+    if not origin or not host:
+        return False
+    try:
+        parsed = urlsplit(origin)
+        return (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+            and parsed.netloc == host
+            and not parsed.username
+            and not parsed.password
+        )
+    except ValueError:
+        return False
+
+
+def _dashboard_rtc_validator(
+    websocket: WebSocket, task_id: str, session_id: str, run_id: str,
+) -> SimpleNamespace:
+    if not _dashboard_ws_allowed(websocket):
+        return SimpleNamespace(success=False)
+    payload = active_dashboard_handoff(task_id)
+    session = payload["browser_session"] if payload is not None else None
+    return SimpleNamespace(success=bool(
+        session is not None
+        and str(session["id"]) == session_id
+        and str(session["run_id"]) == run_id
+    ))
+
+
+@dashboard_router.websocket("/ws/dashboard/agent/tasks/{task_id}/browser-handoff/rtc")
+async def dashboard_browser_handoff_rtc_websocket(
+    websocket: WebSocket,
+    task_id: str,
+    expected_browser_session_id: str = Query(..., min_length=1),
+    expected_run_id: str = Query(..., min_length=1),
+    width: int = Query(1280, ge=320, le=3840),
+    height: int = Query(720, ge=240, le=2160),
+    fps: float = Query(12.0, ge=1.0, le=30.0),
+    quality: int = Query(70, ge=20, le=95),
+    capture: str = Query("page", pattern="^page$"),
+) -> None:
+    if not _dashboard_ws_allowed(websocket):
+        await websocket.close(code=1008, reason="dashboard_access_denied")
+        return
+    payload = active_dashboard_handoff(task_id)
+    if payload is None or str(payload["browser_session"]["id"]) != expected_browser_session_id or str(payload["browser_session"]["run_id"]) != expected_run_id:
+        await websocket.close(code=1008, reason="stale_browser_handoff")
+        return
+    await _serve_browser_handoff_rtc(
+        websocket, task_id, None, width, height, fps, quality, capture,
+        payload=payload, dashboard=True,
+    )
 
 
 @router.websocket("/ws/agent/tasks/{task_id}/browser-handoff/rtc")
@@ -41,12 +125,20 @@ async def browser_handoff_rtc_websocket(
         await websocket.close(code=1008, reason=validation.error or "Invalid API key")
         return
 
+    await _serve_browser_handoff_rtc(websocket, task_id, api_key, width, height, fps, quality, capture)
+
+
+async def _serve_browser_handoff_rtc(
+    websocket: WebSocket, task_id: str, api_key: str | None,
+    width: int, height: int, fps: float, quality: int, capture: str,
+    *, payload: dict[str, Any] | None = None, dashboard: bool = False,
+) -> None:
     can_connect, reject_reason = _ws_manager.can_connect(websocket)
     if not can_connect:
         await websocket.close(code=1008, reason=reject_reason)
         return
 
-    payload = _active_browser_handoff_payload(task_id)
+    payload = payload if payload is not None else _active_browser_handoff_payload(task_id)
     await websocket.accept()
     if payload is None:
         await websocket.send_json(
@@ -81,7 +173,15 @@ async def browser_handoff_rtc_websocket(
         input_result_callback=redact_result,
     )
     _ws_manager.register_connection(websocket)
-    reauth_task = start_periodic_reauth_task(websocket, api_key)
+    if dashboard:
+        reauth_task = start_periodic_reauth_task(
+            websocket, None,
+            validator=lambda _key: _dashboard_rtc_validator(
+                websocket, task_id, str(session["id"]), run_id,
+            ),
+        )
+    else:
+        reauth_task = start_periodic_reauth_task(websocket, api_key)
 
     try:
         await rtc.start()

@@ -1,0 +1,1699 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Code Bridge</title>
+    <style>
+      :root {
+        font-family: system-ui, -apple-system, sans-serif;
+        color: #203c3c;
+        background: #f6f7f2;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      button, input, select, textarea {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+        border: 1px solid #c6d3c3;
+        background: #fff;
+        border-radius: 9px;
+        padding: 8px 12px;
+        color: #294c40;
+      }
+      button:hover, a:hover {
+        border-color: #668b62;
+        color: #376b50;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      a {
+        color: #376b50;
+        text-decoration: none;
+        overflow-wrap: anywhere;
+      }
+      nav {
+        position: fixed;
+        inset: 0 auto 0 0;
+        width: 218px;
+        background: #173d39;
+        color: #e7eee8;
+        padding: 25px 15px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      nav strong {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 5px 12px 28px;
+        letter-spacing: 0.04em;
+      }
+      nav a {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        color: #c5d8cd;
+        padding: 11px 13px;
+        border-radius: 9px;
+      }
+      nav a.active, nav a:hover {
+        background: #31564b;
+        color: #fff;
+      }
+      nav .bottom {
+        margin-top: auto;
+      }
+      main {
+        margin-left: 218px;
+        padding: 28px clamp(18px, 4vw, 56px);
+        max-width: 1600px;
+      }
+      header {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 14px;
+        margin-bottom: 22px;
+      }
+      h1 {
+        font-size: 27px;
+        margin: 0 0 5px;
+      }
+      h2 {
+        font-size: 18px;
+        margin: 0 0 15px;
+      }
+      h3 {
+        font-size: 15px;
+        margin: 0 0 8px;
+      }
+      p {
+        line-height: 1.5;
+      }
+      small, .muted {
+        color: #667b70;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+      .card {
+        background: #fff;
+        border: 1px solid #e2e7e1;
+        border-radius: 15px;
+        padding: 20px;
+        min-width: 0;
+        box-shadow: 0 5px 22px #244b3005;
+      }
+      .wide {
+        grid-column: 1/-1;
+      }
+      .row {
+        display: flex;
+        gap: 9px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .split {
+        display: grid;
+        grid-template-columns: minmax(230px, 330px) minmax(0, 1fr);
+        gap: 16px;
+      }
+      .item {
+        display: block;
+        width: 100%;
+        text-align: left;
+        border: 1px solid #e3e9df;
+        border-radius: 10px;
+        padding: 12px;
+        margin: 7px 0;
+        background: #fff;
+      }
+      .item.selected {
+        border-color: #7b9f71;
+        background: #eff5e9;
+      }
+      .badge {
+        display: inline-block;
+        border-radius: 30px;
+        background: #eaf1e6;
+        padding: 3px 9px;
+        font-size: 12px;
+        margin-right: 7px;
+      }
+      .error {
+        color: #ad3536;
+        background: #fff1ef;
+        padding: 10px;
+        border-radius: 8px;
+      }
+      .notice {
+        background: #fff8e8;
+        padding: 10px;
+        border-radius: 8px;
+      }
+      .success {
+        color: #13765f;
+      }
+      input, select, textarea {
+        border: 1px solid #c6d3c3;
+        border-radius: 8px;
+        padding: 9px;
+        max-width: 100%;
+      }
+      textarea {
+        width: 100%;
+        min-height: 105px;
+      }
+      label {
+        display: block;
+        margin: 11px 0 5px;
+        font-weight: 600;
+      }
+      dl {
+        display: grid;
+        grid-template-columns: 100px 1fr;
+        gap: 8px;
+      }
+      dt {
+        color: #667b70;
+      }
+      dd {
+        margin: 0;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+      }
+      pre {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        background: #f1f4ec;
+        padding: 12px;
+        border-radius: 8px;
+        max-height: 420px;
+        overflow: auto;
+      }
+      iframe {
+        border: 0;
+        width: 100%;
+        height: calc(100vh - 155px);
+        min-height: 620px;
+        background: #fff;
+        border-radius: 12px;
+      }
+      .hidden {
+        display: none !important;
+      }
+      .list {
+        max-height: 70vh;
+        overflow: auto;
+      }
+      .line {
+        border-top: 1px solid #e4eade;
+        padding: 10px 0;
+      }
+      .frame-links {
+        margin-bottom: 12px;
+      }
+      .nav-icon { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+      .brand-icon { width: 28px; height: 28px; color: #d7e6c9; }
+      button:focus-visible, a:focus-visible { outline: 3px solid #c68b46; outline-offset: 4px; }
+      .connection-overview { margin-bottom: 20px; border: 1px solid #dce3d3; border-radius: 17px; background: #e9eee1; display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(180px, 1fr); align-items: center; overflow: hidden; }
+      .connection-copy { padding: 27px 30px; min-width: 0; }
+      .connection-copy h2 { font-size: 23px; letter-spacing: -.5px; margin: 12px 0; overflow-wrap: anywhere; }
+      .connection-copy p { color: #526a56; margin: 8px 0; }
+      .connection-copy .row { margin-top: 19px; }
+      .connection-overview img { width: 100%; height: 250px; object-fit: contain; }
+      .connection-eyebrow { color: #526e54; font-size: 11px; letter-spacing: 1px; }
+      .connection-metrics { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 14px 0 0; font-size: 13px; }
+      .connection-metrics div { display: flex; gap: 7px; }
+      .connection-metrics dt { color: #526a56; }
+      .connection-metrics dd { font-weight: 600; }
+      .action-link { display: inline-flex; border: 1px solid #c6d3c3; border-radius: 9px; padding: 8px 13px; background: #fff; }
+      .action-link.primary { color: #fff; background: #265c52; border-color: #265c52; }
+      .frame-links { display: flex; gap: 8px; flex-wrap: wrap; }
+      @media (max-width: 900px) { .connection-overview { grid-template-columns: 1fr; } .connection-overview img { height: 190px; } .connection-copy { padding: 23px 24px 0; } }
+      @media (max-width: 760px) {
+        nav {
+          position: static;
+          width: auto;
+          padding: 12px;
+          flex-direction: row;
+          flex-wrap: wrap;
+        }
+        nav strong {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+          width: 100%;
+          padding: 2px 6px;
+        }
+        nav .bottom {
+          margin: 0;
+        }
+        nav a {
+          padding: 7px 9px;
+        }
+        main {
+          margin: 0;
+          padding: 18px;
+        }
+        .grid, .split {
+          grid-template-columns: 1fr;
+        }
+        header {
+          flex-direction: column;
+          align-items: stretch;
+        }
+        header > .row {
+          justify-content: space-between;
+        }
+        iframe {
+          height: 75vh;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <nav aria-label="주 메뉴">
+      <strong><svg class="nav-icon brand-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 20V6h5v14M17 20V6h5v14M7 9c3 7 7 7 10 0M2 20h20"/></svg>Code Bridge</strong><a href="/dashboard" data-nav><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10H3ZM9 20v-7h6v7"/></svg>개요</a><a
+        href="/inbox"
+        data-nav
+      ><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16l2 13v3H2v-3ZM2 15h6l2 3h4l2-3h6"/></svg>수신함</a><a href="/projects" data-nav><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 3h9v12H3ZM3 6V3h7l2 3h9v3"/></svg>프로젝트</a><a
+        href="/agents"
+        data-nav
+      ><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 2h8v6H8ZM12 8v5H5v4m7-4h7v4M2 17h6v5H2ZM16 17h6v5h-6Z"/></svg>자동화</a><a href="/settings" data-nav class="bottom"
+      ><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h18v7H3ZM3 14h18v7H3ZM7 6h1m4 0h5M7 17h1m4 0h5"/></svg>서버 관리</a>
+    </nav>
+    <main>
+      <header>
+        <div><h1 id="title"></h1><small id="subtitle"></small></div>
+        <div class="row">
+          <small id="updated"></small><button id="refresh">새로고침</button>
+        </div>
+      </header>
+      <div id="status" role="status"></div>
+      <section id="content"></section>
+      <section id="agentsFrame" class="hidden">
+        <div class="frame-links">
+          <a href="/agents?embedded=1" target="_blank"
+          >자동화 단독 화면</a>
+        </div>
+      </section>
+      <section id="settingsFrame" class="hidden">
+        <div class="frame-links">
+          <button data-settings="connection">연결·페어링</button>
+          <button data-settings="environment">실행 환경</button>
+          <button id="browserSetup">브라우저 설정</button>
+          <button data-settings="access">접근 권한</button>
+          <button data-settings="diagnostics">진단·로그</button>
+        </div>
+      </section>
+    </main>
+    <script>
+      /* APPROVAL_REVIEW_MODULE */
+      /* BROWSER_HANDOFF_MODULE */
+      let browserHandoff = null;
+      function closeBrowserHandoff() {
+        browserHandoff?.close();
+        browserHandoff = null;
+      }
+      window.addEventListener("pagehide", closeBrowserHandoff);
+      const base = "/api/dashboard/agent";
+      const state = {
+        path: "",
+        generation: 0,
+        overview: null,
+        overviewTime: null,
+        items: null,
+        inboxTotal: 0,
+        inboxCursor: null,
+        selected: null,
+        managementSection: "connection",
+        projects: null,
+        project: "",
+        projectHistoryCursor: null,
+        projectDrafts: Object.create(null),
+        taskAttempts: restoreTaskAttempts(),
+        checkpointDrafts: Object.create(null),
+        artifactRequest: 0,
+        run: null,
+      };
+      const $ = (s) => document.querySelector(s);
+      const esc = (s) =>
+        String(s ?? "").replace(
+          /[&<>"']/g,
+          (c) => ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          }[c]),
+        );
+      const date = (s) => s ? new Date(s).toLocaleString("ko-KR") : "미확인";
+      const errorText = (e) =>
+        e.status === 401 || e.status === 403
+          ? "접근 권한이 없습니다."
+          : e.status === 404
+          ? "대상을 찾을 수 없습니다."
+          : e.message || "요청에 실패했습니다.";
+      async function api(path, options = {}) {
+        const response = await fetch(path, {
+          credentials: "same-origin",
+          ...options,
+          headers: {
+            ...(options.body ? { "Content-Type": "application/json" } : {}),
+            ...options.headers,
+          },
+        });
+        let data;
+        try {
+          data = await response.json();
+        } catch {
+          data = {};
+        }
+        if (!response.ok) {
+          const e = new Error(
+            typeof data.detail === "string"
+              ? data.detail
+              : typeof data.error === "string"
+              ? data.error
+              : `HTTP ${response.status}`,
+          );
+          e.status = response.status;
+          throw e;
+        }
+        return data;
+      }
+      function status(message, kind = "") {
+        const node = $("#status");
+        node.innerHTML = message
+          ? `<p class="${kind}">${esc(message)}</p>`
+          : "";
+      }
+      function linkRun(id) {
+        return id
+          ? `<a href="/runs/${encodeURIComponent(id)}" data-link>실행 ${
+            esc(id)
+          }</a>`
+          : "연결된 실행 없음";
+      }
+      function runStatus(status) {
+        return ({
+          queued: "대기",
+          starting: "시작 중",
+          running: "실행 중",
+          paused: "일시중지",
+          completed: "완료",
+          failed: "실패",
+          cancelled: "취소",
+          waiting_for_user: "응답 대기",
+        })[status] || status || "미확인";
+      }
+      function runLink(run) {
+        const title = run.title || run.goal || run.project_name || "실행";
+        const shortId = String(run.id || "").slice(0, 12);
+        return `<a href="/runs/${encodeURIComponent(run.id)}" data-link>${
+          esc(title)
+        }</a>
+          <small title="${esc(run.id)}">${esc(shortId)}</small>`;
+      }
+      function itemLine(x) {
+        return `<div class="line"><span class="badge">${
+          esc(x.status || x.kind || "")
+        }</span>${linkRun(x.id || x.run_id)} <small>${
+          date(x.created_at || x.updated_at)
+        }</small></div>`;
+      }
+      function navigate(path, replace = false) {
+        if (state.path === "/projects") saveVisibleDraft(state.project);
+        if (replace) history.replaceState(null, "", path);
+        else history.pushState(null, "", path);
+        renderRoute();
+      }
+      function frame(name) {
+        const host = $("#" + name + "Frame");
+        if (!host.querySelector("iframe")) {
+          const f = document.createElement("iframe");
+          f.src = name === "agents"
+            ? "/agents?embedded=1"
+            : "/settings?embedded=1";
+          f.title = name === "agents" ? "자동화" : "서버 관리";
+          host.append(f);
+        }
+        return host;
+      }
+      function show(title, subtitle = "", fr = null) {
+        $("#title").textContent = title;
+        $("#subtitle").textContent = subtitle;
+        $("#content").classList.toggle("hidden", !!fr);
+        $("#agentsFrame").classList.toggle("hidden", fr !== "agents");
+        $("#settingsFrame").classList.toggle("hidden", fr !== "settings");
+        $("#updated").textContent = "";
+        $("#refresh").classList.toggle("hidden", !!fr);
+        document.querySelectorAll("[data-nav]").forEach((a) =>
+          a.classList.toggle(
+            "active",
+            a.getAttribute("href") ===
+              (fr === "agents"
+                ? "/agents"
+                : fr === "settings"
+                ? "/settings"
+                : location.pathname),
+          )
+        );
+      }
+      function renderRoute() {
+        closeBrowserHandoff();
+        state.path = location.pathname;
+        const ticket = ++state.generation;
+        status("");
+        const path = state.path;
+        if (path === "/dashboard") {
+          show("개요", "현재 처리와 실행 상태");
+          loadOverview(ticket);
+        } else if (path === "/inbox") {
+          show("수신함", "결정과 응답이 필요한 항목");
+          loadInbox(ticket);
+        } else if (path === "/projects") {
+          show("프로젝트", "작업과 실행 기록");
+          loadProjects(ticket);
+        } else if (path === "/agents") {
+          show("자동화", "에이전트 · 워크플로 · 예약 · 스크립트", "agents");
+          frame("agents");
+          const agentSection = new URLSearchParams(location.search).get(
+            "section",
+          );
+          const agentId = new URLSearchParams(location.search).get("agentId");
+          if (agentSection || agentId) {
+            sendFrameSection(frame("agents"), agentSection, agentId);
+          }
+        } else if (path === "/settings") {
+          show("서버 관리", "연결 · 실행 환경 · 접근 권한 · 진단", "settings");
+          const requested = new URLSearchParams(location.search).get("section");
+          if (
+            ["connection", "environment", "access", "diagnostics"].includes(
+              requested,
+            )
+          ) {
+            state.managementSection = requested;
+          }
+          sendFrameSection(
+            frame("settings"),
+            state.managementSection,
+          );
+        } else if (path.startsWith("/runs/")) {
+          show("실행 상세", decodeURIComponent(path.slice(6)));
+          loadRun(decodeURIComponent(path.slice(6)), ticket);
+        } else navigate("/dashboard", true);
+      }
+      function current(ticket) {
+        return ticket === state.generation;
+      }
+      function connectionOverview(result) {
+        const data = result.status === "fulfilled" ? result.value : null;
+        const server = data?.server;
+        const listening = server?.api_listening;
+        const apiStatus = listening === true ? "API 연결됨" : listening === false ? "API 연결 확인 필요" : "API 상태 미확인";
+        const tunnelStatus = data?.tunnel?.running === true ? "터널 실행 중" : data?.tunnel?.running === false ? "터널 중지됨" : "터널 상태 미확인";
+        const count = (value) => Number.isInteger(value) && value >= 0 ? `${value}대` : "미확인";
+        return `<article class="connection-overview" aria-label="서버 연결 요약"><div class="connection-copy"><span class="connection-eyebrow">서버 연결</span><h2>${esc(server?.server_name || "개발 서버")}</h2><p>${data ? `${apiStatus} · ${tunnelStatus}` : "서버 상태를 불러오지 못했습니다."}</p><dl class="connection-metrics"><div><dt>페어링 등록</dt><dd>${count(data?.pairing?.active_clients)}</dd></div><div><dt>개발 기기</dt><dd>${count(data?.devices?.total)}</dd></div></dl><div class="row"><a class="action-link primary" href="/settings?section=connection" data-link>연결·페어링 관리</a><a class="action-link" href="/settings?section=environment" data-link>개발 기기 확인</a></div></div><img src="/dashboard/assets/server-device-v1.png" alt="" width="1536" height="1024"></article>`;
+      }
+      async function loadOverview(ticket) {
+        const root = $("#content");
+        root.innerHTML = "<p>불러오는 중…</p>";
+        const [overview, server] = await Promise.allSettled([
+          api(base + "/overview"),
+          api("/api/system/overview"),
+        ]);
+        if (!current(ticket)) return;
+        if (overview.status === "fulfilled") {
+          state.overview = mergeOverview(state.overview, overview.value);
+          if (!(overview.value.section_errors || []).length) {
+            state.overviewTime = Date.now();
+          }
+        }
+        const o = state.overview;
+        const errors = overview.status === "fulfilled"
+          ? overview.value.section_errors || []
+          : [];
+        const fail = overview.status === "rejected"
+          ? "개요 조회 실패: " + errorText(overview.reason)
+          : errors.length
+          ? "일부 항목 조회 실패: " + errors.join(", ")
+          : "";
+        $("#updated").textContent = state.overviewTime
+          ? "개요 마지막 성공 " + date(state.overviewTime)
+          : overview.status === "fulfilled"
+          ? "조회 시각 " + date(overview.value.as_of)
+          : "";
+        root.innerHTML = o
+          ? `<div class="grid"><article class="card"><h2>처리할 항목</h2><p>${
+            o.action_count === null
+              ? "조회 실패"
+              : esc(o.action_count ?? "미확인")
+          }</p><a href="/inbox" data-link>수신함 열기</a></article><article class="card"><h2>실행 중 작업</h2>${
+            listRuns(o.running)
+          }</article><article class="card"><h2>최근 결과</h2>${
+            listRuns(o.recent)
+          }</article><article class="card"><h2>다음 예약</h2>${
+            o.next_schedules?.length
+              ? o.next_schedules.map((s) =>
+                `<div class="line">${esc(s.name || s.task_id || s.id)} <small>${
+                  date(s.next_run_at)
+                }</small></div>`
+              ).join("")
+              : o.next_schedules === null
+              ? "조회 실패"
+              : "예약 없음"
+          }</article><article class="card wide"><h2>서버·CLI</h2>${
+            server.status === "fulfilled"
+              ? `<p>서버: ${
+                esc(server.value.server?.status || "미확인")
+              } · API: ${
+                server.value.server?.api_listening ? "연결됨" : "연결 확인 필요"
+              }</p><p>CLI: ${
+                server.value.llm?.connected ? "연결됨" : "연결 확인 필요"
+              }</p>`
+              : `상태 조회 실패: ${
+                esc(errorText(server.reason))
+              } · <a href="/settings" data-link>접근 설정</a>`
+          } <a href="/settings" data-link>서버 관리</a></article></div>`
+          : `<p class="error">개요를 불러오지 못했습니다: ${
+            esc(
+              overview.status === "rejected"
+                ? errorText(overview.reason)
+                : "조회 실패",
+            )
+          }</p>`;
+        root.innerHTML = connectionOverview(server) + root.innerHTML;
+        if (fail || server.status === "rejected") {
+          status(
+            [
+              fail,
+              server.status === "rejected"
+                ? "서버 상태 조회 실패: " + errorText(server.reason)
+                : "",
+            ]
+              .filter(Boolean).join(" · ") +
+              (state.overviewTime ? " · 이전 성공 자료 표시" : ""),
+            "error",
+          );
+        }
+      }
+      function mergeOverview(previous, next) {
+        if (!previous) {
+          const result = { ...next };
+          for (const section of next.section_errors || []) {
+            result[section] = null;
+          }
+          return result;
+        }
+        const result = { ...next };
+        for (const section of next.section_errors || []) {
+          if (section === "action_count") {
+            result.action_count = previous.action_count;
+          } else if (section === "next_schedules") {
+            result.next_schedules = previous.next_schedules;
+          } else if (section in previous) result[section] = previous[section];
+        }
+        return result;
+      }
+      function listRuns(rows) {
+        if (rows === null || rows === undefined) return "조회 실패";
+        return rows.length
+          ? rows.map((r) =>
+            `<div class="line"><span class="badge">${
+              esc(runStatus(r.status))
+            }</span>${runLink(r)} <small>${
+              esc(r.project_name || "")
+            }</small></div>`
+          ).join("")
+          : "항목 없음";
+      }
+      async function loadInbox(ticket) {
+        $("#content").innerHTML = "<p>불러오는 중…</p>";
+        try {
+          const data = await api(base + "/action-items?limit=100");
+          if (!current(ticket)) return;
+          state.items = data.items || [];
+          state.inboxTotal = data.total_count ?? state.items.length;
+          state.inboxCursor = data.next_cursor || null;
+          renderInbox();
+          $("#updated").textContent = "마지막 갱신 " + date(data.as_of);
+        } catch (e) {
+          if (current(ticket)) {
+            $("#content").innerHTML = state.items
+              ? '<div id="inboxBody"></div>'
+              : '<p class="error">수신함을 불러오지 못했습니다.</p>';
+            if (state.items) renderInbox();
+            status(
+              errorText(e) + (state.items ? " · 이전 목록 표시" : ""),
+              "error",
+            );
+          }
+        }
+      }
+      function renderInbox() {
+        closeBrowserHandoff();
+        const items = state.items || [];
+        $("#content").innerHTML =
+          `<div class="split"><article class="card list"><h2>요청 ${state.inboxTotal}건</h2><small>${items.length}건 표시</small>${
+            items.length
+              ? items.map((x) =>
+                `<button class="item ${
+                  state.selected === x.id ? "selected" : ""
+                }" data-item="${esc(x.id)}"><span class="badge">${
+                  esc(x.kind)
+                }</span>${esc(x.details?.reason === "login_required" ? "브라우저 로그인 요청" : x.details?.reason === "captcha_or_bot_challenge" ? "브라우저 직접 확인 요청" : x.title)}<br><small>${
+                  date(x.created_at)
+                }</small></button>`
+              ).join("")
+              : "처리할 항목 없음"
+          }${
+            state.inboxCursor ? '<button id="inboxMore">더 보기</button>' : ""
+          }</article><article class="card" id="detail"><p class="muted">요청을 선택하세요.</p></article></div>`;
+        if (state.selected && items.some((x) => x.id === state.selected)) {
+          selectItem(state.selected);
+        }
+      }
+      async function loadMoreInbox() {
+        const cursor = state.inboxCursor;
+        const ticket = state.generation;
+        if (!cursor) return;
+        state.inboxCursor = null;
+        try {
+          const data = await api(
+            base + "/action-items?limit=100&cursor=" +
+              encodeURIComponent(cursor),
+          );
+          if (!current(ticket) || state.path !== "/inbox") return;
+          const known = new Set(state.items.map((item) => item.id));
+          state.items.push(
+            ...(data.items || []).filter((item) => !known.has(item.id)),
+          );
+          state.inboxCursor = data.next_cursor || null;
+          state.inboxTotal = data.total_count ?? state.inboxTotal;
+          renderInbox();
+        } catch (error) {
+          if (current(ticket) && state.path === "/inbox") {
+            state.inboxCursor = cursor;
+            renderInbox();
+            status(errorText(error), "error");
+          }
+        }
+      }
+      async function selectItem(id) {
+        closeBrowserHandoff();
+        state.selected = id;
+        const ticket = state.generation;
+        const x = state.items.find((item) => item.id === id);
+        if (!x) return;
+        document.querySelectorAll("[data-item]").forEach((b) =>
+          b.classList.toggle("selected", b.dataset.item === id)
+        );
+        const detail = $("#detail");
+        detail.innerHTML = `<h2>${esc(x.title)}</h2><p><span class="badge">${
+          esc(x.kind)
+        }</span>${linkRun(x.run_id)}</p><p>대상: ${
+          esc(x.task_id || x.agent_id || x.run_id || "미지정")
+        }</p><p>상태: ${esc(x.status)}</p><p>상세 조회 중…</p>`;
+        try {
+          if (x.kind === "approval") {
+            const result = await api(
+              base + "/approvals/" + encodeURIComponent(x.approval_id || x.id),
+            );
+            if (
+              !current(ticket) || state.selected !== id ||
+              state.path !== "/inbox"
+            ) return;
+            const approval = result.approval || result;
+            detail.innerHTML = `<h2>${esc(x.title)}</h2>${
+              ApprovalReview.render(approval, "ko")
+            }<p>${
+              linkRun(x.run_id)
+            }</p><div class="row"><button data-decision="approve_once" ${
+              ApprovalReview.canReview(approval) ? "" : "disabled"
+            }>이번 요청 승인</button><button data-decision="deny">거부</button></div><p id="actionResult"></p>`;
+            detail.dataset.approval = approval.id || id;
+          } else if (x.kind === "recovery") {
+            detail.innerHTML +=
+              `<p>저장된 결정을 사용해 재개합니다. 새 승인은 기록하지 않습니다.</p><button data-resume="${
+                esc(x.approval_id)
+              }">재개 시도</button><p id="actionResult"></p>`;
+          } else if (x.kind === "checkpoint") {
+            const data = await api(
+              base + "/runs/" + encodeURIComponent(x.run_id) + "/checkpoint",
+            );
+            if (
+              !current(ticket) || state.selected !== id ||
+              state.path !== "/inbox"
+            ) return;
+            renderCheckpoint(detail, data, x);
+          } else if (x.kind === "repair_proposal") {
+            detail.innerHTML +=
+              `<p>수정 제안은 자동화에서 내용을 검토한 뒤 적용합니다.</p><a href="/agents" data-link data-agent="${
+                esc(x.agent_id || "")
+              }" data-section="runs">자동화에서 검토</a>`;
+          }
+        } catch (e) {
+          if (
+            current(ticket) && state.selected === id && state.path === "/inbox"
+          ) {
+            detail.innerHTML += `<p class="error">${esc(errorText(e))}</p>`;
+          }
+        }
+      }
+      function renderCheckpoint(host, data, x) {
+        const cp = data.checkpoint || {};
+        if (cp.browser_session_id || ["login_required", "captcha_or_bot_challenge"].includes(cp.reason)) {
+          browserHandoff = BrowserHandoff.mount(host, data, x, {
+            api, base, esc, linkRun,
+            onComplete: () => refreshBrowserResume(x, cp.created_at),
+          });
+          return;
+        }
+        const key = `${x.run_id}:${data.step?.id || x.id}`;
+        host.innerHTML = `<h2>${esc(x.title)}</h2><p>${
+          linkRun(x.run_id)
+        }</p><p>${
+          esc(cp.prompt || cp.reason || "응답이 필요합니다.")
+        }</p><pre>${
+          esc(JSON.stringify(cp, null, 2))
+        }</pre><label for="checkpointAnswer">응답</label><textarea id="checkpointAnswer" data-draft="${
+          esc(key)
+        }">${
+          esc(state.checkpointDrafts[key] || "")
+        }</textarea><button data-checkpoint="${esc(x.run_id)}" data-task="${
+          esc(x.task_id)
+        }" data-step="${
+          esc(data.step?.id || x.id)
+        }">응답 제출</button><p id="actionResult"></p>`;
+      }
+      async function refreshBrowserResume(item, previousCheckpointTime) {
+        const ticket = state.generation;
+        const active = () => current(ticket) && state.path === "/inbox" && state.selected === item.id;
+        let resumed;
+        // The completion response precedes background execution. Wait for its
+        // next checkpoint before refreshing, so a repeated login gate stays visible.
+        for (let attempt = 0; attempt < 40; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 250));
+          if (!active()) return;
+          resumed = await api(`${base}/runs/${encodeURIComponent(item.run_id)}/checkpoint`);
+          if (!active()) return;
+          const unchangedWait = resumed.run?.status === "waiting_for_user" &&
+            resumed.checkpoint?.created_at === previousCheckpointTime;
+          if (!unchangedWait && !["queued", "starting", "running"].includes(resumed.run?.status)) break;
+        }
+        await loadInbox(ticket);
+        if (active()) status(resumed?.run?.status === "waiting_for_user"
+          ? "아직 확인이 필요합니다. 브라우저 요청을 다시 열어주세요."
+          : "계속하기 요청을 처리했습니다. 실행 상태를 확인하세요.", "success");
+      }
+      async function decide(decision) {
+        const id = $("#detail").dataset.approval;
+        if (!id) return;
+        const ticket = state.generation;
+        const selected = state.selected;
+        const buttons = [...$("#detail").querySelectorAll("[data-decision]")];
+        buttons.forEach((b) => b.disabled = true);
+        try {
+          const result = await api(
+            base + "/approvals/" + encodeURIComponent(id) + "/decision",
+            {
+              method: "POST",
+              body: JSON.stringify({
+                decision,
+                scope: "once",
+                approver: { source: "dashboard" },
+              }),
+            },
+          );
+          if (
+            current(ticket) && state.path === "/inbox" &&
+            state.selected === selected
+          ) {
+            await loadInbox(ticket);
+            if (current(ticket)) {
+              status(
+                "결정 저장 · 재개 상태: " + (result.resume_status || "미확인"),
+                "success",
+              );
+            }
+          }
+        } catch (e) {
+          if (current(ticket) && state.selected === selected) {
+            const result = $("#actionResult");
+            if (result) result.textContent = errorText(e);
+            buttons.forEach((b) => b.disabled = false);
+          }
+        }
+      }
+
+      async function loadRun(id, ticket) {
+        state.artifactRequest++;
+        const root = $("#content");
+        root.innerHTML = "<p>실행을 불러오는 중…</p>";
+        const [summary, events, checkpoint] = await Promise.allSettled([
+          api(base + "/runs/" + encodeURIComponent(id) + "/summary"),
+          api(base + "/runs/" + encodeURIComponent(id) + "/events"),
+          api(base + "/runs/" + encodeURIComponent(id) + "/checkpoint"),
+        ]);
+        if (!current(ticket)) return;
+        if (summary.status === "rejected") {
+          root.innerHTML = `<p class="error">${
+            esc(errorText(summary.reason))
+          }</p>`;
+          return;
+        }
+        const data = summary.value;
+        state.run = data;
+        const run = data.run || {};
+        const verification = data.verification || {};
+        const artifactsFailed = (data.section_errors || []).includes(
+          "artifacts",
+        );
+        const artifacts = data.artifacts || [];
+        const firstEvents = events.status === "fulfilled"
+          ? events.value.events || []
+          : [];
+        $("#title").textContent = run.title || run.goal || "실행 상세";
+        $("#subtitle").textContent = run.id || id;
+        root.innerHTML =
+          `<div class="grid"><article class="card"><h2>실행</h2><dl><dt>상태</dt><dd>${
+            esc(runStatus(run.status))
+          }</dd><dt>프로젝트</dt><dd>${
+            esc(run.project_name || "없음")
+          }</dd><dt>작업</dt><dd>${
+            esc(run.task_id || "연결된 Task 없음")
+          }</dd><dt>시작</dt><dd>${
+            date(run.created_at)
+          }</dd></dl></article><article class="card"><h2>검사</h2><p>${
+            verification.status === "passed"
+              ? "통과"
+              : verification.status === "failed"
+              ? "실패"
+              : "근거 없음 · 미확인"
+          }</p>${
+            (verification.checks || []).map((c) =>
+              `<div class="line">${esc(c.command)} · ${
+                c.passed === true ? "통과" : "실패"
+              }</div>`
+            ).join("")
+          }</article><article class="card wide"><h2>결과물</h2><div id="artifacts">${
+            artifacts.length
+              ? artifacts.map((a) =>
+                `<div class="line"><button data-artifact="${esc(a.id)}">${
+                  esc(a.kind || a.id)
+                }</button> <small>${esc(a.path || "")}</small></div>`
+              ).join("")
+              : artifactsFailed
+              ? "결과물 조회 실패 · 다시 시도"
+              : "결과물 없음"
+          }</div><pre id="artifactContent" class="hidden"></pre></article><article class="card"><h2>이벤트</h2><div id="events">${
+            events.status === "fulfilled"
+              ? (firstEvents.map((e) =>
+                `<div class="line">${esc(e.event_type || e.type)} <small>${
+                  date(e.created_at)
+                }</small></div>`
+              ).join("") || "이벤트 없음")
+              : "이벤트 조회 실패 · 다시 시도"
+          }</div>${
+            firstEvents.length >= 200
+              ? `<button id="eventsMore" data-sequence="${
+                esc(firstEvents.at(-1).sequence)
+              }">이벤트 더 보기</button>`
+              : ""
+          }</article><article class="card"><h2>검토·재개</h2><p>${
+            data.review?.reviewed
+              ? "검토됨 · " + date(data.review.reviewed_at)
+              : "검토 전"
+          }</p><button data-review="${
+            data.review?.reviewed ? "false" : "true"
+          }">${
+            data.review?.reviewed ? "검토 취소" : "검토 완료 기록"
+          }</button><div id="runCheckpoint">${
+            checkpoint.status === "fulfilled" && checkpoint.value.checkpoint
+              ? `<p>대기 중인 응답이 있습니다. <a href="/inbox" data-link>수신함 열기</a></p>`
+              : run.status === "paused"
+              ? "<button data-continue>일시중지 실행 이어가기</button>"
+              : checkpoint.status === "rejected"
+              ? "체크포인트 조회 실패 · 다시 시도"
+              : "활성 체크포인트 없음"
+          }</div><p id="runActionResult"></p></article><article class="card wide"><h2>관련 실행</h2>${
+            (data.related_runs || []).length
+              ? data.related_runs.map((r) =>
+                `<div class="line">${linkRun(r.run_id)} · ${
+                  esc(r.relation)
+                }</div>`
+              ).join("")
+              : "관련 실행 없음"
+          }</article></div>`;
+        if (
+          events.status === "rejected" || artifactsFailed ||
+          checkpoint.status === "rejected"
+        ) {
+          status("실행 일부 정보 조회 실패 · 다른 정보는 표시 중", "error");
+        }
+        $("#updated").textContent = "마지막 갱신 " + date(Date.now());
+      }
+      async function loadMoreEvents(button) {
+        const ticket = state.generation;
+        const runId = state.run?.run?.id;
+        if (!runId || button.disabled) return;
+        button.disabled = true;
+        try {
+          const response = await api(
+            base + "/runs/" + encodeURIComponent(runId) +
+              "/events?limit=200&after_sequence=" +
+              encodeURIComponent(button.dataset.sequence),
+          );
+          if (
+            !current(ticket) || state.run?.run?.id !== runId ||
+            !button.isConnected
+          ) return;
+          const rows = response.events || [];
+          $("#events").insertAdjacentHTML(
+            "beforeend",
+            rows.map((event) =>
+              `<div class="line">${
+                esc(event.event_type || event.type)
+              } <small>${date(event.created_at)}</small></div>`
+            ).join(""),
+          );
+          if (rows.length < 200) button.remove();
+          else {
+            button.dataset.sequence = rows.at(-1).sequence;
+            button.disabled = false;
+          }
+        } catch (error) {
+          if (current(ticket) && button.isConnected) {
+            button.disabled = false;
+            status("이벤트 추가 조회 실패: " + errorText(error), "error");
+          }
+        }
+      }
+      async function showArtifact(id) {
+        const run = state.run?.run?.id;
+        if (!run) return;
+        const request = ++state.artifactRequest;
+        const node = $("#artifactContent");
+        node.classList.remove("hidden");
+        node.textContent = "내용을 불러오는 중…";
+        try {
+          const data = await api(
+            base + "/runs/" + encodeURIComponent(run) + "/artifacts/" +
+              encodeURIComponent(id) + "/content",
+          );
+          if (
+            state.run?.run?.id !== run || request !== state.artifactRequest ||
+            !node.isConnected
+          ) return;
+          node.textContent = data.readable
+            ? String(data.content || "") +
+              (data.truncated ? "\n[일부만 표시]" : "")
+            : data.reason || "이 결과물은 본문을 표시할 수 없습니다.";
+        } catch (e) {
+          if (
+            state.run?.run?.id === run && request === state.artifactRequest &&
+            node.isConnected
+          ) {
+            node.textContent = "결과물 조회 실패: " + errorText(e);
+          }
+        }
+      }
+      async function loadProjects(ticket) {
+        const root = $("#content");
+        root.innerHTML = "<p>프로젝트를 불러오는 중…</p>";
+        try {
+          const data = await api(base + "/projects");
+          if (!current(ticket)) return;
+          state.projects = data.projects || [];
+          if (!state.project && state.projects.length) {
+            state.project = state.projects[0].name ||
+              state.projects[0].project_name;
+          }
+          renderProjects();
+          await loadProjectItems(state.project, ticket);
+        } catch (e) {
+          if (current(ticket)) {
+            root.innerHTML =
+              '<p class="error">프로젝트를 불러오지 못했습니다.</p>';
+            status(errorText(e), "error");
+          }
+        }
+      }
+      function draftFor(project) {
+        return state.projectDrafts[project] ||= { title: "", description: "" };
+      }
+      function saveVisibleDraft(project) {
+        if (!project || state.path !== "/projects") return;
+        const title = $("#taskTitle");
+        const description = $("#taskDescription");
+        if (!title || !description) return;
+        state.projectDrafts[project] = {
+          title: title.value,
+          description: description.value,
+        };
+      }
+      function attemptFor(project) {
+        return state.taskAttempts[project] || null;
+      }
+      function taskFormState(project) {
+        const attempt = attemptFor(project);
+        if (!attempt) return { disabled: false, message: "" };
+        if (attempt.status === "pending") {
+          return { disabled: true, message: "작업 생성 요청 중…" };
+        }
+        if (attempt.status === "uncertain") {
+          return { disabled: true, message: "생성 결과를 확인 중입니다." };
+        }
+        if (attempt.status === "query_failed") {
+          return {
+            disabled: true,
+            message:
+              "목록 조회에 실패했습니다. 재확인 전에는 다시 만들 수 없습니다.",
+          };
+        }
+        if (attempt.status === "unverifiable") {
+          return {
+            disabled: true,
+            message: "목록이 200건 이상이라 생성 여부를 확인할 수 없습니다.",
+          };
+        }
+        if (attempt.status === "absent") {
+          return {
+            disabled: true,
+            message:
+              "같은 요청 ID를 아직 찾지 못했습니다. 결과 확인 전 다시 만들 수 없습니다.",
+          };
+        }
+        if (attempt.status === "invalid") {
+          return {
+            disabled: false,
+            message: "입력을 확인하고 다시 제출하세요.",
+          };
+        }
+        return { disabled: false, message: "" };
+      }
+      function renderProjects(preserveVisible = true) {
+        if (preserveVisible) saveVisibleDraft(state.project);
+        const projects = state.projects || [];
+        const draft = draftFor(state.project);
+        const form = taskFormState(state.project);
+        const attempt = attemptFor(state.project);
+        $("#content").innerHTML = `
+          <div class="grid">
+            <article class="card wide">
+              <h2>프로젝트</h2>
+              <select id="projectSelect">
+                <option value="">선택</option>
+                ${
+          projects.map((project) => `
+                  <option value="${esc(project.name || project.project_name)}"
+                    ${
+            state.project === (project.name || project.project_name)
+              ? "selected"
+              : ""
+          }>
+                    ${esc(project.name || project.project_name)}
+                  </option>
+                `).join("")
+        }
+              </select>
+            </article>
+            <article class="card">
+              <h2>새 작업</h2>
+              <form id="taskForm">
+                <label for="taskTitle">제목</label>
+                <input id="taskTitle" required value="${esc(draft.title)}">
+                <label for="taskDescription">내용</label>
+                <textarea id="taskDescription">${
+          esc(draft.description)
+        }</textarea>
+                <p><button id="taskSubmit" ${
+          form.disabled || !state.project ? "disabled" : ""
+        }>작업 만들기</button></p>
+              </form>
+              <p id="taskResult" class="${
+          attempt && attempt.status !== "confirmed" ? "notice" : ""
+        }">
+                ${
+          esc(
+            form.message || (attempt?.status === "confirmed"
+              ? "작업 생성 확인: " + attempt.taskId
+              : ""),
+          )
+        }
+              </p>
+              <button id="taskRecheck" class="${
+          attempt &&
+            ["uncertain", "query_failed", "unverifiable", "absent"].includes(
+              attempt.status,
+            )
+            ? ""
+            : "hidden"
+        }">생성 결과 재확인</button>
+            </article>
+            <article class="card"><h2>작업</h2><div id="projectTasks">불러오는 중…</div></article>
+            <article class="card wide"><h2 id="projectRunHeading">실행 기록</h2><div id="projectRuns">불러오는 중…</div><button id="projectRunsMore" class="hidden">더 보기</button></article>
+          </div>`;
+      }
+      function updateProjectFormStatus(project) {
+        if (state.path !== "/projects" || state.project !== project) return;
+        const attempt = attemptFor(project);
+        const form = taskFormState(project);
+        const submit = $("#taskSubmit");
+        const result = $("#taskResult");
+        const recheck = $("#taskRecheck");
+        if (submit) submit.disabled = form.disabled || !project;
+        if (result) {
+          result.textContent = form.message ||
+            (attempt?.status === "confirmed"
+              ? "작업 생성 확인: " + attempt.taskId
+              : "");
+          result.classList.toggle(
+            "notice",
+            !!attempt && attempt.status !== "confirmed",
+          );
+        }
+        if (recheck) {
+          recheck.classList.toggle(
+            "hidden",
+            !attempt ||
+              !["uncertain", "query_failed", "unverifiable", "absent"].includes(
+                attempt.status,
+              ),
+          );
+        }
+      }
+      function clearSubmittedDraft(project, attempt) {
+        if (state.path === "/projects" && state.project === project) {
+          saveVisibleDraft(project);
+        }
+        const draft = draftFor(project);
+        if (
+          draft.title !== attempt.payload.title ||
+          draft.description !== attempt.payload.description
+        ) return;
+        state.projectDrafts[project] = { title: "", description: "" };
+        if (state.path === "/projects" && state.project === project) {
+          const title = $("#taskTitle");
+          const description = $("#taskDescription");
+          if (title && description) {
+            title.value = "";
+            description.value = "";
+          }
+        }
+      }
+      function matchAttempt(tasks, attempt) {
+        return tasks.find((task) =>
+          task.metadata?.dashboard_request_id === attempt.id
+        );
+      }
+      function reconcileAttempt(project, tasks) {
+        const attempt = attemptFor(project);
+        if (
+          !attempt ||
+          ["pending", "confirmed", "invalid"].includes(attempt.status)
+        ) return false;
+        const found = matchAttempt(tasks, attempt);
+        if (found) {
+          attempt.status = "confirmed";
+          attempt.taskId = found.id;
+          clearSubmittedDraft(project, attempt);
+          return true;
+        } else {
+          attempt.status = tasks.length >= 200 ? "unverifiable" : "absent";
+        }
+        persistTaskAttempts();
+        return false;
+      }
+      async function recheckAttempt(project) {
+        const attempt = attemptFor(project);
+        if (!attempt || attempt.status === "pending") return;
+        attempt.status = "uncertain";
+        if (state.project === project && state.path === "/projects") {
+          updateProjectFormStatus(project);
+        }
+        try {
+          const result = await api(
+            base + "/tasks?project_name=" + encodeURIComponent(project) +
+              "&limit=200",
+          );
+          reconcileAttempt(project, result.tasks || []);
+        } catch {
+          attempt.status = "query_failed";
+        }
+        if (state.project === project && state.path === "/projects") {
+          updateProjectFormStatus(project);
+          loadProjectItems(project, state.generation);
+        }
+      }
+      async function loadProjectItems(project, ticket) {
+        if (!project) {
+          $("#projectTasks").textContent = "프로젝트를 선택하세요.";
+          $("#projectRuns").textContent = "프로젝트를 선택하세요.";
+          return;
+        }
+        const [tasks, history] = await Promise.allSettled([
+          api(
+            base + "/tasks?project_name=" + encodeURIComponent(project) +
+              "&limit=200",
+          ),
+          api(
+            base + "/history?project_name=" + encodeURIComponent(project) +
+              "&limit=100",
+          ),
+        ]);
+        if (tasks.status === "fulfilled") {
+          reconcileAttempt(
+            project,
+            tasks.value.tasks || [],
+          );
+        } else if (attemptFor(project)?.status === "uncertain") {
+          attemptFor(project).status = "query_failed";
+        }
+        if (
+          !current(ticket) || state.project !== project ||
+          state.path !== "/projects"
+        ) return;
+        const taskNode = $("#projectTasks");
+        const runNode = $("#projectRuns");
+        if (!taskNode || !runNode) return;
+        taskNode.innerHTML = tasks.status === "fulfilled"
+          ? ((tasks.value.tasks || []).map((task) =>
+            `<div class="line"><strong>${
+              esc(task.title)
+            }</strong> <span class="badge">${esc(task.status)}</span><small>${
+              esc(task.id)
+            }</small><br>${
+              task.run_id
+                ? linkRun(task.run_id)
+                : task.assigned_agent_id
+                ? `<a href="/agents?agentId=${
+                  encodeURIComponent(task.assigned_agent_id)
+                }&section=runs" data-link>담당 자동화에서 실행</a>`
+                : '<a href="/agents?section=create" data-link>자동화에서 실행 설정</a>'
+            }</div>`
+          ).join("") || "작업 없음")
+          : "작업 조회 실패";
+        runNode.innerHTML = history.status === "fulfilled"
+          ? listRuns(history.value.runs)
+          : "실행 기록 조회 실패";
+        state.projectHistoryCursor = history.status === "fulfilled"
+          ? history.value.next_cursor || null
+          : null;
+        if (history.status === "fulfilled") {
+          $("#projectRunHeading").textContent = `실행 기록 ${
+            history.value.total_count ?? (history.value.runs || []).length
+          }건`;
+          $("#projectRunsMore").classList.toggle(
+            "hidden",
+            !state.projectHistoryCursor,
+          );
+        }
+        updateProjectFormStatus(project);
+        if (tasks.status === "rejected" || history.status === "rejected") {
+          status("프로젝트 일부 정보를 불러오지 못했습니다.", "error");
+        } else {
+          $("#updated").textContent = "마지막 갱신 " + date(Date.now());
+        }
+      }
+      async function loadMoreProjectRuns() {
+        const project = state.project;
+        const cursor = state.projectHistoryCursor;
+        const ticket = state.generation;
+        if (!project || !cursor) return;
+        const button = $("#projectRunsMore");
+        button.disabled = true;
+        try {
+          const page = await api(
+            base + "/history?project_name=" + encodeURIComponent(project) +
+              "&limit=100&cursor=" + encodeURIComponent(cursor),
+          );
+          if (
+            !current(ticket) || state.project !== project || !button.isConnected
+          ) return;
+          $("#projectRuns").insertAdjacentHTML(
+            "beforeend",
+            listRuns(page.runs || []),
+          );
+          state.projectHistoryCursor = page.next_cursor || null;
+          button.classList.toggle("hidden", !state.projectHistoryCursor);
+          button.disabled = false;
+        } catch (error) {
+          if (
+            current(ticket) && state.project === project && button.isConnected
+          ) {
+            button.disabled = false;
+            status("실행 기록 추가 조회 실패: " + errorText(error), "error");
+          }
+        }
+      }
+      function restoreTaskAttempts() {
+        try {
+          const saved = JSON.parse(sessionStorage.getItem("codeBridge.dashboard.taskAttempts.v1") || "{}");
+          const restored = Object.create(null);
+          for (const [project, attempt] of Object.entries(saved)) {
+            if (!attempt || typeof attempt.id !== "string" || !attempt.payload) continue;
+            restored[project] = { ...attempt, status: attempt.status === "pending" ? "uncertain" : attempt.status };
+          }
+          return restored;
+        } catch (_) { return Object.create(null); }
+      }
+      function persistTaskAttempts() {
+        try { sessionStorage.setItem("codeBridge.dashboard.taskAttempts.v1", JSON.stringify(state.taskAttempts)); }
+        catch (_) { /* Recovery remains available in the current page. */ }
+      }
+      async function postAttempt(project, attempt, ticket) {
+        attempt.status = "pending";
+        persistTaskAttempts();
+        if (current(ticket) && state.project === project) {
+          updateProjectFormStatus(project);
+        }
+        try {
+          const result = await api(base + "/tasks", {
+            method: "POST",
+            body: JSON.stringify(attempt.payload),
+          });
+          attempt.status = "confirmed";
+          attempt.taskId = result.task?.id || "완료";
+          clearSubmittedDraft(project, attempt);
+        } catch (error) {
+          attempt.status = [400, 422].includes(error.status)
+            ? "invalid"
+            : "uncertain";
+        }
+        persistTaskAttempts();
+        if (
+          current(ticket) && state.project === project &&
+          state.path === "/projects"
+        ) {
+          updateProjectFormStatus(project);
+          await loadProjectItems(project, ticket);
+        }
+      }
+      async function submitTask() {
+        const project = state.project;
+        if (
+          !project ||
+          attemptFor(project) &&
+            !["confirmed", "invalid"].includes(attemptFor(project).status)
+        ) return;
+        const draft = draftFor(project);
+        const title = draft.title.trim();
+        if (!title) return;
+        const id = crypto.randomUUID();
+        const attempt = {
+          id,
+          status: "pending",
+          payload: {
+            title,
+            description: draft.description,
+            project_name: project,
+            metadata: { dashboard_request_id: id },
+          },
+        };
+        state.taskAttempts[project] = attempt;
+        await postAttempt(project, attempt, state.generation);
+      }
+      function sendFrameSection(frame, section, agentId) {
+        const f = frame.querySelector("iframe");
+        if (!f?.contentWindow) return;
+        const invoke = () => {
+          const child = f.contentWindow;
+          if (typeof child.dashboardNavigate === "function") {
+            Promise.resolve(child.dashboardReady).then(() =>
+              child.dashboardNavigate({
+                section,
+                ...(agentId ? { agentId } : {}),
+              })
+            ).catch(() => status("내장 화면을 열지 못했습니다.", "error"));
+          }
+        };
+        if (typeof f.contentWindow.dashboardNavigate === "function") invoke();
+        else f.addEventListener("load", invoke, { once: true });
+      }
+      function openAutomation(section, agentId) {
+        navigate("/agents");
+        sendFrameSection(frame("agents"), section, agentId);
+      }
+      function openSettings(section) {
+        state.managementSection = section;
+        navigate("/settings");
+      }
+      window.addEventListener("message", (event) => {
+        if (
+          event.origin !== location.origin ||
+          event.data?.type !== "dashboard:navigate"
+        ) return;
+        const sources = ["agentsFrame", "settingsFrame"].map((id) =>
+          $("#" + id + " iframe")?.contentWindow
+        );
+        if (!sources.includes(event.source)) return;
+        const path = event.data.path;
+        if (
+          typeof path !== "string" ||
+          !/^\/(dashboard|inbox|projects|agents|settings|runs\/[^/?#]+)(?:\?[^#]*)?$/
+            .test(path)
+        ) return;
+        navigate(path);
+      });
+      window.addEventListener("popstate", renderRoute);
+      document.addEventListener("click", async (event) => {
+        const a = event.target.closest("a[data-link],a[data-nav]");
+        if (a) {
+          event.preventDefault();
+          navigate(a.getAttribute("href"));
+          if (a.dataset.agent) {
+            sendFrameSection(
+              frame("agents"),
+              a.dataset.section || "runs",
+              a.dataset.agent,
+            );
+          }
+          return;
+        }
+        if (event.target.id === "inboxMore") {
+          await loadMoreInbox();
+          return;
+        }
+        if (event.target.id === "eventsMore") {
+          await loadMoreEvents(event.target);
+          return;
+        }
+        if (event.target.id === "projectRunsMore") {
+          await loadMoreProjectRuns();
+          return;
+        }
+        if (event.target.id === "taskRecheck") {
+          await recheckAttempt(state.project);
+          return;
+        }
+        const item = event.target.closest("[data-item]");
+        if (item) {
+          selectItem(item.dataset.item);
+          return;
+        }
+        const decision = event.target.closest("[data-decision]");
+        if (decision) {
+          await decide(decision.dataset.decision);
+          return;
+        }
+        const resume = event.target.closest("[data-resume]");
+        if (resume) {
+          const ticket = state.generation;
+          const selected = state.selected;
+          resume.disabled = true;
+          try {
+            const r = await api(
+              base + "/approvals/" + encodeURIComponent(resume.dataset.resume) +
+                "/resume",
+              { method: "POST" },
+            );
+            if (
+              current(ticket) && state.path === "/inbox" &&
+              state.selected === selected
+            ) {
+              await loadInbox(ticket);
+              if (current(ticket)) {
+                status("재개 상태: " + r.resume_status, "success");
+              }
+            }
+          } catch (e) {
+            if (current(ticket) && state.selected === selected) {
+              const result = $("#actionResult");
+              if (result) result.textContent = errorText(e);
+              resume.disabled = false;
+            }
+          }
+          return;
+        }
+        const response = event.target.closest("[data-checkpoint]");
+        if (response) {
+          const ticket = state.generation;
+          const selected = state.selected;
+          const message = $("#checkpointAnswer").value.trim();
+          if (!message) return;
+          response.disabled = true;
+          try {
+            const result = await api(
+              base + "/tasks/" + encodeURIComponent(response.dataset.task) +
+                "/steps/" + encodeURIComponent(response.dataset.step) +
+                "/respond",
+              {
+                method: "POST",
+                body: JSON.stringify({ message, resume: true }),
+              },
+            );
+            delete state.checkpointDrafts[
+              `${response.dataset.checkpoint}:${response.dataset.step}`
+            ];
+            if (
+              current(ticket) && state.path === "/inbox" &&
+              state.selected === selected
+            ) {
+              await loadInbox(ticket);
+              if (current(ticket)) {
+                status(
+                  result.resume_status ||
+                    "응답을 저장했습니다. 실행 상태를 확인하세요.",
+                  "success",
+                );
+              }
+            }
+          } catch (e) {
+            if (current(ticket) && state.selected === selected) {
+              const result = $("#actionResult");
+              if (result) result.textContent = errorText(e);
+              response.disabled = false;
+            }
+          }
+          return;
+        }
+        const artifact = event.target.closest("[data-artifact]");
+        if (artifact) {
+          showArtifact(artifact.dataset.artifact);
+          return;
+        }
+        const review = event.target.closest("[data-review]");
+        if (review) {
+          const ticket = state.generation;
+          const runId = state.run?.run?.id;
+          if (!runId) return;
+          review.disabled = true;
+          try {
+            const r = await api(
+              base + "/runs/" + encodeURIComponent(runId) +
+                "/review",
+              {
+                method: "PUT",
+                body: JSON.stringify({
+                  reviewed: review.dataset.review === "true",
+                }),
+              },
+            );
+            if (
+              !current(ticket) || state.run?.run?.id !== runId ||
+              !review.isConnected
+            ) return;
+            state.run.review = r.review;
+            review.textContent = r.review?.reviewed
+              ? "검토 취소"
+              : "검토 완료 기록";
+            review.dataset.review = r.review?.reviewed ? "false" : "true";
+            review.previousElementSibling.textContent = r.review?.reviewed
+              ? "검토됨 · " + date(r.review.reviewed_at)
+              : "검토 전";
+          } catch (e) {
+            if (current(ticket) && state.run?.run?.id === runId) {
+              $("#runActionResult").textContent = errorText(e);
+            }
+          } finally {
+            if (
+              current(ticket) && state.run?.run?.id === runId &&
+              review.isConnected
+            ) review.disabled = false;
+          }
+          return;
+        }
+        if (event.target.closest("[data-continue]")) {
+          const button = event.target.closest("[data-continue]");
+          const ticket = state.generation;
+          const runId = state.run?.run?.id;
+          if (!runId) return;
+          button.disabled = true;
+          try {
+            await api(
+              base + "/runs/" + encodeURIComponent(runId) +
+                "/resume",
+              { method: "POST" },
+            );
+            if (current(ticket) && state.run?.run?.id === runId) {
+              $("#runActionResult").textContent =
+                "이어가기 요청 완료. 실행 상태를 다시 확인하세요.";
+            }
+          } catch (e) {
+            if (
+              current(ticket) && state.run?.run?.id === runId &&
+              button.isConnected
+            ) {
+              $("#runActionResult").textContent = errorText(e);
+              button.disabled = false;
+            }
+          }
+          return;
+        }
+        if (event.target.id === "browserSetup") {
+          openAutomation("setup");
+          return;
+        }
+        const settings = event.target.closest("[data-settings]");
+        if (settings) {
+          openSettings(settings.dataset.settings);
+          return;
+        }
+      });
+      document.addEventListener("change", (event) => {
+        if (event.target.id === "projectSelect") {
+          saveVisibleDraft(state.project);
+          state.project = event.target.value;
+          renderProjects(false);
+          loadProjectItems(state.project, state.generation);
+        }
+      });
+      document.addEventListener("input", (event) => {
+        if (event.target.dataset.draft) {
+          state.checkpointDrafts[event.target.dataset.draft] =
+            event.target.value;
+        }
+        if (event.target.id === "taskTitle") {
+          draftFor(state.project).title = event.target.value;
+        }
+        if (event.target.id === "taskDescription") {
+          draftFor(state.project).description = event.target.value;
+        }
+      });
+      document.addEventListener("submit", (event) => {
+        if (event.target.id === "taskForm") {
+          event.preventDefault();
+          submitTask();
+        }
+      });
+      $("#refresh").addEventListener("click", () => renderRoute());
+      renderRoute();
+    </script>
+  </body>
+</html>

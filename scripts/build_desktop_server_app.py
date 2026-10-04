@@ -34,6 +34,8 @@ SERVER_DIR = REPO_ROOT / "server"
 DEFAULT_ENTRY = REPO_ROOT / "desktop_server_app" / "launcher.py"
 DEFAULT_DIST_DIR = REPO_ROOT / "dist" / "desktop_server_app"
 DEFAULT_BUILD_DIR = REPO_ROOT / "build" / "desktop_server_app"
+KERNEL_ARTIFACT_DIR = SERVER_DIR / "vendor" / "agent-flow-core"
+KERNEL_INSTALLER = SCRIPT_DIR / "install_closed_kernel.py"
 SERVER_STAGE_DIRNAME = "packaged_server"
 SCRCPY_DIST_STAGE_DIRNAME = "packaged_scrcpy_dist"
 NODE_RUNTIME_STAGE_DIRNAME = "node_runtime"
@@ -42,7 +44,10 @@ NODE_DOWNLOAD_DIRNAME = "downloads"
 DEFAULT_NODE_VERSION = "v24.15.0"
 PLATFORM_TOOLS_STAGE_DIRNAME = "platform_tools"
 PLATFORM_TOOLS_EXTRACT_DIRNAME = "platform_tools_extract"
-DEFAULT_PLATFORM_TOOLS_VERSION = "37.0.0"
+# Google's repository2-3.xml keeps only the current platform-tools release;
+# 37.0.0 vanished from it when 37.0.1 shipped, and the 2.1.0 build failed on
+# the pin. Bump this to whatever the index lists when a build says so.
+DEFAULT_PLATFORM_TOOLS_VERSION = "37.0.1"
 ANDROID_REPOSITORY_BASE_URL = "https://dl.google.com/android/repository"
 ANDROID_REPOSITORY_INDEX_URL = f"{ANDROID_REPOSITORY_BASE_URL}/repository2-3.xml"
 SERVER_EXCLUDE_DIRS = {
@@ -50,6 +55,14 @@ SERVER_EXCLUDE_DIRS = {
     ".pytest_cache",
     ".venv",
     "__pycache__",
+    # The decision layer ships compiled, as an installed wheel that
+    # PyInstaller picks up from site-packages (ADR-002). Its source must not
+    # travel beside it: `server/` goes on `sys.path` ahead of site-packages,
+    # so a staged source copy would shadow the extension and the app would run
+    # — correctly, and readably — from the very files this is meant to close.
+    # Verified the wrong way round first: with both present, `__loader__` was
+    # `SourceFileLoader`.
+    "code_bridge_core",
     "scrcpy",
     "tests",
     "venv",
@@ -58,6 +71,10 @@ SERVER_EXCLUDE_SUFFIXES = {
     ".pyc",
 }
 PACKAGED_EXCLUDE_PATTERNS = {
+    # A wheel left under server/ (the closed-package build writes one there
+    # if asked) is a zip with an unsigned .so inside; notarization rejected
+    # the 2.1.0 DMG on exactly that file. Wheels are installed, not shipped.
+    "*.whl",
     "*.bak*",
     "*.backup*",
     "*.db*",
@@ -187,6 +204,102 @@ def check_required_tools(build_format: str) -> None:
             + ", ".join(missing)
             + (f"\n{install_hint}" if install_hint else "")
         )
+
+
+def verify_kernel_is_compiled() -> None:
+    """Refuse to package an app whose flow kernel is readable source.
+
+    PyInstaller collects site-packages from the interpreter running this
+    script, so whichever `agent_flow_core` is installed here is the one that
+    ends up inside the `.app`. A developer environment installs it from the
+    local checkout as plain `.py` — which is right for development and wrong
+    for distribution, and the difference is invisible in the build log.
+
+    That is not hypothetical. The `.dmg` built on 2026-06-28 carried 216 plain
+    `.py` files, and nothing in the build said so. A `.app` is a folder and
+    "Show Package Contents" is one click; a Developer ID signature proves who
+    built it, not that it cannot be read.
+
+    So the check runs here, before anything is packaged, and it asks the
+    artifact rather than the build steps: can this module's source be
+    recovered at runtime? `inspect.getsource` is the same question a reader
+    with the `.app` open would ask.
+
+    Build the closed wheel with the kernel repo's own script and install it
+    into this environment:
+
+        python scripts/build_closed_kernel.py            # in agent-flow-core
+        pip install --force-reinstall dist/agent_flow_core-<...>.whl
+
+    Source installs are supported for development, but never for packaging.
+    """
+
+    import inspect
+
+    # Both closed packages, checked the same way. `agent_flow_core` is the
+    # shared kernel; `code_bridge_core` is Code Bridge's own decision layer —
+    # the step vocabulary, the routing, the authoring gates and the
+    # Configurator. They are separate packages for the reason ADR-002 gives
+    # (the kernel's G5 invariant), and either one shipping as source defeats
+    # the same purpose.
+    for package, module, symbol, hint in (
+        (
+            "agent_flow_core",
+            "agent_flow_core.model",
+            "Flow",
+            "python scripts/build_closed_kernel.py",
+        ),
+        (
+            "code_bridge_core",
+            "code_bridge_core.step_cursor",
+            "StepCursor",
+            "python scripts/build_closed_kernel.py --package code_bridge_core"
+            " --source-root <code-bridge>/server"
+            " --pyproject <code-bridge>/server/code_bridge_core/pyproject.toml",
+        ),
+    ):
+        try:
+            loaded = getattr(__import__(module, fromlist=[symbol]), symbol)
+        except (ImportError, AttributeError) as exc:
+            raise SystemExit(
+                f"{package} is not installed in this environment, so the "
+                f"packaged app would have none:\n"
+                f"    {exc}\n"
+                f"Build and install it: {hint}"
+            ) from exc
+
+        try:
+            inspect.getsource(loaded)
+        except (OSError, TypeError):
+            continue  # Compiled: no source to recover. The shipping state.
+
+        raise SystemExit(
+            f"{package} installed here is readable source, and packaging it "
+            "would put that source inside the app.\n"
+            f"    {inspect.getfile(loaded)}\n"
+            "Build the compiled wheel and install it into this environment:\n"
+            f"    {hint}\n"
+            f"    pip install --force-reinstall dist/{package}-<...>.whl"
+        )
+
+
+def verify_kernel_artifact_manifest() -> None:
+    """Verify the vendored target and the installed compiled kernel."""
+    if not KERNEL_INSTALLER.is_file():
+        raise SystemExit(f"Kernel artifact verifier is missing: {KERNEL_INSTALLER}")
+    spec = importlib.util.spec_from_file_location(
+        "code_bridge_closed_kernel_installer", KERNEL_INSTALLER
+    )
+    verifier = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(verifier)
+    try:
+        _wheel, _manifest_path, manifest = verifier.select_artifact(
+            KERNEL_ARTIFACT_DIR
+        )
+        verifier.verify_installed(manifest["kernel_version"])
+    except (verifier.ArtifactError, subprocess.CalledProcessError) as exc:
+        raise SystemExit(f"Closed kernel artifact verification failed: {exc}") from exc
 
 
 def validate_inputs(entry: Path) -> None:
@@ -720,6 +833,16 @@ def stage_scrcpy_dist(build_dir: Path) -> Path:
         return ignored
 
     shutil.copytree(source_root, stage_root, ignore=ignore)
+    guard_root = SERVER_DIR / "devices" / "tango"
+    for name, target in (
+        ("tango-server.mjs", stage_root / "tango-server.mjs"),
+        ("TangoScrcpyService.mjs", stage_root / "src/server/goog-device/tango/TangoScrcpyService.mjs"),
+        ("control_decoder.mjs", stage_root / "src/server/goog-device/tango/control_decoder.mjs"),
+    ):
+        if not (guard_root / name).is_file():
+            raise FileNotFoundError(f"Tango device guard source missing: {guard_root / name}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(guard_root / name, target)
     return stage_root
 
 
@@ -871,8 +994,19 @@ def pyinstaller_args(args: argparse.Namespace, build_format: str, host: str) -> 
         str(work_path),
         "--specpath",
         str(spec_path),
+        # Analyse the *staged* tree, not the repo's server/. The repo tree still
+        # holds code_bridge_core as source, and pointing the analysis there put
+        # every one of its modules into the PYZ as bytecode — the 2.1.0 DMG
+        # shipped that way, readable, while the compiled wheel was left out.
         "--paths",
-        str(SERVER_DIR),
+        str(staged_server),
+        # Both closed packages are single extension modules in site-packages
+        # (Nuitka `--module`); nothing in the analysed tree names them by a
+        # static import PyInstaller can follow, so they must be asked for.
+        "--hidden-import",
+        "agent_flow_core",
+        "--hidden-import",
+        "code_bridge_core",
         "--collect-submodules",
         "fastapi",
         "--collect-submodules",
@@ -955,6 +1089,66 @@ def run(command: list[str], *, cwd: Path) -> None:
     subprocess.run(command, cwd=cwd, check=True)
 
 
+CLOSED_PACKAGES = ("agent_flow_core", "code_bridge_core")
+
+
+def frozen_executable(dist_dir: Path, app_name: str, build_format: str) -> Path:
+    if build_format in {"app", "dmg"}:
+        return dist_dir / f"{app_name}.app" / "Contents" / "MacOS" / app_name
+    suffix = ".exe" if platform.system().lower() == "windows" else ""
+    return dist_dir / app_name / f"{app_name}{suffix}"
+
+
+def verify_frozen_artifact_closed(dist_dir: Path, app_name: str, build_format: str) -> None:
+    """Ask the frozen artifact, not the build environment, whether it is closed.
+
+    `verify_kernel_is_compiled` checks the interpreter the build runs from.
+    That was not enough: the 2.1.0 DMG was built from an environment that
+    passed it, and still carried every `code_bridge_core` module as bytecode
+    in the PYZ (the analysis path pointed at the repo's source tree) while the
+    compiled extensions were absent (no hidden import named them). The app
+    then failed on `import agent_flow_core` at first launch. Two checks, both
+    against what PyInstaller actually produced:
+
+    1. No pure-Python entry for either closed package in the PYZ archive.
+    2. One extension module file per closed package in the frozen tree.
+    """
+    exe = frozen_executable(dist_dir, app_name, build_format)
+    if not exe.exists():
+        raise SystemExit(f"Frozen executable not found, cannot verify the artifact: {exe}")
+    listing = subprocess.run(
+        [sys.executable, "-m", "PyInstaller.utils.cliutils.archive_viewer", "-l", "-r", str(exe)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    # archive_viewer prints PYZ entries as "<type>, <offset>, <length>, '<name>'";
+    # type 0 is a module, 1 a package — both are bytecode a reader can recover.
+    leaked = sorted(
+        {
+            match.group(1)
+            for match in re.finditer(r"^\s*[01],\s*\d+,\s*\d+,\s*'((?:%s)(?:\.[\w.]+)?)'" % "|".join(CLOSED_PACKAGES), listing, re.M)
+        }
+    )
+    if leaked:
+        raise SystemExit(
+            "The frozen app contains closed-package modules as bytecode:\n"
+            + "".join(f"    {name}\n" for name in leaked[:12])
+            + ("    ...\n" if len(leaked) > 12 else "")
+            + "The analysis found their source. Check `--paths` and the staged tree."
+        )
+    root = exe.parent.parent if build_format in {"app", "dmg"} else exe.parent
+    for package in CLOSED_PACKAGES:
+        found = list(root.rglob(f"{package}.*.so")) + list(root.rglob(f"{package}.*.pyd"))
+        if not found:
+            raise SystemExit(
+                f"The frozen app has no compiled extension for {package}. "
+                "It is installed in the build environment but PyInstaller did not collect it; "
+                "the hidden import for it is missing or the wheel does not match this interpreter."
+            )
+    print(f"Closed packages verified in the frozen artifact: {', '.join(CLOSED_PACKAGES)}")
+
+
 def create_dmg(dist_dir: Path, app_name: str) -> None:
     app_path = dist_dir / f"{app_name}.app"
     if not app_path.exists():
@@ -979,7 +1173,200 @@ def create_dmg(dist_dir: Path, app_name: str) -> None:
     )
 
 
-def patch_macos_menu_bar_bundle(dist_dir: Path, app_name: str, build_format: str) -> None:
+ENTITLEMENTS = REPO_ROOT / "desktop_server_app" / "macos_entitlements.plist"
+
+
+def sign_macos_app(app_path: Path, identity: str | None) -> None:
+    """Sign the bundle — ad-hoc for development, Developer ID for release.
+
+    The ad-hoc signature (`--sign -`) this used to hardcode is not a
+    distribution signature. It satisfies the loader on the machine that built
+    it and nothing else: Gatekeeper refuses it everywhere, and notarization
+    will not accept it. So a real identity has to be asked for, and when one
+    is given three other things change with it.
+
+    **Hardened runtime** (`--options runtime`) is not optional — notarization
+    rejects a bundle without it. It is also what makes the entitlements file
+    matter, which is why `desktop_server_app/macos_entitlements.plist` had sat
+    in this repo unreferenced: nothing signed with a runtime to apply it to.
+
+    **Inside-out, not `--deep`.** `--deep` is Apple's own "for emergency use
+    only" flag and it silently skips nested code in ways that surface as a
+    notarization rejection long after the build. A PyInstaller bundle is full
+    of nested Mach-O — every `.so`, every `.dylib`, the vendored Node runtime,
+    `adb` — and each has to carry its own signature, innermost first, because
+    signing the outer bundle seals whatever is inside it at that moment.
+
+    **Existing signatures are replaced.** Vendored binaries arrive signed by
+    whoever shipped them (Node, platform-tools), and a Developer ID bundle
+    cannot contain foreign signatures it did not re-sign, so `--force` is
+    deliberate rather than convenient.
+    """
+
+    if not shutil.which("codesign"):
+        print("codesign is unavailable; the bundle is left unsigned.")
+        return
+
+    if identity is None:
+        run(["codesign", "--force", "--sign", "-", "--deep", str(app_path)], cwd=REPO_ROOT)
+        print(
+            "Signed ad-hoc. This artifact is NOT distributable — Gatekeeper "
+            "refuses it on any other machine. Pass --sign-identity for a "
+            "release build."
+        )
+        return
+
+    if not ENTITLEMENTS.exists():
+        raise SystemExit(
+            f"Hardened runtime needs an entitlements file and it is missing: "
+            f"{ENTITLEMENTS}\nA Python bundle signed without "
+            "`allow-unsigned-executable-memory` crashes on launch."
+        )
+
+    base = [
+        "codesign",
+        "--force",
+        "--timestamp",
+        "--options",
+        "runtime",
+        "--entitlements",
+        str(ENTITLEMENTS),
+        "--sign",
+        identity,
+    ]
+
+    inner = sorted(macho_files(app_path), key=lambda path: len(path.parts), reverse=True)
+    print(f"Signing {len(inner)} nested binaries, then the bundle.")
+    for path in inner:
+        run([*base, str(path)], cwd=REPO_ROOT)
+    run([*base, str(app_path)], cwd=REPO_ROOT)
+
+    # Asked of the artifact, not assumed from the commands: `--verify --strict`
+    # walks what was actually produced and checks every nested signature.
+    #
+    # Gatekeeper's own verdict (`spctl --assess`) is deliberately NOT asked
+    # here. A Developer ID bundle that has not been notarized yet is *supposed*
+    # to be rejected — "source=Unnotarized Developer ID" — so asking at this
+    # point fails every correct release build at the step before the one that
+    # fixes it. It is asked after stapling instead, where a rejection means
+    # something.
+    run(["codesign", "--verify", "--strict", "--verbose=2", str(app_path)], cwd=REPO_ROOT)
+
+
+def macho_files(root: Path) -> list[Path]:
+    """Every Mach-O binary inside the bundle.
+
+    Found by reading each file's magic number rather than by extension. A
+    PyInstaller bundle carries executables with no suffix at all (the vendored
+    `node`, `adb`), and an extension allow-list would leave exactly those
+    unsigned — which notarization reports as a rejected nested binary, not as
+    a missing file.
+    """
+    magics = {
+        b"\xcf\xfa\xed\xfe",  # 64-bit little-endian
+        b"\xce\xfa\xed\xfe",  # 32-bit little-endian
+        b"\xca\xfe\xba\xbe",  # universal (fat)
+        b"\xbe\xba\xfe\xca",  # universal, byte-swapped
+    }
+    found: list[Path] = []
+    for path in root.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            with path.open("rb") as handle:
+                if handle.read(4) in magics:
+                    found.append(path)
+        except OSError:
+            continue
+    return found
+
+
+def notarize_macos_artifact(artifact: Path, profile: str) -> None:
+    """Submit to Apple, wait, and staple the ticket onto the artifact.
+
+    Stapling is the step that is easy to skip and expensive to miss: without
+    it the artifact only opens on a machine that can reach Apple to check, so
+    it works on the build machine and fails for the first person who opens it
+    offline.
+
+    The credentials live in a keychain profile rather than being passed here.
+    That is Apple's own mechanism (`notarytool store-credentials`) and it
+    keeps the App Store Connect key out of this script, out of its arguments,
+    and out of any shell history.
+    """
+
+    if not shutil.which("xcrun"):
+        raise SystemExit("xcrun is unavailable, so the artifact cannot be notarized.")
+
+    probe = subprocess.run(
+        ["xcrun", "notarytool", "history", "--keychain-profile", profile],
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        raise SystemExit(
+            f"No notarization credentials are stored under the profile "
+            f"'{profile}'.\n"
+            "Store them once, on this machine:\n"
+            "    xcrun notarytool store-credentials \"" + profile + "\" \\\n"
+            "        --key <AuthKey_XXXXXXXX.p8> \\\n"
+            "        --key-id <the key id from the file name> \\\n"
+            "        --issuer <issuer UUID from App Store Connect > Keys>\n"
+            "The key and issuer belong to your Apple Developer account; this "
+            "script never handles them."
+        )
+
+    print(f"Submitting {artifact.name} to Apple. This takes a few minutes.")
+    run(
+        [
+            "xcrun",
+            "notarytool",
+            "submit",
+            str(artifact),
+            "--keychain-profile",
+            profile,
+            "--wait",
+        ],
+        cwd=REPO_ROOT,
+    )
+    run(["xcrun", "stapler", "staple", str(artifact)], cwd=REPO_ROOT)
+    run(["xcrun", "stapler", "validate", str(artifact)], cwd=REPO_ROOT)
+    # Now Gatekeeper's answer means something: this is the same check the
+    # first person to download the artifact triggers, and the only point in
+    # the build where a pass is evidence rather than luck.
+    if shutil.which("spctl"):
+        run(["spctl", "--assess", "--type", "open", "--context", "context:primary-signature",
+             "--verbose=2", str(artifact)], cwd=REPO_ROOT)
+
+
+def default_signing_identity() -> str | None:
+    """The Developer ID Application identity on this machine, if there is one.
+
+    Reported rather than used automatically. Signing for distribution is a
+    decision, and a build that silently picked up whichever certificate
+    happened to be installed would make release and development builds
+    indistinguishable from the command line.
+    """
+
+    if not shutil.which("security"):
+        return None
+    found = subprocess.run(
+        ["security", "find-identity", "-v", "-p", "codesigning"],
+        capture_output=True,
+        text=True,
+    )
+    for line in found.stdout.splitlines():
+        if "Developer ID Application" in line:
+            start = line.find('"')
+            end = line.rfind('"')
+            if start != -1 and end > start:
+                return line[start + 1 : end]
+    return None
+
+
+def patch_macos_menu_bar_bundle(
+    dist_dir: Path, app_name: str, build_format: str, identity: str | None
+) -> None:
     if build_format not in {"app", "dmg"} or platform.system().lower() != "darwin":
         return
 
@@ -991,11 +1378,17 @@ def patch_macos_menu_bar_bundle(dist_dir: Path, app_name: str, build_format: str
     with plist_path.open("rb") as fh:
         info = plistlib.load(fh)
     info["LSUIElement"] = True
+    # Same env var the MSI already uses for its ProductVersion. Without it
+    # PyInstaller leaves 0.0.0 in the bundle, which is what the 2026-08-30
+    # build shipped in "About" and what the notarization log then named.
+    desktop_version = os.environ.get("CODEBRIDGE_DESKTOP_VERSION")
+    if desktop_version:
+        info["CFBundleShortVersionString"] = desktop_version
+        info["CFBundleVersion"] = desktop_version
     with plist_path.open("wb") as fh:
         plistlib.dump(info, fh)
 
-    if shutil.which("codesign"):
-        run(["codesign", "--force", "--deep", "--sign", "-", str(app_path)], cwd=REPO_ROOT)
+    sign_macos_app(app_path, identity)
 
 
 def restore_macos_scrcpy_runtime_files(dist_dir: Path, app_name: str, include_scrcpy: bool, build_dir: Path) -> None:
@@ -1259,6 +1652,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bundle-identifier", default=BUNDLE_IDENTIFIER, help="macOS bundle identifier.")
     parser.add_argument("--include-scrcpy", action="store_true", help="Package server/scrcpy/dist assets if present.")
     parser.add_argument(
+        "--sign-identity",
+        default=None,
+        metavar="IDENTITY",
+        help=(
+            "Developer ID Application identity to sign with, enabling the "
+            "hardened runtime. Pass --sign-identity auto to use the one "
+            "installed on this machine. Omitted: ad-hoc signature, which is "
+            "fine for development and not distributable."
+        ),
+    )
+    parser.add_argument(
+        "--notarize",
+        default=None,
+        metavar="PROFILE",
+        help=(
+            "notarytool keychain profile to submit and staple with. Requires "
+            "--sign-identity: Apple rejects an unsigned or ad-hoc bundle."
+        ),
+    )
+    parser.add_argument(
         "--include-node-runtime",
         dest="include_node_runtime",
         action="store_true",
@@ -1316,9 +1729,33 @@ def main() -> None:
     if build_format == "onedir" and host not in {"linux", "macos", "windows"}:
         raise SystemExit(f"Unsupported one-folder build host: {host}")
 
+    if args.sign_identity == "auto":
+        args.sign_identity = default_signing_identity()
+        if args.sign_identity is None:
+            raise SystemExit(
+                "--sign-identity auto found no Developer ID Application "
+                "certificate in this keychain. Install one from your Apple "
+                "Developer account, or name an identity explicitly."
+            )
+        print(f"Signing with: {args.sign_identity}")
+    # Refused here rather than after the build: notarization is the last step
+    # and Apple would reject the submission, minutes later, for a reason that
+    # was knowable before anything was compiled.
+    if args.notarize and not args.sign_identity:
+        raise SystemExit(
+            "--notarize needs --sign-identity. Apple rejects an unsigned or "
+            "ad-hoc bundle, so submitting one only wastes the round trip."
+        )
+
     validate_inputs(args.entry.resolve())
     if not args.dry_run:
         check_required_tools(build_format)
+        # Before anything is packaged, not after: a build that discovers this
+        # at the end has already spent several minutes producing an artifact
+        # nobody should ship. A dry run skips it on purpose — printing the
+        # command is not producing an app.
+        verify_kernel_artifact_manifest()
+        verify_kernel_is_compiled()
     command = pyinstaller_args(args, build_format, host)
 
     if args.dry_run:
@@ -1326,6 +1763,7 @@ def main() -> None:
         return
 
     run(command, cwd=REPO_ROOT)
+    verify_frozen_artifact_closed(args.dist_dir.resolve(), args.name, build_format)
     restore_macos_scrcpy_runtime_files(args.dist_dir.resolve(), args.name, args.include_scrcpy, args.build_dir)
     restore_macos_node_runtime_files(
         args.dist_dir.resolve(),
@@ -1339,9 +1777,29 @@ def main() -> None:
         args.include_platform_tools,
         args.build_dir,
     )
-    patch_macos_menu_bar_bundle(args.dist_dir.resolve(), args.name, build_format)
+    patch_macos_menu_bar_bundle(
+        args.dist_dir.resolve(), args.name, build_format, args.sign_identity
+    )
     if build_format == "dmg":
         create_dmg(args.dist_dir.resolve(), args.name)
+        dmg_path = args.dist_dir.resolve() / f"{args.name}.dmg"
+        # The disk image carries its own signature and its own ticket. A
+        # notarized `.app` inside an unsigned `.dmg` still warns on download,
+        # because what the user opens first is the image.
+        if args.sign_identity:
+            run(
+                [
+                    "codesign",
+                    "--force",
+                    "--timestamp",
+                    "--sign",
+                    args.sign_identity,
+                    str(dmg_path),
+                ],
+                cwd=REPO_ROOT,
+            )
+        if args.notarize:
+            notarize_macos_artifact(dmg_path, args.notarize)
     if build_format == "msi":
         create_msi(args.dist_dir.resolve(), args.name)
 

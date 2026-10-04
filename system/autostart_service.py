@@ -47,7 +47,7 @@ class AutostartStatus:
 
 def _get_server_script_path() -> Path:
     """Get the path to server_cli.py."""
-    return Path(__file__).parent / "server_cli.py"
+    return _get_server_dir() / "server_cli.py"
 
 
 def _get_python_path() -> str:
@@ -70,7 +70,7 @@ def _get_python_path() -> str:
 
 def _get_server_dir() -> Path:
     """Get the server directory."""
-    return Path(__file__).parent
+    return Path(__file__).resolve().parents[1]
 
 
 # ============================================================================

@@ -68,6 +68,17 @@ class RestartRefireTest(unittest.IsolatedAsyncioTestCase):
         fire.assert_awaited_once()
         self.assertEqual(fire.await_args.args[0]["id"], schedule["id"])
 
+    async def test_restart_records_both_run_links_without_marking_success(self):
+        from agent.experience_service import summary
+        task, schedule = self._scheduled_task()
+        old = self._interrupted_run(task)
+        closed = reconcile_interrupted_runs()
+        replacement = self.store.create_run(task_id=task["id"], title="Restart")
+        await refire_after_shutdown(closed, fire=AsyncMock(return_value=replacement["id"]))
+        self.assertEqual(summary(old["id"])["related_runs"][0]["run_id"], replacement["id"])
+        self.assertEqual(summary(replacement["id"])["related_runs"][0]["run_id"], old["id"])
+        self.assertEqual(summary(replacement["id"])["verification"]["status"], "unknown")
+
     async def test_two_interrupted_runs_of_one_task_fire_the_schedule_once(self):
         task, schedule = self._scheduled_task()
         self._interrupted_run(task)

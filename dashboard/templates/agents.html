@@ -2503,14 +2503,15 @@
                 const fresh = await api(`/agents/${encodeURIComponent(canvasOpenedForAgent)}`);
                 const agent = fresh && (fresh.agent || fresh);
                 if (!agent || fresh.error) return;
+                if (currentView !== 'manage' || selectedAgentId !== canvasOpenedForAgent) return;
                 const revision = agent.flow_revision || null;
                 if (revision !== canvasOpenedRevision) {
-                    canvasOpenedRevision = revision;
                     // reloadAll first so the roster's step count and readiness
                     // move with the pane; selectAgent redraws the detail.
                     await reloadAll();
-                    if (selectedAgentId === canvasOpenedForAgent) {
-                        await selectAgent(canvasOpenedForAgent);
+                    if (currentView === 'manage' && selectedAgentId === canvasOpenedForAgent) {
+                        const refreshed = await selectAgent(canvasOpenedForAgent, { onlyWhileManaging: true });
+                        if (refreshed) canvasOpenedRevision = revision;
                     }
                 }
             } finally {
@@ -3063,40 +3064,14 @@
             if (!confirm(t('modal_schedule_confirm').replace('{when}', describeExpression(expression)))) return;
 
             setStatus('fixModalStatus', t('saving'));
-            // Same two-step creation `createSchedule()` uses: a schedule fires
-            // a task, never an agent directly, so the task is created first
-            // and the agent is assigned to it.
-            const taskResult = await api('/tasks', {
-                method: 'POST',
-                body: JSON.stringify({
-                    title: goal.slice(0, 80),
-                    goal,
-                    assigned_agent_id: agent.id,
-                    kind: 'general',
-                    source: 'dashboard',
-                }),
-            });
-            if (!taskResult || taskResult.error) {
-                setStatus('fixModalStatus', (taskResult && taskResult.error) || t('modal_schedule_task_failed'), true);
-                return;
-            }
-            const task = taskResult.task;
-            const scheduleResult = await api(`/tasks/${encodeURIComponent(task.id)}/schedules`, {
-                method: 'POST',
-                body: JSON.stringify({
-                    expression,
-                    name: goal.slice(0, 80),
-                    provider_id: agent.provider_id || null,
-                    model: agent.model || null,
-                    prompt: goal,
-                    enabled: true,
-                }),
-            });
+            const scheduleResult = await saveScheduleAttempt('fix:' + agent.id, agent, goal, expression);
             if (!scheduleResult || scheduleResult.error) {
                 setStatus('fixModalStatus', (scheduleResult && scheduleResult.error) || t('modal_schedule_failed'), true);
                 return;
             }
-            closeFixModal();
+            if (fixModalAgentId === agent.id && document.getElementById('fixSchedGoal')?.value.trim() === goal) {
+                closeFixModal();
+            }
             toast(t('modal_schedule_added_toast'));
             reloadAll();
         }
@@ -3427,8 +3402,10 @@
             renderAgentList();
         }
 
-        async function selectAgent(agentId) {
+        async function selectAgent(agentId, options) {
+            const onlyWhileManaging = options && options.onlyWhileManaging;
             const result = await api(`/agents/${encodeURIComponent(agentId)}`);
+            if (onlyWhileManaging && (currentView !== 'manage' || selectedAgentId !== agentId)) return;
             if (!result || result.error) {
                 toast(result && result.error ? result.error : 'Could not load agent');
                 return;
@@ -5336,6 +5313,102 @@
             return { kind: 'interval', seconds: Math.max(1, minutes) * 60 };
         }
 
+        // Each form owns an attempt. An uncertain write is reconciled by its
+        // exact token, never by a title that another task may legitimately share.
+        function restoreScheduleAttempts() {
+            try {
+                const saved = JSON.parse(sessionStorage.getItem('codeBridge.dashboard.scheduleAttempts.v1') || '[]');
+                if (!Array.isArray(saved)) return [];
+                return saved.filter(entry => Array.isArray(entry) && typeof entry[0] === 'string' &&
+                    entry[1] && typeof entry[1].token === 'string')
+                    .map(([key, value]) => [key, { ...value, busy: false }]);
+            } catch (_) { return []; }
+        }
+        const scheduleAttempts = new Map(restoreScheduleAttempts());
+
+        async function saveScheduleAttempt(form, agent, goal, expression) {
+            const persist = () => {
+                try { sessionStorage.setItem('codeBridge.dashboard.scheduleAttempts.v1', JSON.stringify([...scheduleAttempts])); }
+                catch (_) { /* Keep the current page's recovery state if storage is unavailable. */ }
+            };
+            const valid = expression.kind === 'daily_at'
+                ? /^([01]\d|2[0-3]):[0-5]\d$/.test(expression.time || '')
+                : expression.kind === 'interval' && Number.isFinite(expression.seconds) && expression.seconds >= 60;
+            if (!valid) return { error: currentLang === 'ko'
+                ? '매일 시각 또는 1분 이상의 간격을 입력하세요.'
+                : 'Enter a daily time or an interval of at least one minute.' };
+            const fingerprint = JSON.stringify([agent.id, goal, expression]);
+            let attempt = scheduleAttempts.get(form);
+            if (attempt && attempt.fingerprint !== fingerprint) {
+                return { error: currentLang === 'ko'
+                    ? '이전 예약의 저장 결과를 먼저 확인하세요. 이전 입력으로 재시도하면 생성 여부를 조회합니다.'
+                    : 'Resolve the previous schedule attempt first. Retry its original input to check the saved result.' };
+            }
+            if (!attempt) {
+                attempt = { fingerprint, token: crypto.randomUUID(), task: null, taskUncertain: false,
+                    scheduleUncertain: false, busy: false };
+                scheduleAttempts.set(form, attempt);
+            }
+            if (attempt.busy) return { error: currentLang === 'ko' ? '저장 중입니다.' : 'Saving.' };
+            attempt.busy = true;
+            const uncertain = () => ({ error: currentLang === 'ko'
+                ? '저장 결과 확인 필요. 다시 시도하면 기존 Task와 예약을 먼저 조회합니다.'
+                : 'Save outcome is unknown. Retry checks the existing task and schedule first.' });
+            try {
+                if (!attempt.task && attempt.taskUncertain) {
+                    const found = await api('/tasks?limit=200');
+                    if (!found || found.error || !Array.isArray(found.tasks)) return uncertain();
+                    attempt.task = found.tasks.find(task => task.metadata &&
+                        task.metadata.dashboard_schedule_attempt === attempt.token);
+                    // A bounded list cannot prove an earlier POST was never committed.
+                    if (!attempt.task) return uncertain();
+                }
+                if (!attempt.task) {
+                    attempt.taskUncertain = true;
+                    persist();
+                    const result = await api('/tasks', { method: 'POST', body: JSON.stringify({
+                        title: goal.slice(0, 80), goal, assigned_agent_id: agent.id,
+                        kind: 'general', source: 'dashboard',
+                        metadata: { dashboard_schedule_attempt: attempt.token },
+                    }) });
+                    if (!result || result.error || !result.task) {
+                        if (result && result.error_status >= 400 && result.error_status < 500) {
+                            scheduleAttempts.delete(form);
+                            return result;
+                        }
+                        return uncertain();
+                    }
+                    attempt.task = result.task;
+                }
+                const path = `/tasks/${encodeURIComponent(attempt.task.id)}/schedules`;
+                const existing = await api(path);
+                if (!existing || existing.error || !Array.isArray(existing.schedules)) return uncertain();
+                if (existing.schedules.length) {
+                    scheduleAttempts.delete(form);
+                    return { schedule: existing.schedules[0], recovered: true };
+                }
+                if (attempt.scheduleUncertain) return uncertain();
+                attempt.scheduleUncertain = true;
+                persist();
+                const result = await api(path, { method: 'POST', body: JSON.stringify({
+                    expression, name: goal.slice(0, 80), provider_id: agent.provider_id || null,
+                    model: agent.model || null, prompt: goal, enabled: true,
+                }) });
+                if (!result || result.error) {
+                    if (result && result.error_status >= 400 && result.error_status < 500) {
+                        attempt.scheduleUncertain = false;
+                        return result;
+                    }
+                    return uncertain();
+                }
+                scheduleAttempts.delete(form);
+                return result;
+            } finally {
+                attempt.busy = false;
+                persist();
+            }
+        }
+
         async function createSchedule() {
             const agentId = document.getElementById('schedAgent').value;
             const goal = document.getElementById('schedGoal').value.trim();
@@ -5350,41 +5423,15 @@
             const agent = agents.find((candidate) => candidate.id === agentId);
             setStatus('schedStatus', 'Creating…');
 
-            // A schedule fires a task, never an agent directly, so the task is
-            // created first and the agent is assigned to it.
-            const taskResult = await api('/tasks', {
-                method: 'POST',
-                body: JSON.stringify({
-                    title: goal.slice(0, 80),
-                    goal,
-                    assigned_agent_id: agentId,
-                    kind: 'general',
-                    source: 'dashboard',
-                }),
-            });
-            if (!taskResult || taskResult.error) {
-                setStatus('schedStatus', (taskResult && taskResult.error) || 'Task creation failed', true);
-                return;
-            }
-
-            const task = taskResult.task;
-            const scheduleResult = await api(`/tasks/${encodeURIComponent(task.id)}/schedules`, {
-                method: 'POST',
-                body: JSON.stringify({
-                    expression: buildExpression(),
-                    name: goal.slice(0, 80),
-                    provider_id: agent ? agent.provider_id : null,
-                    model: agent ? agent.model : null,
-                    prompt: goal,
-                    enabled: true,
-                }),
-            });
+            const scheduleResult = await saveScheduleAttempt('schedule', agent || { id: agentId }, goal, buildExpression());
             if (!scheduleResult || scheduleResult.error) {
                 setStatus('schedStatus', (scheduleResult && scheduleResult.error) || 'Schedule creation failed', true);
                 return;
             }
             setStatus('schedStatus', '');
-            document.getElementById('schedGoal').value = '';
+            if (document.getElementById('schedAgent').value === agentId && document.getElementById('schedGoal').value.trim() === goal) {
+                document.getElementById('schedGoal').value = '';
+            }
             toast('Schedule added');
             reloadAll();
         }
@@ -6706,7 +6753,7 @@
         updateLangButtons();
         newAgent();
         setView('manage');
-        reloadAll();
+        window.dashboardReady = reloadAll();
     </script>
 </body>
 </html>

@@ -1514,6 +1514,7 @@ async def _drive_workflow_steps(
             step.get("status") == "waiting_for_user"
             and _step_has_user_response(step)
             and _approval_checkpoint_for_step(step) is None
+            and not _resuming_browser_handoff_same_step(step)
         ):
             _complete_step(
                 task=store.get_task(task_id) or {"id": task_id},
@@ -5310,6 +5311,20 @@ def _step_has_user_response(step: dict[str, Any]) -> bool:
         return False
     responses = output.get("user_responses")
     return isinstance(responses, list) and len(responses) > 0
+
+
+def _resuming_browser_handoff_same_step(step: dict[str, Any]) -> bool:
+    step_input = step.get("input")
+    output = step.get("output")
+    if not isinstance(step_input, dict) or not isinstance(output, dict):
+        return False
+    checkpoint = output.get("checkpoint")
+    return (
+        step_input.get("workflow_type") == "browser_action"
+        and isinstance(checkpoint, dict)
+        and checkpoint.get("resume") == "same_step"
+        and bool(checkpoint.get("browser_session_id"))
+    )
 
 
 def _resume_launch_message(task: dict[str, Any], messages: list[dict[str, Any]]) -> str:

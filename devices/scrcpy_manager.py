@@ -1,6 +1,7 @@
 """Tango scrcpy process management for Android device mirroring."""
 
 import asyncio
+import filecmp
 import logging
 import os
 import shutil
@@ -171,6 +172,21 @@ class ScrcpyManager:
         tango_server = dist_path / "tango-server.mjs"
         tango_service = dist_path / "src" / "server" / "goog-device" / "tango" / "TangoScrcpyService.mjs"
         return tango_server.exists() and tango_service.exists()
+
+    def _install_tango_guard(self) -> None:
+        """Copy tracked Tango guard sources over bundled runtime entry points."""
+        source = Path(__file__).parent / "tango"
+        dist = self.scrcpy_path / "dist"
+        for name, target in (
+            ("tango-server.mjs", dist / "tango-server.mjs"),
+            ("TangoScrcpyService.mjs", dist / "src/server/goog-device/tango/TangoScrcpyService.mjs"),
+            ("control_decoder.mjs", dist / "src/server/goog-device/tango/control_decoder.mjs"),
+        ):
+            candidate = source / name
+            if not candidate.exists():
+                raise FileNotFoundError(f"Tango device guard source missing: {candidate}")
+            if not target.exists() or not filecmp.cmp(candidate, target, shallow=False):
+                shutil.copyfile(candidate, target)
 
     async def get_devices(self) -> list[dict]:
         """Get list of connected Android devices via ADB.
@@ -781,6 +797,11 @@ class ScrcpyManager:
                 "installed": True,
                 "node_installed": False,
             }
+
+        try:
+            self._install_tango_guard()
+        except OSError as exc:
+            return {"success": False, "error": f"Cannot install Tango device guard: {exc}"}
 
         try:
             last_error = "Tango server failed to start"

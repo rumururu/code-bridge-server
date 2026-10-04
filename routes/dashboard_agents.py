@@ -12,9 +12,11 @@ them only in ``_DASHBOARD_ONLY_ROUTERS`` keeps them off the tunnel-exposed API
 app entirely, so this adds no external surface.
 """
 
+from datetime import date
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from fastapi.responses import JSONResponse, Response
 
 from agent.agent_models import (
@@ -49,6 +51,7 @@ from system.browser_runtime_install_jobs import (
 )
 
 from . import agents as agents_routes
+from .agent_browser_rtc import active_dashboard_handoff
 # The mirrors below must declare the *route-level* body models, not the shared
 # draft models. `agents_routes` reads `body.commit_incomplete`, which only the
 # Body subclasses carry; typing a mirror with the plain model made every
@@ -57,6 +60,8 @@ from . import agents as agents_routes
 # route. Tests did not catch it — they exercised `routes/agents.py` directly.
 from .agents import AgentCreateBody, AgentUpdateBody, BuilderCommitBody
 from . import approvals as approvals_routes
+from . import experience as experience_routes
+from . import projects as projects_routes
 from . import policies as policies_routes
 from . import script_proposals as script_proposals_routes
 from . import scripts as scripts_routes
@@ -68,6 +73,125 @@ router = APIRouter(
     tags=["dashboard-agent"],
     dependencies=[Depends(require_local_access)],
 )
+
+
+class DashboardBrowserHandoffComplete(agents_routes.AgentTaskStepRespondCreate):
+    expected_browser_session_id: str = Field(min_length=1)
+    expected_run_id: str = Field(min_length=1)
+
+
+@router.get("/tasks/{task_id}/browser-handoff", response_model=None)
+async def get_task_browser_handoff(task_id: str) -> dict[str, Any]:
+    payload = active_dashboard_handoff(task_id)
+    if payload is None:
+        raise HTTPException(status_code=409, detail="Browser handoff is unavailable.")
+    return await agents_routes.get_task_browser_handoff(task_id)
+
+
+@router.post("/tasks/{task_id}/browser-handoff/complete", response_model=None)
+async def complete_task_browser_handoff(
+    task_id: str,
+    body: DashboardBrowserHandoffComplete,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    payload = active_dashboard_handoff(task_id)
+    if payload is None or str(payload["browser_session"]["id"]) != body.expected_browser_session_id or str(payload["browser_session"]["run_id"]) != body.expected_run_id:
+        raise HTTPException(status_code=409, detail="Browser handoff is unavailable or stale.")
+    return await agents_routes.complete_task_browser_handoff(task_id, body, background_tasks)
+
+
+@router.get("/overview")
+def overview() -> dict[str, Any]:
+    return experience_routes.overview()
+
+
+@router.get("/action-items")
+def action_items(
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    return experience_routes.action_items(limit=limit, cursor=cursor)
+
+
+@router.get("/history")
+def history(
+    project_name: str | None = None,
+    status: str | None = None,
+    since: date | None = None,
+    until: date | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    return experience_routes.history(project_name=project_name, status=status,
+                                     since=since, until=until, limit=limit, cursor=cursor)
+
+
+@router.get("/runs/{run_id}/summary")
+def run_summary(run_id: str) -> dict[str, Any]:
+    return experience_routes.summary(run_id)
+
+
+@router.put("/runs/{run_id}/review")
+def review_run(run_id: str, body: experience_routes.ReviewUpdate) -> dict[str, Any]:
+    from agent.agent_store import get_agent_store
+    from agent import experience_service
+
+    if get_agent_store().get_run(run_id) is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return {"review": experience_service.set_review(run_id, body.reviewed, "desktop_owner")}
+
+
+@router.post("/approvals/{approval_id}/resume")
+async def resume_decided_approval(approval_id: str) -> dict[str, Any]:
+    return await approvals_routes.resume_decided_approval(approval_id)
+
+
+@router.get("/runs/{run_id}/checkpoint")
+async def get_run_checkpoint(run_id: str) -> dict[str, Any]:
+    return await agents_routes.get_run_checkpoint(run_id)
+
+
+@router.post("/tasks/{task_id}/steps/{step_id}/respond", response_model=None)
+async def respond_to_task_step(
+    task_id: str,
+    step_id: str,
+    body: agents_routes.AgentTaskStepRespondCreate,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    return await agents_routes.respond_to_task_step(task_id, step_id, body, background_tasks)
+
+
+@router.get("/runs/{run_id}/artifacts")
+async def list_run_artifacts(run_id: str) -> dict[str, Any]:
+    return await agents_routes.list_run_artifacts(run_id)
+
+
+@router.get("/runs/{run_id}/artifacts/{artifact_id}/content")
+async def get_run_artifact_content(
+    run_id: str,
+    artifact_id: str,
+    max_chars: int = Query(default=60000, ge=1, le=200000),
+) -> dict[str, Any]:
+    return await agents_routes.get_run_artifact_content(run_id, artifact_id, max_chars=max_chars)
+
+
+@router.get("/projects", response_model=None)
+async def list_projects() -> dict[str, Any]:
+    return await projects_routes.list_projects()
+
+
+@router.get("/projects/{name}", response_model=None)
+async def get_project(name: str) -> dict[str, Any] | JSONResponse:
+    return await projects_routes.get_project(name)
+
+
+@router.post("/tasks/{task_id}/start", response_model=None)
+async def start_task(
+    task_id: str,
+    body: agents_routes.AgentTaskStartCreate,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    return await agents_routes.start_task(task_id, body, background_tasks)
 
 
 @router.get("/agents", response_model=None)

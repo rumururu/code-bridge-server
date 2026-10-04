@@ -229,12 +229,30 @@ class ApprovalStore:
         constraints: dict[str, Any] | None = None,
         approver: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        request = self.get_request(approval_id)
-        if not request:
-            return None
+        result, _ = self.resolve_decision(approval_id=approval_id, decision=decision,
+                                          scope=scope, reason=reason, constraints=constraints,
+                                          approver=approver)
+        return result
+
+    def resolve_decision(self, *, approval_id: str, decision: str, scope: str = "once",
+                         reason: str | None = None, constraints: dict[str, Any] | None = None,
+                         approver: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, bool]:
         decision_id = _new_id("dec")
         status = "approved" if decision.startswith("approve") else "denied"
-        with get_db_connection() as conn:
+        with get_db_connection(use_row_factory=True) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT status FROM approval_requests WHERE id = ?", (approval_id,)).fetchone()
+            if row is None:
+                return None, False
+            if row["status"] != "pending":
+                previous = conn.execute("""SELECT * FROM approval_decisions WHERE approval_id = ?
+                    ORDER BY created_at DESC, rowid DESC LIMIT 1""", (approval_id,)).fetchone()
+                if (previous and previous["decision"] == decision and previous["scope"] == scope
+                        and previous["reason"] == reason
+                        and _json_loads(previous["constraints_json"], {}) == (constraints or {})
+                        and _json_loads(previous["approver_json"], {}) == (approver or {})):
+                    return _row_to_decision(previous), False
+                raise DecisionConflict("approval already decided")
             conn.execute(
                 """
                 INSERT INTO approval_decisions (
@@ -257,12 +275,12 @@ class ApprovalStore:
                 """
                 UPDATE approval_requests
                 SET status = ?, resolved_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = ? AND status = 'pending'
                 """,
                 (status, approval_id),
             )
             conn.commit()
-        return self.get_decision(decision_id)
+        return self.get_decision(decision_id), True
 
     def get_latest_decision(self, approval_id: str) -> dict[str, Any] | None:
         """The most recent decision recorded against ``approval_id``, if any."""
@@ -288,6 +306,10 @@ class ApprovalStore:
 
 
 _approval_store: ApprovalStore | None = None
+
+
+class DecisionConflict(Exception):
+    """An approval was already resolved with a different decision."""
 
 
 def get_approval_store() -> ApprovalStore:

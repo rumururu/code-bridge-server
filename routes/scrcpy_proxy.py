@@ -6,7 +6,9 @@ the scrcpy WebSocket connection through the main API server.
 
 import asyncio
 import logging
+import os
 from typing import Optional
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 import websockets
@@ -49,6 +51,12 @@ async def scrcpy_stream_proxy(
         await websocket.close(code=4001, reason="Invalid API key")
         return
 
+    configured_device = os.environ.get("CODEBRIDGE_AGENT_ANDROID_DEVICE_ID") or os.environ.get("ANDROID_SERIAL")
+    qa_device = os.environ.get("CODEBRIDGE_SCRCPY_ALLOWED_UDID")
+    if not udid or (configured_device and udid != configured_device) or (qa_device and udid != qa_device):
+        await websocket.close(code=4003, reason="Device not allowed")
+        return
+
     scrcpy_manager = get_scrcpy_manager()
 
     if not scrcpy_manager.is_running:
@@ -58,10 +66,7 @@ async def scrcpy_stream_proxy(
     # Build local scrcpy WebSocket URL
     local_ws_url = (
         f"ws://127.0.0.1:{scrcpy_manager.port}/stream"
-        f"?udid={udid}"
-        f"&displayId={displayId}"
-        f"&maxSize={maxSize}"
-        f"&maxFps={maxFps}"
+        f"?{urlencode({'udid': udid, 'displayId': displayId, 'maxSize': maxSize, 'maxFps': maxFps})}"
     )
 
     logger.info(f"[ScrcpyProxy] Proxying to {local_ws_url}")

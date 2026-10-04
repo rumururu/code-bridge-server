@@ -256,7 +256,7 @@ def _has_active_run_for_task(task_id: str) -> bool:
     return any(run.get("status") in _ACTIVE_RUN_STATUSES for run in _runs_for_task(task_id))
 
 
-async def _fire_schedule(schedule: dict[str, Any]) -> None:
+async def _fire_schedule(schedule: dict[str, Any]) -> str | None:
     schedule_id = schedule["id"]
     task_id = schedule["task_id"]
     store = get_schedule_store()
@@ -330,6 +330,7 @@ async def _fire_schedule(schedule: dict[str, Any]) -> None:
             logger.exception(
                 "scheduler: failed to spawn execution for run %s", run_id
             )
+    return run_id
 
 
 async def refire_after_shutdown(
@@ -372,10 +373,21 @@ async def refire_after_shutdown(
                 schedule.get("id"), run.get("id"),
             )
             try:
-                await fire(schedule)
+                replacement_id = await fire(schedule)
             except Exception:
                 logger.exception("scheduler: re-fire of schedule %s failed", schedule.get("id"))
                 continue
+            if isinstance(replacement_id, str) and replacement_id and replacement_id != run.get("id"):
+                # Record the relationship, not a claim that the replacement
+                # finished successfully. The existing scheduler policy is unchanged.
+                try:
+                    agent_store = get_agent_store()
+                    agent_store.append_event(run_id=run["id"], event_type="schedule.refired",
+                                             app_event={"run_id": replacement_id, "schedule_id": schedule["id"]})
+                    agent_store.append_event(run_id=replacement_id, event_type="schedule.refire_origin",
+                                             app_event={"run_id": run["id"], "schedule_id": schedule["id"]})
+                except Exception:
+                    logger.exception("scheduler: could not record restart relationship")
             fired.append(schedule)
     return fired
 

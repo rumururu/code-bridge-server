@@ -270,7 +270,7 @@ def decide_approval(
     # be approved later by the same approver clicking again, and emit a
     # dedicated audit event so reviewers can see expired-then-actioned
     # attempts in the timeline.
-    if is_request_expired(request):
+    if request["status"] == "pending" and is_request_expired(request):
         expire_approval(
             approval_id,
             trigger="decision",
@@ -282,7 +282,7 @@ def decide_approval(
             "approval": store.get_request(approval_id) or request,
         }
 
-    if decision.startswith("approve") and request.get("desktop_only") and not is_desktop_channel(channel):
+    if request["status"] == "pending" and decision.startswith("approve") and request.get("desktop_only") and not is_desktop_channel(channel):
         get_audit_store().record_event(
             operation=request["operation"],
             run_id=request["run_id"],
@@ -309,16 +309,22 @@ def decide_approval(
     ):
         return {"error": "Invalid feedback reply override", "approval": request}
 
-    result = store.create_decision(
+    from approvals.approval_store import DecisionConflict
+    try:
+        result, created = store.resolve_decision(
         approval_id=approval_id,
         decision=decision,
         scope=scope,
         reason=reason,
         constraints=constraints or {},
         approver=approver or {},
-    )
+        )
+    except DecisionConflict:
+        return {"error": "approval already decided", "conflict": True, "approval": store.get_request(approval_id)}
     if result is None:
         return None
+    if not created:
+        return {"approval": store.get_request(approval_id), "decision": result}
 
     standing_rule: dict[str, Any] | None = None
     if decision == "approve_rule":
