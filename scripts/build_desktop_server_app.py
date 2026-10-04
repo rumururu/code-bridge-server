@@ -42,6 +42,8 @@ NODE_RUNTIME_STAGE_DIRNAME = "node_runtime"
 NODE_EXTRACT_DIRNAME = "node_extract"
 NODE_DOWNLOAD_DIRNAME = "downloads"
 DEFAULT_NODE_VERSION = "v24.15.0"
+WINDOWS_NODE_PTY_VERSION = "1.1.0"
+WINDOWS_NODE_PTY_SHA256 = "c7517f19083ddcb05f276904680eb2b11a6b5ecab778b8e4e5685a6d645b3f60"
 PLATFORM_TOOLS_STAGE_DIRNAME = "platform_tools"
 PLATFORM_TOOLS_EXTRACT_DIRNAME = "platform_tools_extract"
 # Google's repository2-3.xml keeps only the current platform-tools release;
@@ -846,9 +848,45 @@ def stage_scrcpy_dist(build_dir: Path) -> Path:
     return stage_root
 
 
+def stage_windows_node_pty(scrcpy: Path, build_dir: Path) -> None:
+    """Use the upstream Windows prebuild instead of copying a host-built addon."""
+    archive = build_dir / NODE_DOWNLOAD_DIRNAME / f"node-pty-{WINDOWS_NODE_PTY_VERSION}.tgz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    if not archive.is_file():
+        url = f"https://registry.npmjs.org/node-pty/-/node-pty-{WINDOWS_NODE_PTY_VERSION}.tgz"
+        with urllib.request.urlopen(url, timeout=60) as response, archive.open("wb") as output:
+            shutil.copyfileobj(response, output)
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != WINDOWS_NODE_PTY_SHA256:
+        raise SystemExit("Windows node-pty archive SHA-256 mismatch")
+    extracted = build_dir / "windows_node_pty"
+    if extracted.exists():
+        shutil.rmtree(extracted)
+    with tarfile.open(archive, "r:gz") as package:
+        package.extractall(extracted, filter="data")
+    root = extracted / "package"
+    if json.loads((root / "package.json").read_text())["version"] != WINDOWS_NODE_PTY_VERSION:
+        raise SystemExit("Windows node-pty package version mismatch")
+    # Other platforms and debug symbols are not part of the Windows runtime.
+    for platform_dir in (root / "prebuilds").iterdir():
+        if platform_dir.name != "win32-x64":
+            shutil.rmtree(platform_dir)
+    for symbols in root.rglob("*.pdb"):
+        symbols.unlink()
+    destination = scrcpy / "node_modules" / "node-pty"
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(root, destination)
+    manifest = scrcpy / "package.json"
+    data = json.loads(manifest.read_text())
+    data["dependencies"]["node-pty"] = WINDOWS_NODE_PTY_VERSION
+    manifest.write_text(json.dumps(data, indent=2) + "\n")
+
+
 def verify_windows_scrcpy_native(scrcpy: Path, node: Path) -> None:
     """Reject foreign addons and prove terminal creation with the shipped Node ABI."""
-    release = scrcpy / "node_modules" / "node-pty" / "build" / "Release"
+    package = scrcpy / "node_modules" / "node-pty"
+    prebuilt = package / "prebuilds" / "win32-x64"
+    release = prebuilt if prebuilt.is_dir() else package / "build" / "Release"
     required = ("pty.node", "conpty.node", "conpty_console_list.node")
     if not node.is_file() or any(not (release / name).is_file() for name in required):
         raise SystemExit("Windows scrcpy requires bundled Node and Windows-built node-pty addons")
@@ -860,7 +898,7 @@ def verify_windows_scrcpy_native(scrcpy: Path, node: Path) -> None:
     # explicitly, then exercise the ConPTY path used by current Windows hosts.
     probe = """
 const path = require('path');
-const release = path.resolve('node_modules/node-pty/build/Release');
+const release = process.argv[1];
 for (const name of ['pty.node', 'conpty.node', 'conpty_console_list.node']) {
   require(path.join(release, name));
 }
@@ -877,7 +915,7 @@ pty.onExit(event => {
 """
     try:
         result = subprocess.run(
-            [str(node), "-e", probe], cwd=scrcpy, capture_output=True,
+            [str(node), "-e", probe, str(release.resolve())], cwd=scrcpy, capture_output=True,
             text=True, timeout=20, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -1024,7 +1062,8 @@ def pyinstaller_args(args: argparse.Namespace, build_format: str, host: str) -> 
     if args.include_scrcpy:
         staged_scrcpy = stage_scrcpy_dist(build_dir)
         if host == "windows" and not args.dry_run:
-            node = staged_server / "vendor" / "node" / "node.exe"
+            stage_windows_node_pty(staged_scrcpy, build_dir)
+            node = staged_server / "vendor" / "node" / node_runtime_spec("windows").packaged_executable
             if not args.include_node_runtime:
                 node = Path(shutil.which("node") or "missing-node.exe")
             verify_windows_scrcpy_native(staged_scrcpy, node)
@@ -1815,7 +1854,7 @@ def main() -> None:
     verify_frozen_artifact_closed(args.dist_dir.resolve(), args.name, build_format)
     if host == "windows" and args.include_scrcpy:
         packaged = args.dist_dir.resolve() / args.name / "_internal" / "server"
-        node = packaged / "vendor" / "node" / "node.exe"
+        node = packaged / "vendor" / "node" / node_runtime_spec("windows").packaged_executable
         if not args.include_node_runtime:
             node = Path(shutil.which("node") or "missing-node.exe")
         verify_windows_scrcpy_native(packaged / "scrcpy" / "dist", node)
