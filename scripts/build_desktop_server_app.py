@@ -846,6 +846,50 @@ def stage_scrcpy_dist(build_dir: Path) -> Path:
     return stage_root
 
 
+def verify_windows_scrcpy_native(scrcpy: Path, node: Path) -> None:
+    """Reject foreign addons and prove terminal creation with the shipped Node ABI."""
+    release = scrcpy / "node_modules" / "node-pty" / "build" / "Release"
+    required = ("pty.node", "conpty.node", "conpty_console_list.node")
+    if not node.is_file() or any(not (release / name).is_file() for name in required):
+        raise SystemExit("Windows scrcpy requires bundled Node and Windows-built node-pty addons")
+    for addon in release.rglob("*.node"):
+        with addon.open("rb") as stream:
+            if stream.read(2) != b"MZ":
+                raise SystemExit(f"Windows scrcpy contains a foreign native addon: {addon}")
+    # Requiring node-pty alone does not load its Windows addons. Load each ABI
+    # explicitly, then exercise the ConPTY path used by current Windows hosts.
+    probe = """
+const path = require('path');
+const release = path.resolve('node_modules/node-pty/build/Release');
+for (const name of ['pty.node', 'conpty.node', 'conpty_console_list.node']) {
+  require(path.join(release, name));
+}
+const pty = require('node-pty').spawn(process.env.ComSpec || 'cmd.exe',
+  ['/d', '/c', 'echo CODEBRIDGE_PTY_OK'],
+  {cols: 80, rows: 24, cwd: process.cwd(), env: process.env, useConpty: true});
+let output = '';
+const timeout = setTimeout(() => { pty.kill(); process.exit(1); }, 10000);
+pty.onData(data => output += data);
+pty.onExit(event => {
+  clearTimeout(timeout);
+  process.exit(event.exitCode === 0 && output.includes('CODEBRIDGE_PTY_OK') ? 0 : 1);
+});
+"""
+    try:
+        result = subprocess.run(
+            [str(node), "-e", probe], cwd=scrcpy, capture_output=True,
+            text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SystemExit(f"Windows node-pty runtime probe failed: {exc}") from exc
+    if result.returncode:
+        raise SystemExit(
+            "Windows node-pty cannot spawn with the packaged Node runtime. "
+            "Rebuild node-pty on Windows with the matching Node headers and MSVC. "
+            + result.stderr[-2000:]
+        )
+
+
 def collect_data_items(include_scrcpy: bool, staged_server: Path) -> list[DataItem]:
     items = [
         DataItem(staged_server, "server"),
@@ -978,7 +1022,12 @@ def pyinstaller_args(args: argparse.Namespace, build_format: str, host: str) -> 
         else:
             stage_platform_tools_into_server(build_dir, staged_server, args.platform_tools_version, host)
     if args.include_scrcpy:
-        stage_scrcpy_dist(build_dir)
+        staged_scrcpy = stage_scrcpy_dist(build_dir)
+        if host == "windows" and not args.dry_run:
+            node = staged_server / "vendor" / "node" / "node.exe"
+            if not args.include_node_runtime:
+                node = Path(shutil.which("node") or "missing-node.exe")
+            verify_windows_scrcpy_native(staged_scrcpy, node)
 
     command = [
         sys.executable,
@@ -1764,6 +1813,12 @@ def main() -> None:
 
     run(command, cwd=REPO_ROOT)
     verify_frozen_artifact_closed(args.dist_dir.resolve(), args.name, build_format)
+    if host == "windows" and args.include_scrcpy:
+        packaged = args.dist_dir.resolve() / args.name / "_internal" / "server"
+        node = packaged / "vendor" / "node" / "node.exe"
+        if not args.include_node_runtime:
+            node = Path(shutil.which("node") or "missing-node.exe")
+        verify_windows_scrcpy_native(packaged / "scrcpy" / "dist", node)
     restore_macos_scrcpy_runtime_files(args.dist_dir.resolve(), args.name, args.include_scrcpy, args.build_dir)
     restore_macos_node_runtime_files(
         args.dist_dir.resolve(),
